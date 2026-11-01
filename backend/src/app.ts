@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { env } from './lib/env.js';
 import { handleError } from './lib/http.js';
+import { auth } from './routes/auth.js';
 import { health } from './routes/health.js';
 
 export const app = new Hono();
@@ -19,3 +20,4 @@ app.use(
 );
 
 app.route('/api/v1/health', health);
+app.route('/api/v1/auth', auth);

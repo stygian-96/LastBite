@@ -1,17 +1,12 @@
-import { beforeAll, describe, expect, test, vi } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { route, handleError } from '../../src/lib/http';
 import { ApiError } from '../../src/lib/errors';
 
-const ORIGIN = 'https://www.lastbite.test';
-
-beforeAll(() => {
-  process.env.DATABASE_URL = 'postgres://x';
-  process.env.FRONTEND_ORIGIN = ORIGIN;
-  process.env.COOKIE_DOMAIN = 'lastbite.test';
-});
+// Importing route loads the db client, which caches env, so use the configured origin.
+const ORIGIN = process.env.FRONTEND_ORIGIN!;
 
 function harness() {
   return new Hono().onError(handleError);

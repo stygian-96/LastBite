@@ -4,7 +4,8 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   TEST_DATABASE_URL: z.string().min(1).optional(),
   FRONTEND_ORIGIN: z.string().min(1),
-  COOKIE_DOMAIN: z.string().min(1),
+  // Leave empty or unset for localhost: cookies then carry no Domain attribute.
+  COOKIE_DOMAIN: z.string().optional(),
   ENCRYPTION_KEY: z.string().min(1),
   SESSION_SECRET: z.string().min(16),
   PORT: z.coerce.number().int().positive().default(4000),

@@ -2,9 +2,14 @@ import type { Context, Handler } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { HTTPException } from 'hono/http-exception';
 import type { ZodType } from 'zod';
+import { getCookie } from 'hono/cookie';
 import { ApiError } from './errors.js';
+import { env } from './env.js';
+import { getSessionUser, type SessionUser } from '../modules/auth/session.js';
 
-export type SessionUser = { id: string; role: 'user' | 'admin' };
+export type { SessionUser };
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export type RouteCtx<B> = {
   c: Context;
@@ -16,7 +21,7 @@ export type RouteCtx<B> = {
 };
 
 type RouteOpts<B> = {
-  // Only 'none' is supported until auth is wired in Task 4.
+  // 'user' needs a signed-in user, 'admin' needs an admin.
   auth?: 'none' | 'user' | 'admin';
   body?: ZodType<B>;
 };
@@ -38,6 +43,22 @@ export function route<B = undefined>(
   handler: (ctx: RouteCtx<B>) => Promise<unknown>,
 ): Handler {
   return async (c) => {
+    const now = new Date();
+    const token = getCookie(c, 'session');
+
+    // CSRF guard: a cookie-authenticated request that is not a plain read must
+    // come from the frontend. Cookie-less requests (webhooks) are unaffected.
+    if (token && !SAFE_METHODS.has(c.req.method) && c.req.header('origin') !== env().FRONTEND_ORIGIN) {
+      throw new ApiError('bad_origin', 403, 'Request origin not allowed');
+    }
+
+    let user: SessionUser | null = null;
+    if (opts.auth === 'user' || opts.auth === 'admin') {
+      user = token ? await getSessionUser(token, now) : null;
+      if (!user) throw new ApiError('unauthenticated', 401, 'Sign in to continue');
+      if (opts.auth === 'admin' && !user.isAdmin) throw new ApiError('forbidden', 403, 'Not allowed');
+    }
+
     let body = undefined as B;
     if (opts.body) {
       const raw: unknown = await c.req.json().catch(() => undefined);
@@ -50,9 +71,9 @@ export function route<B = undefined>(
       c,
       params: c.req.param() as Record<string, string>,
       body,
-      user: null,
+      user,
       ip,
-      now: new Date(),
+      now,
     });
     if (result instanceof Response) return result;
     return c.json(result ?? null);
