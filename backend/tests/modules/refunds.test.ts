@@ -672,7 +672,7 @@ describe('processRefunds', () => {
     const { refund, gp } = await cancelledOrder();
     expect(await processRefunds(now)).toBe(1);
     expect(gateway.refunds).toMatchObject([
-      { paymentId: gp.id, amountPaise: 10000, reverseTransfer: false, idempotencyKey: `${refund.id}-0` },
+      { paymentId: gp.id, amountPaise: 10000, reverseTransfer: true, idempotencyKey: `${refund.id}-0` },
     ]);
     expect(await refundRow(refund.id)).toMatchObject({
       status: 'pending',
@@ -699,22 +699,68 @@ describe('processRefunds', () => {
     expect((await refundRow(refund.id)).status).toBe('processed');
   });
 
-  test('refund reverses the transfer only if one exists', async () => {
+  test('a vendor cancel asks for the reversal, and only a held transfer is marked reversed', async () => {
     const none = await cancelledOrder();
     const released = await cancelledOrder();
     await setTransfer(released.payment.id, 'released');
     const onHold = await cancelledOrder();
     await setTransfer(onHold.payment.id, 'on_hold');
+    expect(none.refund.reverseTransfer).toBe(true);
 
     await processRefunds(now);
 
-    const sent = (paymentId: string) => gateway.refunds.find((r) => r.paymentId === paymentId)!;
-    expect(sent(none.gp.id).reverseTransfer).toBe(false);
-    expect(sent(released.gp.id).reverseTransfer).toBe(false);
-    expect(sent(onHold.gp.id).reverseTransfer).toBe(true);
+    expect(gateway.refunds.map((r) => r.reverseTransfer)).toEqual([true, true, true]);
     expect((await paymentRow(none.payment.id)).transferStatus).toBe('none');
     expect((await paymentRow(released.payment.id)).transferStatus).toBe('released');
     expect((await paymentRow(onHold.payment.id)).transferStatus).toBe('reversed');
+  });
+
+  test('every attempt sends the reversal saved at creation, whatever the transfer does meanwhile', async () => {
+    const { refund, payment } = await cancelledOrder();
+    await setTransfer(payment.id, 'on_hold');
+    await processRefunds(now);
+    gateway.setRefundStatus(gateway.refunds[0]!.id, 'failed');
+    await setTransfer(payment.id, 'released');
+    await deliver(refundEvent('refund.failed', gateway.refunds[0]!.id));
+
+    await processRefunds(now);
+
+    expect(gateway.refunds[1]).toMatchObject({ idempotencyKey: `${refund.id}-1`, reverseTransfer: true });
+    expect((await paymentRow(payment.id)).transferStatus).toBe('released');
+  });
+
+  test('a saved refund without a reversal never sends one, even with a held transfer', async () => {
+    const { payment, refund } = await cancelledOrder();
+    await setTransfer(payment.id, 'on_hold');
+    await db.update(refunds).set({ reverseTransfer: false }).where(eq(refunds.id, refund.id));
+
+    await processRefunds(now);
+
+    expect(gateway.refunds[0]!.reverseTransfer).toBe(false);
+    expect((await paymentRow(payment.id)).transferStatus).toBe('on_hold');
+  });
+
+  test('a failed refund without a reversal leaves a reversed transfer alone', async () => {
+    const { payment, refund } = await cancelledOrder();
+    await db.update(refunds).set({ reverseTransfer: false }).where(eq(refunds.id, refund.id));
+    await processRefunds(now);
+    await setTransfer(payment.id, 'reversed');
+    gateway.setRefundStatus(gateway.refunds[0]!.id, 'failed');
+
+    await deliver(refundEvent('refund.failed', gateway.refunds[0]!.id));
+
+    expect(await refundRow(refund.id)).toMatchObject({ attempts: 1, razorpayRefundId: null });
+    expect((await paymentRow(payment.id)).transferStatus).toBe('reversed');
+  });
+
+  test('a late payment refund never reverses a transfer', async () => {
+    const { payment, gp } = await cancelledOrder();
+    await setTransfer(payment.id, 'on_hold');
+    await applyCapture(capturedPayment(gp.orderId), now);
+    await processRefunds(now);
+
+    const [late] = (await refundsFor(payment.orderId)).filter((r) => r.reason !== 'vendor_cancelled');
+    expect(late).toMatchObject({ reverseTransfer: false, chargedTo: 'platform' });
   });
 
   test('a transfer stays on hold until the refund is sent', async () => {

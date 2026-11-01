@@ -14,14 +14,25 @@ export type NewRefund = {
   reason: 'vendor_cancelled' | 'late_payment' | 'duplicate_payment' | 'issue_resolution';
   chargedTo: 'vendor' | 'platform';
   createdBy?: string;
+  /**
+   * Whether the gateway reverses the transfer: for a vendor-charged refund of all that is left of the
+   * payment. Fixed here, so one idempotency key always carries one payload.
+   */
+  reverseTransfer?: boolean;
+  createdAt?: string;
 };
 
-/** Records a refund for the refund job to send. A second one for the same payment and reason is a no-op. */
-export async function createRefund(tx: Tx, r: NewRefund): Promise<void> {
-  await tx
+/**
+ * Records a refund for the refund job to send, and returns its ID. A second one for the same payment
+ * and reason is a no-op, returning undefined.
+ */
+export async function createRefund(tx: Tx, r: NewRefund): Promise<string | undefined> {
+  const [created] = await tx
     .insert(refunds)
     .values(r)
-    .onConflictDoNothing({ target: [refunds.paymentId, refunds.reason] });
+    .onConflictDoNothing({ target: [refunds.paymentId, refunds.reason] })
+    .returning({ id: refunds.id });
+  return created?.id;
 }
 
 /**
@@ -62,11 +73,12 @@ export async function countRefundFailure(
 /**
  * Applies the final word on a refund the gateway has an ID for, from a webhook or the sweep. The
  * caller has locked the row. Only pending rows count a failure, so a repeated report counts once.
- * The transfer goes back on hold, so that the resend asks for the reversal again.
+ * A refund that reversed the transfer puts it back on hold, as its resend reverses it again. Any
+ * other refund leaves the transfer alone: a reversal it finds came from another refund.
  */
 export async function settleRefund(
   tx: Tx,
-  refund: { id: string; attempts: number; status: string; paymentId: string },
+  refund: { id: string; attempts: number; status: string; paymentId: string; reverseTransfer: boolean },
   razorpayRefundId: string,
   result: 'processed' | 'failed',
 ): Promise<void> {
@@ -76,9 +88,11 @@ export async function settleRefund(
     return;
   }
   if (refund.status !== 'pending') return;
-  await tx
-    .update(payments)
-    .set({ transferStatus: 'on_hold' })
-    .where(and(eq(payments.id, refund.paymentId), eq(payments.transferStatus, 'reversed')));
+  if (refund.reverseTransfer) {
+    await tx
+      .update(payments)
+      .set({ transferStatus: 'on_hold' })
+      .where(and(eq(payments.id, refund.paymentId), eq(payments.transferStatus, 'reversed')));
+  }
   await countRefundFailure(tx, refund, razorpayRefundId);
 }

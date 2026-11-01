@@ -112,6 +112,7 @@ async function applyRefund(
       attempts: refunds.attempts,
       status: refunds.status,
       paymentId: refunds.paymentId,
+      reverseTransfer: refunds.reverseTransfer,
     })
     .from(refunds)
     .where(eq(refunds.razorpayRefundId, razorpayRefundId))

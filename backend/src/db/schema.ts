@@ -525,6 +525,7 @@ export const refunds = pgTable("refunds", {
 	sendErrors: smallint("send_errors").default(0).notNull(),
 	failedRazorpayIds: text("failed_razorpay_ids").array().default([]).notNull(),
 	lastCheckedAt: timestamp("last_checked_at", { withTimezone: true, mode: 'string' }),
+	reverseTransfer: boolean("reverse_transfer").default(false).notNull(),
 }, (table) => [
 	index("refunds_to_send_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((status = 'pending'::text) AND (razorpay_refund_id IS NULL))`),
 	index("refunds_to_check_idx").using("btree", table.lastCheckedAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((status = 'pending'::text) AND (razorpay_refund_id IS NOT NULL))`),

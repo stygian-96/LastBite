@@ -510,6 +510,7 @@ ALTER TABLE refunds ADD COLUMN sending_at timestamptz;
 ALTER TABLE refunds ADD COLUMN send_errors smallint NOT NULL DEFAULT 0;
 ALTER TABLE refunds ADD COLUMN failed_razorpay_ids text[] NOT NULL DEFAULT '{}';
 ALTER TABLE refunds ADD COLUMN last_checked_at timestamptz;
+ALTER TABLE refunds ADD COLUMN reverse_transfer boolean NOT NULL DEFAULT false;
 ```
 
 - `rate_limits` gives shared counters across serverless instances.
@@ -521,6 +522,7 @@ ALTER TABLE refunds ADD COLUMN last_checked_at timestamptz;
 - `refunds.send_errors` counts sends with an unclear result, which keep their idempotency key.
 - `refunds.failed_razorpay_ids` remembers gateway IDs counted as failed, so a late report of one is not redelivered.
 - `refunds.last_checked_at` lets the refund job ask the gateway about the longest-unchecked sent refund first.
+- `refunds.reverse_transfer` is fixed at creation, so one idempotency key always carries one payload. It is true for a vendor-charged refund of the whole remainder of a payment.
 
 ## 6. State machines
 

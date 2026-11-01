@@ -21,7 +21,7 @@ type Claimed = {
   amountPaise: number;
   paymentId: string;
   razorpayPaymentId: string | null;
-  transferStatus: string;
+  reverseTransfer: boolean;
   claimedAt: string;
 };
 
@@ -40,7 +40,7 @@ function claimRefunds(now: Date): Promise<Claimed[]> {
         amountPaise: refunds.amountPaise,
         paymentId: refunds.paymentId,
         razorpayPaymentId: payments.razorpayPaymentId,
-        transferStatus: payments.transferStatus,
+        reverseTransfer: refunds.reverseTransfer,
       })
       .from(refunds)
       .innerJoin(payments, eq(payments.id, refunds.paymentId))
@@ -102,7 +102,7 @@ function recordSent(row: Claimed, sent: GatewayRefund, at: Date): Promise<void> 
       .where(stillSending(row))
       .returning({ id: refunds.id });
     if (saved && sent.status === 'processed') await queueRefundIssued(tx, row.id);
-    if (saved && row.transferStatus === 'on_hold') {
+    if (saved && row.reverseTransfer) {
       await tx
         .update(payments)
         .set({ transferStatus: 'reversed' })
@@ -157,7 +157,7 @@ async function sendRefund(row: Claimed, clock: () => Date): Promise<boolean> {
     sent = await getGateway().refund({
       paymentId: row.razorpayPaymentId!,
       amountPaise: row.amountPaise,
-      reverseTransfer: row.transferStatus === 'on_hold',
+      reverseTransfer: row.reverseTransfer,
       idempotencyKey: `${row.id}-${row.attempts}`,
     });
   } catch (e) {
@@ -220,6 +220,7 @@ async function checkRefund(check: Check): Promise<void> {
         attempts: refunds.attempts,
         status: refunds.status,
         paymentId: refunds.paymentId,
+        reverseTransfer: refunds.reverseTransfer,
       })
       .from(refunds)
       .where(

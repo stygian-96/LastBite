@@ -23,7 +23,7 @@ const orderNotFound = () => new ApiError('not_found', 404, 'Order not found');
 const dropNotFound = () => new ApiError('not_found', 404, 'Drop not found');
 
 /** The payment that bought the bag: any other captured row was refunded as late or duplicate. */
-async function bagPayment(tx: Tx, orderId: string) {
+export async function bagPayment(tx: Tx, orderId: string) {
   const [payment] = await tx
     .select({ id: payments.id, amountPaise: payments.amountPaise })
     .from(payments)
@@ -43,7 +43,7 @@ async function bagPayment(tx: Tx, orderId: string) {
 }
 
 /** What is left of a payment after its refunds, those that failed aside. */
-async function unrefundedPaise(tx: Tx, payment: { id: string; amountPaise: number }): Promise<number> {
+export async function unrefundedPaise(tx: Tx, payment: { id: string; amountPaise: number }): Promise<number> {
   const [refunded] = await tx
     .select({ paise: sql<number>`coalesce(sum(${refunds.amountPaise}), 0)::int` })
     .from(refunds)
@@ -72,6 +72,7 @@ async function cancelPaidOrder(tx: Tx, order: Order, { actorId, reason, now }: C
       reason: 'vendor_cancelled',
       chargedTo: 'vendor',
       createdBy: actorId,
+      reverseTransfer: true,
     });
   }
   await queueVendorCancelled(tx, order.id, reason, remainder);
