@@ -23,8 +23,8 @@ export const vendorStaff = new Hono()
   )
   .delete(
     '/outlets/:id/staff',
-    route({ auth: 'user', body: z.object({ membershipId: z.uuid() }) }, async ({ user, body, now }) => {
-      await removeStaff(user!.id, body.membershipId, now);
+    route({ auth: 'user', body: z.object({ membershipId: z.uuid() }) }, async ({ user, params, body, now }) => {
+      await removeStaff(user!.id, body.membershipId, now, params.id!);
       return { ok: true };
     }),
   );

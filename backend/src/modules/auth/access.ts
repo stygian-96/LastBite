@@ -138,12 +138,20 @@ export async function addStaff(
 }
 
 /** Owner-only. Marks the membership removed; the next request from that person is refused. */
-export async function removeStaff(actorId: string, membershipId: string, now: Date): Promise<void> {
+export async function removeStaff(
+  actorId: string,
+  membershipId: string,
+  now: Date,
+  outletId?: string,
+): Promise<void> {
   const [target] = await db
     .select()
     .from(memberships)
     .where(and(eq(memberships.id, membershipId), isNull(memberships.removedAt)));
-  if (!target) throw new ApiError('not_found', 404, 'Staff member not found');
+  // When called for a specific outlet, a membership from any other outlet does not exist as far as the caller can tell.
+  if (!target || (outletId !== undefined && target.outletId !== outletId)) {
+    throw new ApiError('not_found', 404, 'Staff member not found');
+  }
   if (target.outletId === null) await requireBrandOwner(actorId, target.brandId);
   else await requireOutlet(actorId, target.outletId, ['owner']);
   if (target.role === 'owner') throw new ApiError('invalid_role', 400, 'Owners cannot be removed here');

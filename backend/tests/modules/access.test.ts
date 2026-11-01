@@ -204,6 +204,23 @@ describe('staff management', () => {
     await addStaff(owner.id, a.id, { phone: '9876543210', name: 'X', role: 'counter' });
   });
 
+  test('a membership from another outlet is rejected, even when the caller owns both', async () => {
+    const { owner, a, b } = await setup();
+    const m = await addStaff(owner.id, b.id, { phone: '9876543210', name: 'X', role: 'counter' });
+    expect(await failure(removeStaff(owner.id, m.id, T0, a.id))).toMatchObject({ code: 'not_found', status: 404 });
+
+    const token = await createSession(owner.id, new Date());
+    const res = await app.request(`/api/v1/vendor/outlets/${a.id}/staff`, {
+      method: 'DELETE',
+      headers: { cookie: `session=${token}`, origin: env().FRONTEND_ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ membershipId: m.id }),
+    });
+    expect(res.status).toBe(404);
+    const [row] = await db.select().from(memberships).where(eq(memberships.id, m.id));
+    expect(row!.removedAt).toBeNull();
+    await removeStaff(owner.id, m.id, T0, b.id);
+  });
+
   test('owner memberships cannot be removed through staff removal', async () => {
     const { owner } = await setup();
     const [om] = await db.select().from(memberships).where(eq(memberships.userId, owner.id));
