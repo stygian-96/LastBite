@@ -32,6 +32,12 @@ export async function addDocument(userId: string, raw: DocumentInput): Promise<D
   const [outlet] = await db.select().from(outlets).where(eq(outlets.id, input.outletId));
   if (!outlet) throw new ApiError('not_found', 404, 'Outlet not found');
 
+  // Under review nothing changes. A live outlet may add a renewal, which sits beside the approved file.
+  const live = outlet.status === 'live';
+  if (!live && outlet.status !== 'draft' && outlet.status !== 'changes_needed') {
+    throw new ApiError('not_editable', 409, 'This outlet can no longer be edited');
+  }
+
   const forOutlet = (OUTLET_KINDS as readonly string[]).includes(input.kind);
   let payoutAccountId: string | null = null;
   if (forOutlet) {
@@ -57,7 +63,14 @@ export async function addDocument(userId: string, raw: DocumentInput): Promise<D
     await tx
       .update(documents)
       .set({ status: 'replaced' })
-      .where(and(owner, eq(documents.kind, input.kind), inArray(documents.status, ['pending', 'approved', 'rejected'])));
+      .where(
+        and(
+          owner,
+          eq(documents.kind, input.kind),
+          // On a live outlet the approved file stays in force until an admin approves the new one.
+          inArray(documents.status, live ? ['pending', 'rejected'] : ['pending', 'approved', 'rejected']),
+        ),
+      );
     const [row] = await tx
       .insert(documents)
       .values({

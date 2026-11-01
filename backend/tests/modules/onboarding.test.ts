@@ -306,6 +306,48 @@ describe('documents', () => {
   });
 });
 
+describe('documents after review', () => {
+  const fssaiRows = (outletId: string) =>
+    db.select().from(documents).where(and(eq(documents.outletId, outletId), eq(documents.kind, 'fssai')));
+
+  test('draft and changes_needed replace an approved document', async () => {
+    const { owner, outlet } = await readyOutlet();
+    await db.update(documents).set({ status: 'approved' }).where(eq(documents.kind, 'fssai'));
+    await db.update(outlets).set({ status: 'changes_needed' }).where(eq(outlets.id, outlet.id));
+    await addDocument(owner.id, { outletId: outlet.id, kind: 'fssai', fileKey: docKey(owner.id) });
+    expect((await fssaiRows(outlet.id)).map((r) => r.status).sort()).toEqual(['pending', 'replaced']);
+  });
+
+  test('in_review refuses new documents', async () => {
+    const { owner, outlet } = await readyOutlet();
+    await submitOutlet(owner.id, outlet.id, T0);
+    expect(await failure(addDocument(owner.id, { outletId: outlet.id, kind: 'fssai', fileKey: docKey(owner.id) }))).toMatchObject({
+      code: 'not_editable',
+      status: 409,
+    });
+    expect(await fssaiRows(outlet.id)).toHaveLength(1);
+  });
+
+  test('live outlet adds a pending renewal and the approved file stays in force', async () => {
+    const { owner, outlet, pa } = await readyOutlet();
+    await db.update(documents).set({ status: 'approved' });
+    await db.update(outlets).set({ status: 'live' }).where(eq(outlets.id, outlet.id));
+
+    const fresh = await addDocument(owner.id, { outletId: outlet.id, kind: 'fssai', fileKey: docKey(owner.id) });
+    expect(fresh.status).toBe('pending');
+    expect((await fssaiRows(outlet.id)).map((r) => r.status).sort()).toEqual(['approved', 'pending']);
+
+    // A second renewal supersedes the first pending one but never the approved one.
+    await addDocument(owner.id, { outletId: outlet.id, kind: 'fssai', fileKey: docKey(owner.id) });
+    expect((await fssaiRows(outlet.id)).map((r) => r.status).sort()).toEqual(['approved', 'pending', 'replaced']);
+
+    // Payout-account documents follow the same rule.
+    await addDocument(owner.id, { outletId: outlet.id, kind: 'pan', fileKey: docKey(owner.id) });
+    const pan = await db.select().from(documents).where(and(eq(documents.payoutAccountId, pa.id), eq(documents.kind, 'pan')));
+    expect(pan.map((r) => r.status).sort()).toEqual(['approved', 'pending']);
+  });
+});
+
 describe('submitting', () => {
   test('submit lists every missing item', async () => {
     const owner = await makeUser();
@@ -440,6 +482,8 @@ describe('uploads', () => {
       { purpose: 'photo', contentType: 'text/html', size: 100 },
       { purpose: 'document', contentType: 'application/zip', size: 100 },
       { purpose: 'photo', contentType: 'application/pdf', size: 100 },
+      { purpose: 'photo', contentType: 'image/svg+xml', size: 100 },
+      { purpose: 'logo', contentType: 'image/gif', size: 100 },
       { purpose: 'document', contentType: 'application/pdf', size: 10 * MB + 1 },
       { purpose: 'photo', contentType: 'image/png', size: 0 },
       { purpose: 'photo', contentType: 'image/png' },

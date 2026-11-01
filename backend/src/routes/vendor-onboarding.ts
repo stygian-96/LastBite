@@ -10,19 +10,21 @@ import { getOutletStatus, saveOutletStep, startOutlet, submitOutlet } from '../m
 import { createPayoutAccount, signAgreement } from '../modules/onboarding/payout-accounts.js';
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-const EXTENSIONS: Record<string, string> = {
+// Only these types are accepted. SVG is left out on purpose: photos go to a public bucket and SVG can carry script.
+const EXTENSIONS = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
   'image/heic': 'heic',
   'application/pdf': 'pdf',
-};
+} as const;
+const CONTENT_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'application/pdf'] as const;
 const FOLDERS = { photo: 'photos', logo: 'logos', document: 'documents' } as const;
 
 const uploadBody = z
   .object({
     purpose: z.enum(['photo', 'logo', 'document']),
-    contentType: z.string().regex(/^(image\/[a-z0-9.+-]+|application\/pdf)$/),
+    contentType: z.enum(CONTENT_TYPES),
     size: z.number().int().min(1).max(MAX_UPLOAD_BYTES),
   })
   .refine((b) => b.purpose === 'document' || b.contentType.startsWith('image/'));
@@ -62,7 +64,7 @@ export const vendorOnboarding = new Hono()
   .post(
     '/uploads',
     route({ auth: 'user', body: uploadBody }, async ({ user, body }) => {
-      const key = `${FOLDERS[body.purpose]}/${user!.id}/${randomUUID()}.${EXTENSIONS[body.contentType] ?? 'bin'}`;
+      const key = `${FOLDERS[body.purpose]}/${user!.id}/${randomUUID()}.${EXTENSIONS[body.contentType]}`;
       const bucket = body.purpose === 'document' ? 'private' : 'public';
       const url = await getStore().signedUpload(key, body.contentType, bucket, MAX_UPLOAD_BYTES);
       return { key, url };
