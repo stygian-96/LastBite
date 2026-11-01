@@ -40,7 +40,8 @@ The design calls the product Saanjh and this folder calls it LastBite. Code uses
 | Layer | Choice | Why |
 |---|---|---|
 | Language | TypeScript | One language across backend and website |
-| App | Next.js route handlers | One codebase and one deploy for API, website, vendor and admin |
+| Backend | Hono on Node, in `backend/` | A separate, small API service that any frontend can call |
+| Frontend | Next.js, in `frontend/`, built later | Website, vendor and admin screens, separate from the API |
 | Database | PostgreSQL, Mumbai region | Row locks and constraints protect stock and money |
 | ORM | Drizzle | Plain SQL when we need it, such as the hold query |
 | Files | Private S3-compatible bucket | Documents stay private, served by short-lived signed links |
@@ -49,7 +50,9 @@ The design calls the product Saanjh and this folder calls it LastBite. Code uses
 | WhatsApp | WhatsApp Business provider | Template messages from the design |
 | Jobs | One cron call every minute to a protected endpoint | No queue system to run |
 
-Hosting: Vercel plus Supabase is the simplest fit, using Supabase only for Postgres, storage and cron. Nothing in this design depends on them, and the app can move to any Node host later.
+Hosting: the backend needs a Node host with a Mumbai region, and Supabase can provide Postgres, storage and cron. The frontend deploys on its own, such as on Vercel. Nothing in this design depends on these hosts.
+
+The two services share cookies by running on subdomains of one domain, such as `api.` and `www.`. The API allows only the frontend's origin, with credentials.
 
 We use our own OTP and session tables, not a hosted auth product. It is about two small tables, and customers, vendor staff and admins all share one phone-based identity.
 
