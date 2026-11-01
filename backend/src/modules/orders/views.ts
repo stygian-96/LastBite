@@ -140,3 +140,10 @@ export async function listMyOrders(userId: string, status: 'active' | 'past', no
   );
   return toViews(rows);
 }
+
+/** One order as its customer sees it, for a caller that has already checked access to the order outlet. */
+export async function orderViewById(orderId: string): Promise<OrderView> {
+  const [row] = await selectOrders(eq(orders.id, orderId));
+  if (!row) throw notFound();
+  return (await toViews([row]))[0]!;
+}

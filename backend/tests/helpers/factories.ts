@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { db } from '../../src/db/client.js';
 import { areas, brands, drops, listings, orders, outlets, payments, payoutAccounts, users } from '../../src/db/schema.js';
 
@@ -127,7 +128,12 @@ export async function makeDrop(o: Overrides<typeof drops> = {}) {
 }
 
 export async function makeOrder(o: Overrides<typeof orders> = {}) {
-  const drop = o.dropId ? undefined : await makeDrop();
+  // A drop given by ID lends its outlet and service date, so a test need not repeat them.
+  const drop = o.dropId
+    ? o.outletId && o.serviceDate
+      ? undefined
+      : (await db.select().from(drops).where(eq(drops.id, o.dropId)))[0]
+    : await makeDrop();
   const dropId = o.dropId ?? drop!.id;
   const outletId = o.outletId ?? drop!.outletId;
   const serviceDate = o.serviceDate ?? drop?.serviceDate ?? '2026-11-02';
