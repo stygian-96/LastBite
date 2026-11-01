@@ -157,8 +157,8 @@ const auditRows = (action: string) => db.select().from(auditLog).where(eq(auditL
 const setTransfer = (paymentId: string, transferStatus: string) =>
   db.update(payments).set({ transferStatus, razorpayTransferId: `trf_${paymentId}` }).where(eq(payments.id, paymentId));
 
-const refundEvent = (type: string, id: string) =>
-  JSON.stringify({ event: type, payload: { refund: { entity: { id } } } });
+const refundEvent = (type: string, id: string, paymentId?: string) =>
+  JSON.stringify({ event: type, payload: { refund: { entity: { id, payment_id: paymentId } } } });
 const deliver = (raw: string) => handleWebhook(raw, 'valid', `evt_${++seq}`, now);
 
 /** Resolves once this many connections are waiting on a lock. */
@@ -964,15 +964,50 @@ describe('refunds lost between the gateway and us', () => {
     let raw = '';
     gateway.refund = async (a) => {
       const sent = await send(a);
-      raw = refundEvent('refund.processed', sent.id);
+      raw = refundEvent('refund.processed', sent.id, a.paymentId);
       await expect(handleWebhook(raw, 'valid', early, now)).rejects.toThrow();
       return sent;
     };
     await processRefunds(now);
     expect(await refundRow(refund.id)).toMatchObject({ status: 'pending' });
+    expect(await auditRows('refund.unknown')).toHaveLength(0);
 
     await handleWebhook(raw, 'valid', early, now);
     expect((await refundRow(refund.id)).status).toBe('processed');
+  });
+
+  test('a refund we never made is audited once and returns 200, so the webhook stays on', async () => {
+    const { gp } = await sentRefund(); // Its refund has an ID, so no save of ours can be in flight.
+    const post = (raw: string) =>
+      app.request('/api/v1/webhooks/razorpay', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-razorpay-signature': 'valid',
+          'x-razorpay-event-id': `evt_${++seq}`,
+        },
+        body: raw,
+      });
+
+    expect((await post(refundEvent('refund.processed', 'rfnd_dash', gp.id))).status).toBe(200);
+    expect((await post(refundEvent('refund.failed', 'rfnd_dash', gp.id))).status).toBe(200);
+    expect(await auditRows('refund.unknown')).toMatchObject([
+      { entity: 'refund', detail: { razorpayRefundId: 'rfnd_dash', razorpayPaymentId: gp.id } },
+    ]);
+
+    const untouched = await paidOrder();
+    expect((await post(refundEvent('refund.processed', 'rfnd_other', untouched.gp.id))).status).toBe(200);
+    expect(await auditRows('refund.unknown')).toHaveLength(2);
+  });
+
+  test('a refund on another payment being sent does not make this event wait', async () => {
+    const sending = await cancelledOrder();
+    const other = await paidOrder();
+    await deliver(refundEvent('refund.processed', 'rfnd_dash', other.gp.id));
+    expect(await auditRows('refund.unknown')).toHaveLength(1);
+
+    await expect(deliver(refundEvent('refund.processed', 'rfnd_soon', sending.gp.id))).rejects.toThrow();
+    expect(await auditRows('refund.unknown')).toHaveLength(1);
   });
 
   test('a lost refund.processed is found by the sweep after 15 minutes', async () => {

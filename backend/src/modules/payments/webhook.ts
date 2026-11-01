@@ -1,8 +1,10 @@
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { and, eq, isNull, ne, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
-import { payments, refunds, webhookEvents } from '../../db/schema.js';
+import { auditLog, payments, refunds, webhookEvents } from '../../db/schema.js';
 import { getGateway, type GatewayPayment } from '../../integrations/payments.js';
+import { audit } from '../../lib/audit.js';
 import { ApiError } from '../../lib/errors.js';
 import { settleRefund } from '../refunds/create.js';
 import { applyCaptureInTx } from './capture.js';
@@ -11,9 +13,10 @@ const PAYMENT_EVENTS = new Set(['payment.captured', 'payment.failed']);
 const REFUND_EVENTS = new Set(['refund.processed', 'refund.failed']);
 
 const entity = z.object({ entity: z.object({ id: z.string().min(1) }) });
+const refundEntity = z.object({ entity: z.object({ id: z.string().min(1), payment_id: z.string().nullish() }) });
 const eventSchema = z.object({
   event: z.string().min(1),
-  payload: z.object({ payment: entity.optional(), refund: entity.optional() }).optional(),
+  payload: z.object({ payment: entity.optional(), refund: refundEntity.optional() }).optional(),
 });
 type Event = z.infer<typeof eventSchema>;
 
@@ -59,12 +62,50 @@ async function applyPayment(tx: Tx, eventType: string, gp: GatewayPayment, now: 
   // Anything else is a payment since refunded, or a failure event with nothing to record.
 }
 
+/** Whether a refund on this payment has gone to the gateway with its ID not saved yet. */
+async function refundBeingSaved(tx: Tx, razorpayPaymentId: string): Promise<boolean> {
+  const [unsaved] = await tx
+    .select({ id: refunds.id })
+    .from(refunds)
+    .innerJoin(payments, eq(payments.id, refunds.paymentId))
+    .where(
+      and(
+        eq(payments.razorpayPaymentId, razorpayPaymentId),
+        eq(refunds.status, 'pending'),
+        isNull(refunds.razorpayRefundId),
+      ),
+    );
+  return unsaved !== undefined;
+}
+
+/** Flags a refund we did not make, such as one from the dashboard, once however often it is reported. */
+async function flagUnknownRefund(tx: Tx, razorpayRefundId: string, razorpayPaymentId?: string | null): Promise<void> {
+  const [flagged] = await tx
+    .select({ id: auditLog.id })
+    .from(auditLog)
+    .where(and(eq(auditLog.action, 'refund.unknown'), sql`${auditLog.detail}->>'razorpayRefundId' = ${razorpayRefundId}`));
+  if (flagged) return;
+  // audit_log.entity_id is required, and this refund has no row of ours to point at.
+  await audit(tx, {
+    actorId: null,
+    action: 'refund.unknown',
+    entity: 'refund',
+    entityId: randomUUID(),
+    detail: { razorpayRefundId, razorpayPaymentId: razorpayPaymentId ?? null },
+  });
+}
+
 /**
- * A refund ID with no row may simply be saved a moment from now, so this throws and Razorpay delivers
- * it again, as with a capture. The exception is an ID already counted as failed: that has been dealt
- * with, and its resend has a new ID.
+ * A refund ID with no row is one of three things. Already counted as failed: dealt with, as its
+ * resend has a new ID. Our own save still in flight: this throws so Razorpay delivers it again, as
+ * with a capture. Anything else is not ours, and failing it would only get the webhook disabled.
  */
-async function applyRefund(tx: Tx, eventType: string, razorpayRefundId: string): Promise<void> {
+async function applyRefund(
+  tx: Tx,
+  eventType: string,
+  razorpayRefundId: string,
+  razorpayPaymentId?: string | null,
+): Promise<void> {
   const [refund] = await tx
     .select({
       id: refunds.id,
@@ -84,7 +125,11 @@ async function applyRefund(tx: Tx, eventType: string, razorpayRefundId: string):
     .select({ id: refunds.id })
     .from(refunds)
     .where(sql`${razorpayRefundId}::text = ANY(${refunds.failedRazorpayIds})`);
-  if (!counted) throw new Error(`No refund has ID ${razorpayRefundId} yet`);
+  if (counted) return;
+  if (razorpayPaymentId && (await refundBeingSaved(tx, razorpayPaymentId))) {
+    throw new Error(`No refund has ID ${razorpayRefundId} yet`);
+  }
+  await flagUnknownRefund(tx, razorpayRefundId, razorpayPaymentId);
 }
 
 /**
@@ -116,6 +161,6 @@ export async function handleWebhook(raw: string, signature: string, eventId: str
     if (!fresh) return;
 
     if (gp) await applyPayment(tx, event.event, gp, now);
-    else if (subject) await applyRefund(tx, event.event, subject);
+    else if (subject) await applyRefund(tx, event.event, subject, event.payload?.refund?.entity.payment_id);
   });
 }
