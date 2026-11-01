@@ -10,6 +10,9 @@ export type Issue = Pick<
   'id' | 'orderId' | 'reason' | 'description' | 'photoKey' | 'status' | 'createdAt'
 >;
 
+/** Where a customer's issue photos go: the private bucket, under their own ID. */
+export const ISSUE_PHOTO_FOLDER = 'issues';
+
 const REPORTABLE_STATUSES = ['paid', 'collected', 'no_show'];
 
 const starsInput = z.number().int().min(1).max(5);
@@ -39,13 +42,13 @@ export async function rateOrder(userId: string, orderId: string, stars: number):
 }
 
 /**
- * Records a problem with the customer's order. A photo goes up as a private upload first, under the
- * caller's own documents prefix, so that admins can read it through a signed link.
+ * Records a problem with the customer's order. A photo goes up through /me/uploads first, and must
+ * be one of the caller's own. Admins read it through a signed link.
  */
 export async function reportIssue(userId: string, orderId: string, raw: unknown): Promise<Issue> {
   const input = parseInput(issueInput, raw);
   const { photoKey } = input;
-  if (photoKey && (!photoKey.startsWith(`documents/${userId}/`) || photoKey.includes('..'))) {
+  if (photoKey && (!photoKey.startsWith(`${ISSUE_PHOTO_FOLDER}/${userId}/`) || photoKey.includes('..'))) {
     throw new ApiError('invalid_request', 400, 'Upload the photo first, then report the problem');
   }
 

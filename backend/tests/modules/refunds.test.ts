@@ -87,8 +87,9 @@ async function staffOf(outletId: string, role: 'owner' | 'manager' | 'counter' =
 }
 
 /** A pending vendor_cancelled refund for a freshly cancelled order. */
-async function cancelledOrder() {
+async function cancelledOrder(transfer?: string) {
   const paid = await paidOrder();
+  if (transfer) await setTransfer(paid.payment.id, transfer);
   const owner = await staffOf(paid.drop.outletId);
   await cancelOrder(owner.id, paid.order.id, 'quality', now);
   const [refund] = await refundsFor(paid.order.id);
@@ -672,7 +673,7 @@ describe('processRefunds', () => {
     const { refund, gp } = await cancelledOrder();
     expect(await processRefunds(now)).toBe(1);
     expect(gateway.refunds).toMatchObject([
-      { paymentId: gp.id, amountPaise: 10000, reverseTransfer: true, idempotencyKey: `${refund.id}-0` },
+      { paymentId: gp.id, amountPaise: 10000, reverseTransfer: false, idempotencyKey: `${refund.id}-0` },
     ]);
     expect(await refundRow(refund.id)).toMatchObject({
       status: 'pending',
@@ -699,25 +700,27 @@ describe('processRefunds', () => {
     expect((await refundRow(refund.id)).status).toBe('processed');
   });
 
-  test('a vendor cancel asks for the reversal, and only a held transfer is marked reversed', async () => {
+  test('a vendor cancel reverses only a transfer on hold at creation', async () => {
     const none = await cancelledOrder();
-    const released = await cancelledOrder();
-    await setTransfer(released.payment.id, 'released');
-    const onHold = await cancelledOrder();
-    await setTransfer(onHold.payment.id, 'on_hold');
-    expect(none.refund.reverseTransfer).toBe(true);
+    const released = await cancelledOrder('released');
+    const onHold = await cancelledOrder('on_hold');
+    expect(none.refund.reverseTransfer).toBe(false);
+    expect(released.refund.reverseTransfer).toBe(false);
+    expect(onHold.refund.reverseTransfer).toBe(true);
 
     await processRefunds(now);
 
-    expect(gateway.refunds.map((r) => r.reverseTransfer)).toEqual([true, true, true]);
+    const sent = (paymentId: string) => gateway.refunds.find((r) => r.paymentId === paymentId)!;
+    expect(sent(none.gp.id).reverseTransfer).toBe(false);
+    expect(sent(released.gp.id).reverseTransfer).toBe(false);
+    expect(sent(onHold.gp.id).reverseTransfer).toBe(true);
     expect((await paymentRow(none.payment.id)).transferStatus).toBe('none');
     expect((await paymentRow(released.payment.id)).transferStatus).toBe('released');
     expect((await paymentRow(onHold.payment.id)).transferStatus).toBe('reversed');
   });
 
   test('every attempt sends the reversal saved at creation, whatever the transfer does meanwhile', async () => {
-    const { refund, payment } = await cancelledOrder();
-    await setTransfer(payment.id, 'on_hold');
+    const { refund, payment } = await cancelledOrder('on_hold');
     await processRefunds(now);
     gateway.setRefundStatus(gateway.refunds[0]!.id, 'failed');
     await setTransfer(payment.id, 'released');
@@ -729,10 +732,9 @@ describe('processRefunds', () => {
     expect((await paymentRow(payment.id)).transferStatus).toBe('released');
   });
 
-  test('a saved refund without a reversal never sends one, even with a held transfer', async () => {
-    const { payment, refund } = await cancelledOrder();
+  test('a transfer held after the refund was created is not reversed', async () => {
+    const { payment } = await cancelledOrder();
     await setTransfer(payment.id, 'on_hold');
-    await db.update(refunds).set({ reverseTransfer: false }).where(eq(refunds.id, refund.id));
 
     await processRefunds(now);
 
@@ -742,7 +744,6 @@ describe('processRefunds', () => {
 
   test('a failed refund without a reversal leaves a reversed transfer alone', async () => {
     const { payment, refund } = await cancelledOrder();
-    await db.update(refunds).set({ reverseTransfer: false }).where(eq(refunds.id, refund.id));
     await processRefunds(now);
     await setTransfer(payment.id, 'reversed');
     gateway.setRefundStatus(gateway.refunds[0]!.id, 'failed');
@@ -754,8 +755,7 @@ describe('processRefunds', () => {
   });
 
   test('a late payment refund never reverses a transfer', async () => {
-    const { payment, gp } = await cancelledOrder();
-    await setTransfer(payment.id, 'on_hold');
+    const { payment, gp } = await cancelledOrder('on_hold');
     await applyCapture(capturedPayment(gp.orderId), now);
     await processRefunds(now);
 
@@ -764,8 +764,7 @@ describe('processRefunds', () => {
   });
 
   test('a transfer stays on hold until the refund is sent', async () => {
-    const { payment } = await cancelledOrder();
-    await setTransfer(payment.id, 'on_hold');
+    const { payment } = await cancelledOrder('on_hold');
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     gateway.refund = () => Promise.reject(new Error('gateway down'));
     await processRefunds(now);
@@ -800,8 +799,7 @@ describe('processRefunds', () => {
   });
 
   test('a refund.failed sends again as a new attempt, and reverses the transfer again', async () => {
-    const { refund, payment } = await cancelledOrder();
-    await setTransfer(payment.id, 'on_hold');
+    const { refund, payment } = await cancelledOrder('on_hold');
     await processRefunds(now);
     expect((await paymentRow(payment.id)).transferStatus).toBe('reversed');
 
@@ -881,8 +879,7 @@ describe('processRefunds', () => {
   });
 
   test('a failed response from the gateway is a definite failure', async () => {
-    const { refund, payment } = await cancelledOrder();
-    await setTransfer(payment.id, 'on_hold');
+    const { refund, payment } = await cancelledOrder('on_hold');
     gateway.refundStatus = 'failed';
     expect(await processRefunds(now)).toBe(0);
     expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 1, razorpayRefundId: null });
@@ -952,8 +949,7 @@ describe('processRefunds', () => {
   });
 
   test('a crash after sending does not double-refund', async () => {
-    const { refund, payment } = await cancelledOrder();
-    await setTransfer(payment.id, 'on_hold');
+    const { refund, payment } = await cancelledOrder('on_hold');
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     // The claim commits and the gateway takes the refund, but the ID is never saved.
@@ -1071,8 +1067,7 @@ describe('refunds lost between the gateway and us', () => {
 
   test('a lost refund.failed is found by the sweep, and goes through the shared rules', async () => {
     const { refund, payment, sentId } = await (async () => {
-      const c = await cancelledOrder();
-      await setTransfer(c.payment.id, 'on_hold');
+      const c = await cancelledOrder('on_hold');
       await processRefunds(now);
       return { ...c, sentId: gateway.refunds[0]!.id };
     })();

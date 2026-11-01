@@ -16,7 +16,8 @@ export type NewRefund = {
   createdBy?: string;
   /**
    * Whether the gateway reverses the transfer: for a vendor-charged refund of all that is left of the
-   * payment. Fixed here, so one idempotency key always carries one payload.
+   * payment, while the transfer is on hold. A released one is deducted from the next payout. Fixed
+   * here, so one idempotency key always carries one payload.
    */
   reverseTransfer?: boolean;
   createdAt?: string;
@@ -33,6 +34,24 @@ export async function createRefund(tx: Tx, r: NewRefund): Promise<string | undef
     .onConflictDoNothing({ target: [refunds.paymentId, refunds.reason] })
     .returning({ id: refunds.id });
   return created?.id;
+}
+
+/**
+ * Puts a failed refund back in the queue with new terms, returning its ID, or undefined if this
+ * payment and reason has no failed refund. Attempts stay, so the send carries a new key: the old
+ * ones went with other payloads. Failed gateway IDs stay too, so late reports of them are known.
+ */
+export async function reopenFailedRefund(
+  tx: Tx,
+  r: Pick<NewRefund, 'paymentId' | 'reason' | 'amountPaise' | 'chargedTo' | 'createdBy' | 'reverseTransfer'>,
+): Promise<string | undefined> {
+  const { paymentId, reason, ...terms } = r;
+  const [reopened] = await tx
+    .update(refunds)
+    .set({ ...terms, status: 'pending', razorpayRefundId: null, sendErrors: 0, sendingAt: null, lastCheckedAt: null })
+    .where(and(eq(refunds.paymentId, paymentId), eq(refunds.reason, reason), eq(refunds.status, 'failed')))
+    .returning({ id: refunds.id });
+  return reopened?.id;
 }
 
 /**

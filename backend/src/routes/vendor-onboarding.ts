@@ -1,32 +1,18 @@
-import { randomUUID } from 'node:crypto';
 import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { z } from 'zod';
 import { getStore } from '../integrations/storage.js';
 import { route } from '../lib/http.js';
+import { MAX_UPLOAD_BYTES, uploadFile, uploadKey } from '../lib/uploads.js';
 import { addDocument } from '../modules/onboarding/documents.js';
 import { getOutletStatus, saveOutletStep, startOutlet, submitOutlet } from '../modules/onboarding/outlets.js';
 import { createPayoutAccount, signAgreement } from '../modules/onboarding/payout-accounts.js';
 
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-// Only these types are accepted. SVG is left out on purpose: photos go to a public bucket and SVG can carry script.
-const EXTENSIONS = {
-  'image/jpeg': 'jpg',
-  'image/png': 'png',
-  'image/webp': 'webp',
-  'image/heic': 'heic',
-  'application/pdf': 'pdf',
-} as const;
-const CONTENT_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'application/pdf'] as const;
 const FOLDERS = { photo: 'photos', logo: 'logos', document: 'documents' } as const;
 
-const uploadBody = z
-  .object({
-    purpose: z.enum(['photo', 'logo', 'document']),
-    contentType: z.enum(CONTENT_TYPES),
-    size: z.number().int().min(1).max(MAX_UPLOAD_BYTES),
-  })
+const uploadBody = uploadFile
+  .extend({ purpose: z.enum(['photo', 'logo', 'document']) })
   .refine((b) => b.purpose === 'document' || b.contentType.startsWith('image/'));
 
 /** The caller's address: the proxy header when present, else the socket. */
@@ -64,7 +50,7 @@ export const vendorOnboarding = new Hono()
   .post(
     '/uploads',
     route({ auth: 'user', body: uploadBody }, async ({ user, body }) => {
-      const key = `${FOLDERS[body.purpose]}/${user!.id}/${randomUUID()}.${EXTENSIONS[body.contentType]}`;
+      const key = uploadKey(FOLDERS[body.purpose], user!.id, body.contentType);
       const bucket = body.purpose === 'document' ? 'private' : 'public';
       const url = await getStore().signedUpload(key, body.contentType, bucket, MAX_UPLOAD_BYTES);
       return { key, url };

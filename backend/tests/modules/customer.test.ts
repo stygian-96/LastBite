@@ -5,6 +5,7 @@ import { db } from '../../src/db/client.js';
 import { auditLog, follows, issues, notifications, orders, payments, refunds, sessions, users } from '../../src/db/schema.js';
 import { FakeMessenger, setMessenger } from '../../src/integrations/messaging.js';
 import { FakeGateway, setGateway } from '../../src/integrations/payments.js';
+import { FakeStore, setStore } from '../../src/integrations/storage.js';
 import { env } from '../../src/lib/env.js';
 import { ApiError } from '../../src/lib/errors.js';
 import {
@@ -28,11 +29,14 @@ const NOW = new Date('2026-11-02T10:00:00Z');
 const daysAgo = (n: number) => new Date(NOW.getTime() - n * 86_400_000).toISOString();
 
 let gateway: FakeGateway;
+let store: FakeStore;
 
 beforeEach(async () => {
   await resetDb();
   gateway = new FakeGateway();
   setGateway(gateway);
+  store = new FakeStore();
+  setStore(store);
 });
 
 const failure = (p: Promise<unknown>) =>
@@ -248,16 +252,41 @@ describe('issues', () => {
   test("a photo must be from the caller's own uploads", async () => {
     const user = await makeUser();
     const order = await collected(user.id);
-    const mine = `documents/${user.id}/photo.jpg`;
+    const mine = `issues/${user.id}/photo.jpg`;
     expect(await reportIssue(user.id, order.id, { reason: 'quality', photoKey: mine })).toMatchObject({ photoKey: mine });
 
     for (const photoKey of [
-      `documents/${randomUUID()}/photo.jpg`,
-      `documents/${user.id}/../${randomUUID()}/photo.jpg`,
+      `issues/${randomUUID()}/photo.jpg`,
+      `issues/${user.id}/../${randomUUID()}/photo.jpg`,
+      `documents/${user.id}/photo.jpg`,
       `photos/${user.id}/photo.jpg`,
     ]) {
       await expectError(reportIssue(user.id, order.id, { reason: 'quality', photoKey }), 'invalid_request', 400);
     }
+  });
+
+  test('POST /me/uploads gives a private link under the caller, usable on an issue', async () => {
+    const { user, token } = await signedIn();
+    const order = await collected(user.id);
+    const body = { contentType: 'image/jpeg', size: 1000 };
+    expect((await api(undefined, 'POST', '/me/uploads', body)).status).toBe(401);
+
+    const res = await api(token, 'POST', '/me/uploads', body);
+    expect(res.status).toBe(200);
+    const { key, url } = (await res.json()) as { key: string; url: string };
+    expect(key).toMatch(new RegExp(`^issues/${user.id}/[0-9a-f-]+\\.jpg$`));
+    expect(url).toContain(key);
+    expect(store.uploads).toEqual([{ key, contentType: 'image/jpeg', bucket: 'private', maxBytes: 10 * 1024 * 1024 }]);
+    expect(await reportIssue(user.id, order.id, { reason: 'quality', photoKey: key })).toMatchObject({ photoKey: key });
+  });
+
+  test('POST /me/uploads refuses other types and large files', async () => {
+    const { token } = await signedIn();
+    const upload = (b: unknown) => api(token, 'POST', '/me/uploads', b);
+    expect((await upload({ contentType: 'image/svg+xml', size: 1000 })).status).toBe(400);
+    expect((await upload({ contentType: 'image/png', size: 10 * 1024 * 1024 + 1 })).status).toBe(400);
+    expect((await upload({ contentType: 'image/png', size: 0 })).status).toBe(400);
+    expect(store.uploads).toEqual([]);
   });
 
   test('POST works through the route', async () => {
@@ -293,7 +322,7 @@ describe('issues', () => {
   test('issues carry a signed photo link and their order', async () => {
     const user = await makeUser();
     const order = await collected(user.id);
-    const key = `documents/${user.id}/photo.jpg`;
+    const key = `issues/${user.id}/photo.jpg`;
     await reportIssue(user.id, order.id, { reason: 'quality', photoKey: key });
     await reportIssue(user.id, order.id, { reason: 'other' });
 
@@ -431,9 +460,69 @@ describe('adminRefund', () => {
     expect((await paymentFor(order.id)).transferStatus).toBe('reversed');
   });
 
+  test('a released transfer is not reversed', async () => {
+    const order = await collected((await makeUser()).id);
+    await db.update(payments).set({ transferStatus: 'released' }).where(eq(payments.orderId, order.id));
+    await refund(order.id, 10000);
+    expect(await refundsFor(order.id)).toMatchObject([{ reverseTransfer: false }]);
+  });
+
+  test('a failed admin refund is reused on a new key, and audited', async () => {
+    const user = await makeUser();
+    const order = await collected(user.id);
+    const issue = await reportIssue(user.id, order.id, { reason: 'quality' });
+    await refund(order.id, 4000);
+    const [first] = await refundsFor(order.id);
+    await db
+      .update(refunds)
+      .set({ status: 'failed', attempts: 3, razorpayRefundId: 'rfnd_old', sendErrors: 2, failedRazorpayIds: ['rfnd_old'] })
+      .where(eq(refunds.id, first!.id));
+    await db.update(payments).set({ transferStatus: 'on_hold' }).where(eq(payments.orderId, order.id));
+
+    await refund(order.id, 10000, 'vendor', issue.id);
+
+    expect(await refundsFor(order.id)).toMatchObject([
+      {
+        id: first!.id,
+        amountPaise: 10000,
+        status: 'pending',
+        razorpayRefundId: null,
+        sendErrors: 0,
+        attempts: 3,
+        failedRazorpayIds: ['rfnd_old'],
+        reverseTransfer: true,
+      },
+    ]);
+    expect(await auditRows('refund.reopen')).toMatchObject([
+      { actorId: adminId, entity: 'refund', entityId: first!.id, detail: { amountPaise: 10000, issueId: issue.id } },
+    ]);
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]!.status).toBe('resolved');
+
+    await processRefunds(NOW);
+    expect(gateway.refunds).toMatchObject([{ idempotencyKey: `${first!.id}-3`, reverseTransfer: true }]);
+    await expectError(refund(order.id, 100), 'already_refunded', 409);
+  });
+
+  test('a reused refund takes the new charge and reversal, and keeps to the remainder', async () => {
+    const order = await collected((await makeUser()).id);
+    await refund(order.id, 10000);
+    const [first] = await refundsFor(order.id);
+    await db.update(refunds).set({ status: 'failed', attempts: 3, reverseTransfer: true }).where(eq(refunds.id, first!.id));
+
+    await expectError(refund(order.id, 10001), 'refund_too_large', 400);
+    expect(await refundsFor(order.id)).toMatchObject([{ status: 'failed', amountPaise: 10000 }]);
+
+    await refund(order.id, 2500, 'platform');
+    expect(await refundsFor(order.id)).toMatchObject([
+      { status: 'pending', amountPaise: 2500, chargedTo: 'platform', reverseTransfer: false },
+    ]);
+    expect(await auditRows('refund.create')).toHaveLength(1);
+  });
+
   test('a vendor refund of what is left after a part-refund also reverses', async () => {
     const order = await collected((await makeUser()).id);
     const payment = await paymentFor(order.id);
+    await db.update(payments).set({ transferStatus: 'on_hold' }).where(eq(payments.id, payment.id));
     await db.insert(refunds).values({
       orderId: order.id,
       paymentId: payment.id,
@@ -671,6 +760,26 @@ describe('changeUserPhone', () => {
     expect((await db.select().from(users).where(eq(users.id, other.id)))[0]!.phone).toBe(other.phone);
     expect(await getSessionUser(kept, new Date())).not.toBeNull();
     expect(await auditRows('user.phone_change')).toHaveLength(1);
+  });
+
+  test("moves the old number's pending messages to the new one", async () => {
+    const admin = await makeUser({ isAdmin: true });
+    const user = await makeUser();
+    const message = { template: 'otp', variables: {}, channel: 'sms' };
+    await db.insert(notifications).values([
+      { dedupeKey: 'pending', phone: user.phone, ...message },
+      { dedupeKey: 'sent', phone: user.phone, status: 'sent', ...message },
+      { dedupeKey: 'other', phone: '+919111111111', ...message },
+    ]);
+
+    await changeUserPhone(admin.id, user.id, NEW_PHONE);
+
+    const rows = await db.select().from(notifications);
+    expect(Object.fromEntries(rows.map((n) => [n.dedupeKey, n.phone]))).toEqual({
+      pending: NEW_PHONE,
+      sent: user.phone,
+      other: '+919111111111',
+    });
   });
 
   test('needs a valid number and a live user', async () => {

@@ -25,7 +25,7 @@ const dropNotFound = () => new ApiError('not_found', 404, 'Drop not found');
 /** The payment that bought the bag: any other captured row was refunded as late or duplicate. */
 export async function bagPayment(tx: Tx, orderId: string) {
   const [payment] = await tx
-    .select({ id: payments.id, amountPaise: payments.amountPaise })
+    .select({ id: payments.id, amountPaise: payments.amountPaise, transferStatus: payments.transferStatus })
     .from(payments)
     .where(
       and(
@@ -72,7 +72,7 @@ async function cancelPaidOrder(tx: Tx, order: Order, { actorId, reason, now }: C
       reason: 'vendor_cancelled',
       chargedTo: 'vendor',
       createdBy: actorId,
-      reverseTransfer: true,
+      reverseTransfer: payment.transferStatus === 'on_hold',
     });
   }
   await queueVendorCancelled(tx, order.id, reason, remainder);

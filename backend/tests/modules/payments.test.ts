@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import { db, pool, withTx } from '../../src/db/client.js';
-import { auditLog, drops, orders, outlets, payments, refunds, webhookEvents } from '../../src/db/schema.js';
+import { auditLog, drops, notifications, orders, outlets, payments, refunds, webhookEvents } from '../../src/db/schema.js';
 import { env } from '../../src/lib/env.js';
 import { ApiError } from '../../src/lib/errors.js';
 import { FakeGateway, setGateway, type GatewayPayment } from '../../src/integrations/payments.js';
 import { createSession } from '../../src/modules/auth/session.js';
+import { deleteAccount } from '../../src/modules/customer/profile.js';
 import { expireHolds } from '../../src/modules/orders/expire.js';
 import { reserveDrop } from '../../src/modules/orders/reserve.js';
 import { applyCapture } from '../../src/modules/payments/capture.js';
@@ -587,6 +588,14 @@ describe('applyCapture', () => {
     await reserveDrop({ dropId: drop.id, anonId: 'next', ip: '1.1.1.1' }, later);
     await applyCapture(gp, later);
     await expectLateRefund(order.id, payment.id, 1);
+  });
+
+  test('late capture for a deleted user refunds as late_payment and takes no stock', async () => {
+    const { user, order, payment, gp } = await expiredOrder();
+    await deleteAccount(user.id, later);
+    await applyCapture(gp, later);
+    await expectLateRefund(order.id, payment.id, 0);
+    expect(await db.select().from(notifications)).toEqual([]);
   });
 
   test('late capture after sales ended refunds as late_payment', async () => {

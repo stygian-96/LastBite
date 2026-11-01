@@ -7,8 +7,9 @@ import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { normalizePhone } from '../auth/otp.js';
+import { movePendingTo } from '../notifications/enqueue.js';
 import { bagPayment, unrefundedPaise } from '../refunds/cancel.js';
-import { createRefund } from '../refunds/create.js';
+import { createRefund, reopenFailedRefund } from '../refunds/create.js';
 
 const ORDER_LIMIT = 100;
 const STATS_WINDOW_MS = 30 * 86_400_000;
@@ -159,8 +160,9 @@ async function lockOpenIssue(tx: Tx, issueId: string, orderId: string): Promise<
 
 /**
  * Records a refund of up to what is left of the payment that bought the bag, for the refund job to
- * send. Only a vendor-charged refund of all that is left reverses the transfer. Holding the order
- * keeps this from racing a vendor cancel, which refunds the remainder under the same lock.
+ * send. Only a vendor-charged refund of all that is left reverses the transfer, and only while it
+ * is on hold. UNIQUE (payment_id, reason) allows one per payment, so a refund that failed is reused.
+ * Holding the order keeps this from racing a vendor cancel, which refunds under the same lock.
  */
 export async function adminRefund(adminId: string, orderId: string, raw: RefundInput, now: Date): Promise<void> {
   const { amountPaise, chargedTo, issueId } = parseInput(refundInput, raw);
@@ -174,17 +176,17 @@ export async function adminRefund(adminId: string, orderId: string, raw: RefundI
     if (!payment) throw new ApiError('not_refundable', 409, 'This order has no payment to refund');
 
     const remainder = await unrefundedPaise(tx, payment);
-    const refundId = await createRefund(tx, {
-      orderId,
+    const terms = {
       paymentId: payment.id,
-      amountPaise,
       reason: 'issue_resolution',
+      amountPaise,
       chargedTo,
       createdBy: adminId,
-      reverseTransfer: chargedTo === 'vendor' && amountPaise === remainder,
-      createdAt: now.toISOString(),
-    });
-    // Checked in this order so that a repeat always reads as one. Throwing undoes the insert.
+      reverseTransfer: chargedTo === 'vendor' && amountPaise === remainder && payment.transferStatus === 'on_hold',
+    } as const;
+    const created = await createRefund(tx, { ...terms, orderId, createdAt: now.toISOString() });
+    const refundId = created ?? (await reopenFailedRefund(tx, terms));
+    // Checked in this order so that a repeat always reads as one. Throwing undoes the write.
     if (!refundId) throw new ApiError('already_refunded', 409, 'This payment already has an admin refund');
     if (amountPaise > remainder) throw new ApiError('refund_too_large', 400, 'That is more than is left of the payment');
 
@@ -194,7 +196,7 @@ export async function adminRefund(adminId: string, orderId: string, raw: RefundI
     }
     await audit(tx, {
       actorId: adminId,
-      action: 'refund.create',
+      action: created ? 'refund.create' : 'refund.reopen',
       entity: 'refund',
       entityId: refundId,
       detail: { orderId, paymentId: payment.id, amountPaise, chargedTo, issueId: issueId ?? null },
@@ -205,8 +207,8 @@ export async function adminRefund(adminId: string, orderId: string, raw: RefundI
 // ---------- Accounts ----------
 
 /**
- * Moves a user to a new number and ends their sessions, so the old phone is signed out. The audit
- * row keeps only the last 4 digits, as an audit row outlives an account deletion.
+ * Moves a user and their queued messages to a new number, and ends their sessions, so the old phone
+ * is signed out. The audit row keeps only the last 4 digits, as it outlives an account deletion.
  */
 export async function changeUserPhone(adminId: string, userId: string, phone: string): Promise<void> {
   const e164 = normalizePhone(phone);
@@ -219,6 +221,7 @@ export async function changeUserPhone(adminId: string, userId: string, phone: st
       if (!user || user.deletedAt) throw notFound('User');
       await tx.update(users).set({ phone: e164 }).where(eq(users.id, userId));
       await tx.delete(sessions).where(eq(sessions.userId, userId));
+      await movePendingTo(tx, user.phone, e164);
       await audit(tx, {
         actorId: adminId,
         action: 'user.phone_change',

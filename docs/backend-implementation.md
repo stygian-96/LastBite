@@ -522,7 +522,7 @@ ALTER TABLE refunds ADD COLUMN reverse_transfer boolean NOT NULL DEFAULT false;
 - `refunds.send_errors` counts sends with an unclear result, which keep their idempotency key.
 - `refunds.failed_razorpay_ids` remembers gateway IDs counted as failed, so a late report of one is not redelivered.
 - `refunds.last_checked_at` lets the refund job ask the gateway about the longest-unchecked sent refund first.
-- `refunds.reverse_transfer` is fixed at creation, so one idempotency key always carries one payload. It is true for a vendor-charged refund of the whole remainder of a payment.
+- `refunds.reverse_transfer` is fixed at creation, so one idempotency key always carries one payload. It is true for a vendor-charged refund of the whole remainder of a payment while the transfer is on hold. A released transfer is deducted from the next payout instead.
 
 ## 6. State machines
 
@@ -678,6 +678,7 @@ All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code":
 | POST | `/orders/:id/rating` | Rate a collected order |
 | POST | `/orders/:id/issues` | Report a problem |
 | GET, PATCH, DELETE | `/me` | Profile, preferences, account deletion |
+| POST | `/me/uploads` | Get a signed upload link for an issue photo |
 | GET | `/me/following` | Followed outlets |
 | PUT, DELETE | `/outlets/:id/follow` | Follow, unfollow |
 

@@ -72,6 +72,14 @@ export async function cancelPendingFor(tx: Tx, phone: string): Promise<void> {
     .where(and(eq(notifications.phone, phone), eq(notifications.status, 'pending')));
 }
 
+/** A user's number changed, so what is still queued for them follows it. */
+export async function movePendingTo(tx: Tx, from: string, to: string): Promise<void> {
+  await tx
+    .update(notifications)
+    .set({ phone: to })
+    .where(and(eq(notifications.phone, from), eq(notifications.status, 'pending')));
+}
+
 export async function enqueue(tx: Tx, n: NewNotification): Promise<void> {
   await enqueueMany(tx, [n]);
 }

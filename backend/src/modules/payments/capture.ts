@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq, ne, sql } from 'drizzle-orm';
 import { withTx, type Tx } from '../../db/client.js';
-import { auditLog, orders, payments } from '../../db/schema.js';
+import { auditLog, orders, payments, users } from '../../db/schema.js';
 import type { GatewayPayment } from '../../integrations/payments.js';
 import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
@@ -53,10 +53,21 @@ async function markPaid(tx: Tx, orderId: string, now: Date): Promise<void> {
 }
 
 /**
- * Sells an expired order its bag again, if it can still be sold. Stock is taken before the order
- * changes: a reserve holds the drop and may then wait on a changed order row (see endHold).
+ * Whether the order's customer has deleted their account. The key lock meets the lock deleteAccount
+ * takes, so a deletion is either seen here or waits, and then finds this order paid.
+ */
+async function customerDeleted(tx: Tx, userId: string): Promise<boolean> {
+  const [user] = await tx.select({ deletedAt: users.deletedAt }).from(users).where(eq(users.id, userId)).for('key share');
+  return user?.deletedAt != null;
+}
+
+/**
+ * Sells an expired order its bag again, if it can still be sold, which it cannot to a deleted user.
+ * Stock is taken before the order changes: a reserve holds the drop and may then wait on a changed
+ * order row (see endHold).
  */
 async function retakeBag(tx: Tx, order: Order, now: Date): Promise<boolean> {
+  if (order.userId && (await customerDeleted(tx, order.userId))) return false;
   if (order.userId && (await findNightOrder(tx, order.userId, order.outletId, order.serviceDate))) return false;
   if (!(await takeStock(tx, order.dropId, now.toISOString()))) return false;
   try {
