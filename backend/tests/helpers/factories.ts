@@ -140,6 +140,7 @@ export async function makeOrder(o: Overrides<typeof orders> = {}) {
   const userId = o.userId === undefined ? (await makeUser()).id : o.userId;
   const pricePaise = o.pricePaise ?? drop?.pricePaise ?? 10000;
   const commissionBps = o.commissionBps ?? 2000;
+  const [outlet] = await db.select({ payoutAccountId: outlets.payoutAccountId }).from(outlets).where(eq(outlets.id, outletId));
   return insertOne(
     db
       .insert(orders)
@@ -151,6 +152,7 @@ export async function makeOrder(o: Overrides<typeof orders> = {}) {
         pricePaise,
         commissionBps,
         commissionPaise: Math.round((pricePaise * commissionBps) / 10000),
+        payoutAccountId: outlet?.payoutAccountId,
         holdExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
         ...o,
       })

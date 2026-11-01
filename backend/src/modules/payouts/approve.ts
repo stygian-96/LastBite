@@ -31,7 +31,13 @@ async function lockPayout(tx: Tx, payoutId: string): Promise<Payout> {
  */
 function heldTransfers(tx: Tx, payout: Payout) {
   return tx
-    .select({ paymentId: payments.id, orderId: orders.id, razorpayTransferId: payments.razorpayTransferId })
+    .select({
+      paymentId: payments.id,
+      orderId: orders.id,
+      razorpayTransferId: payments.razorpayTransferId,
+      transferPaise: payments.transferPaise,
+      reversedPaise: payments.reversedPaise,
+    })
     .from(payments)
     .innerJoin(orders, eq(orders.id, payments.orderId))
     .innerJoin(payouts, eq(payouts.id, orders.payoutId))
@@ -44,8 +50,16 @@ function heldTransfers(tx: Tx, payout: Payout) {
     );
 }
 
-/** Checks the payout can go, and lists what to release. */
-function startApproval(payoutId: string) {
+type Held = Awaited<ReturnType<typeof heldTransfers>>[number];
+
+const remainingPaise = (row: Held) => row.transferPaise! - row.reversedPaise;
+
+/**
+ * Checks the payout can go, brings it into line with any reversal since the build, and lists what
+ * to release against the net. A payout left negative cannot be paid: it goes back to held, to carry
+ * forward, and returns nothing.
+ */
+function startApproval(adminId: string, payoutId: string) {
   return withTx(async (tx) => {
     const payout = await lockPayout(tx, payoutId);
     const [account] = await tx
@@ -75,8 +89,59 @@ function startApproval(payoutId: string) {
         .limit(1);
       if (reversing) throw new ApiError('refund_pending', 409, 'A refund is reversing a transfer on this payout. Try again shortly');
     }
-    return held;
+
+    const netPaise = await removeReversedOrders(tx, adminId, payout);
+    if (netPaise < 0) {
+      await tx.update(payouts).set({ status: 'held' }).where(eq(payouts.id, payoutId));
+      await audit(tx, { actorId: adminId, action: 'payout.held', entity: 'payout', entityId: payoutId, detail: { netPaise } });
+      return undefined;
+    }
+    return { held, netPaise };
   });
+}
+
+/** Records a reversal once, however many approvals raced to it. The order lock is what refunds hold. */
+function recordReversal(row: Held, amountPaise: number): Promise<void> {
+  return withTx(async (tx) => {
+    await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, row.orderId)).for('update');
+    await tx
+      .update(payments)
+      .set({ reversedPaise: row.reversedPaise + amountPaise })
+      .where(and(eq(payments.id, row.paymentId), eq(payments.reversedPaise, row.reversedPaise)));
+  });
+}
+
+/**
+ * Whole transfers can only be released, so what they hold beyond the net, which is what the negative
+ * adjustment comes to, is reversed first, largest transfer first. Only reversed_paise counts, so a
+ * retry finds nothing left to do. A retry after a lost answer plans the same reversal on the same
+ * key: the order is fixed, and each transfer is reversed at most once for a payout.
+ */
+async function settleAdjustment(payoutId: string, held: Held[], netPaise: number): Promise<Held[]> {
+  let owedPaise = held.reduce((sum, row) => sum + remainingPaise(row), 0) - netPaise;
+  if (owedPaise <= 0) return held;
+
+  const largestFirst = [...held].sort(
+    (a, b) => remainingPaise(b) - remainingPaise(a) || a.paymentId.localeCompare(b.paymentId),
+  );
+  const settled: Held[] = [];
+  for (const row of largestFirst) {
+    const amountPaise = Math.min(owedPaise, remainingPaise(row));
+    if (amountPaise === 0) {
+      settled.push(row);
+      continue;
+    }
+    try {
+      await getGateway().reverseTransferPartial(row.razorpayTransferId!, amountPaise, `reversal-${payoutId}-${row.paymentId}`);
+    } catch (e) {
+      console.error(`Could not reverse part of the transfer of payment ${row.paymentId}`, e);
+      throw incomplete();
+    }
+    await recordReversal(row, amountPaise);
+    owedPaise -= amountPaise;
+    settled.push({ ...row, reversedPaise: row.reversedPaise + amountPaise });
+  }
+  return settled;
 }
 
 /**
@@ -118,9 +183,9 @@ function markReleased(row: { paymentId: string; orderId: string }, razorpayTrans
 
 /**
  * Takes orders whose transfer was reversed since the build off the payout, as the vendor is not
- * getting that money, and brings its totals back into line. Returns the orders removed.
+ * getting that money, and brings its totals back into line. Returns the net.
  */
-async function removeReversedOrders(tx: Tx, payout: Payout): Promise<{ removed: string[]; netPaise: number }> {
+async function removeReversedOrders(tx: Tx, adminId: string, payout: Payout): Promise<number> {
   const rows = await tx
     .select({
       id: orders.id,
@@ -134,13 +199,20 @@ async function removeReversedOrders(tx: Tx, payout: Payout): Promise<{ removed: 
     .innerJoin(payments, eq(payments.orderId, orders.id))
     .where(and(eq(orders.payoutId, payout.id), inArray(payments.transferStatus, ['released', 'on_hold', 'reversed'])));
   const removed = rows.filter((r) => r.transferStatus === 'reversed').map((r) => r.id);
-  if (removed.length === 0) return { removed, netPaise: payout.netPaise };
+  if (removed.length === 0) return payout.netPaise;
 
   await tx.update(orders).set({ payoutId: null }).where(inArray(orders.id, removed));
   const totals = sumOrders(rows.filter((r) => r.transferStatus !== 'reversed'));
   const netPaise = netOf(totals, payout.adjustmentPaise);
   await tx.update(payouts).set({ ...totals, netPaise }).where(eq(payouts.id, payout.id));
-  return { removed, netPaise };
+  await audit(tx, {
+    actorId: adminId,
+    action: 'payout.orders_removed',
+    entity: 'payout',
+    entityId: payout.id,
+    detail: { orders: removed, netPaise },
+  });
+  return netPaise;
 }
 
 /**
@@ -151,7 +223,7 @@ function finishApproval(adminId: string, payoutId: string, now: Date): Promise<v
   return withTx(async (tx) => {
     const payout = await lockPayout(tx, payoutId);
     if (payout.status !== 'draft') return;
-    const { removed, netPaise } = await removeReversedOrders(tx, payout);
+    const netPaise = await removeReversedOrders(tx, adminId, payout);
     if ((await heldTransfers(tx, payout)).length > 0) throw incomplete();
     const status = netPaise < 0 ? 'held' : 'released';
     await tx.update(payouts).set({ status }).where(eq(payouts.id, payoutId));
@@ -160,20 +232,25 @@ function finishApproval(adminId: string, payoutId: string, now: Date): Promise<v
       action: 'payout.approve',
       entity: 'payout',
       entityId: payoutId,
-      detail: { status, netPaise, removedOrders: removed, at: now.toISOString() },
+      detail: { status, netPaise, at: now.toISOString() },
     });
   });
 }
 
 /**
- * Releases a draft payout's transfers, outside any transaction, marking each as its call returns.
- * The payout moves only after all have gone, so a failure leaves a draft and a retry picks up the rest.
+ * Settles a draft payout's adjustment against its transfers, then releases them, all outside any
+ * transaction, so what the vendor receives is the net exactly. A transfer reversed in full has
+ * nothing to release. Each is marked as its call returns, and the payout moves only after all have
+ * gone, so a failure leaves a draft and a retry picks up the rest.
  */
 export async function approvePayout(adminId: string, payoutId: string, now: Date): Promise<void> {
   if (!isId(payoutId)) throw notFound('Payout');
-  for (const row of await startApproval(payoutId)) {
+  const started = await startApproval(adminId, payoutId);
+  if (!started) throw new ApiError('payout_negative', 409, 'The transfers cannot cover this payout, so it stays held and carries forward');
+
+  for (const row of await settleAdjustment(payoutId, started.held, started.netPaise)) {
     try {
-      await getGateway().releaseTransfer(row.razorpayTransferId!);
+      if (remainingPaise(row) > 0) await getGateway().releaseTransfer(row.razorpayTransferId!);
     } catch (e) {
       console.error(`Could not release the transfer of payment ${row.paymentId}`, e);
       throw incomplete();

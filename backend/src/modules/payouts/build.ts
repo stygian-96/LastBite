@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, isNull, lt, lte, ne, notExists, or, type SQL } from 'drizzle-orm';
 import { db, withTx, type Tx } from '../../db/client.js';
-import { orders, outlets, payments, payoutAccounts, payouts, refunds } from '../../db/schema.js';
+import { orders, payments, payoutAccounts, payouts, refunds } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { ApiError } from '../../lib/errors.js';
 import { addDays, isoWeekday } from '../../lib/time.js';
@@ -42,7 +42,7 @@ export const noReversingRefund = notExists(
 /** Orders up to the end of this period that have not been paid out. An order held back rolls forward. */
 const payableOrders = (periodEnd: string, accountId?: string): SQL =>
   and(
-    accountId ? eq(outlets.payoutAccountId, accountId) : undefined,
+    accountId ? eq(orders.payoutAccountId, accountId) : undefined,
     inArray(orders.status, EARNED_STATUSES),
     isNull(orders.payoutId),
     lte(orders.serviceDate, periodEnd),
@@ -58,7 +58,7 @@ const payableOrders = (periodEnd: string, accountId?: string): SQL =>
  */
 export const adjustableRefunds = (accountId?: string): SQL =>
   and(
-    accountId ? eq(outlets.payoutAccountId, accountId) : undefined,
+    accountId ? eq(orders.payoutAccountId, accountId) : undefined,
     eq(refunds.status, 'processed'),
     eq(refunds.chargedTo, 'vendor'),
     eq(refunds.reverseTransfer, false),
@@ -80,17 +80,15 @@ const carriedPayouts = (periodStart: string, accountId?: string): SQL =>
 async function accountsToBuild(periodStart: string, periodEnd: string): Promise<string[]> {
   const [withOrders, withRefunds, withBalance] = await Promise.all([
     db
-      .selectDistinct({ id: outlets.payoutAccountId })
+      .selectDistinct({ id: orders.payoutAccountId })
       .from(orders)
-      .innerJoin(outlets, eq(outlets.id, orders.outletId))
       .innerJoin(payments, eq(payments.orderId, orders.id))
       .where(payableOrders(periodEnd)),
     db
-      .selectDistinct({ id: outlets.payoutAccountId })
+      .selectDistinct({ id: orders.payoutAccountId })
       .from(refunds)
       .innerJoin(payments, eq(payments.id, refunds.paymentId))
       .innerJoin(orders, eq(orders.id, refunds.orderId))
-      .innerJoin(outlets, eq(outlets.id, orders.outletId))
       .where(adjustableRefunds()),
     db.selectDistinct({ id: payouts.payoutAccountId }).from(payouts).where(carriedPayouts(periodStart)),
   ]);
@@ -119,7 +117,6 @@ async function buildForAccount(tx: Tx, accountId: string, periodStart: string, p
       feePaise: payments.feePaise,
     })
     .from(orders)
-    .innerJoin(outlets, eq(outlets.id, orders.outletId))
     .innerJoin(payments, eq(payments.orderId, orders.id))
     .where(payableOrders(periodEnd, accountId))
     .orderBy(asc(orders.id))
@@ -129,7 +126,6 @@ async function buildForAccount(tx: Tx, accountId: string, periodStart: string, p
     .from(refunds)
     .innerJoin(payments, eq(payments.id, refunds.paymentId))
     .innerJoin(orders, eq(orders.id, refunds.orderId))
-    .innerJoin(outlets, eq(outlets.id, orders.outletId))
     .where(adjustableRefunds(accountId))
     .for('update', { of: refunds });
   const carried = await tx

@@ -60,6 +60,11 @@ export interface PaymentGateway {
   }): Promise<{ id: string }>;
   /** Releasing a transfer twice is harmless. */
   releaseTransfer(id: string): Promise<void>;
+  /**
+   * Takes part of a transfer back. A key already seen gets the same reversal back. Throws
+   * GatewayRefusedError if that is more than is left of the transfer.
+   */
+  reverseTransferPartial(transferId: string, amountPaise: number, idempotencyKey: string): Promise<{ id: string }>;
   createLinkedAccount(a: LinkedAccountInput): Promise<{ id: string }>;
   verifyWebhook(raw: string, signature: string): boolean;
 }
@@ -93,7 +98,10 @@ export class FakeGateway implements PaymentGateway {
     amountPaise: number;
     idempotencyKey: string;
     released: boolean;
+    /** What the transfer is worth after reversals. */
+    remainingPaise: number;
   }[] = [];
+  readonly transferReversals: { id: string; transferId: string; amountPaise: number; idempotencyKey: string }[] = [];
   readonly linkedAccounts: (LinkedAccountInput & { id: string })[] = [];
 
   /** Adds a payment, or replaces the one with this ID. */
@@ -170,7 +178,7 @@ export class FakeGateway implements PaymentGateway {
   }): Promise<{ id: string }> {
     const sent = this.transfers.find((t) => t.idempotencyKey === a.idempotencyKey);
     if (sent) return { id: sent.id };
-    const transfer = { id: `trf_fake_${this.transfers.length + 1}`, released: false, ...a };
+    const transfer = { id: `trf_fake_${this.transfers.length + 1}`, released: false, remainingPaise: a.amountPaise, ...a };
     this.transfers.push(transfer);
     return { id: transfer.id };
   }
@@ -178,7 +186,23 @@ export class FakeGateway implements PaymentGateway {
   async releaseTransfer(id: string): Promise<void> {
     const transfer = this.transfers.find((t) => t.id === id);
     if (!transfer) throw new Error(`No fake transfer ${id}`);
+    if (transfer.remainingPaise === 0) throw new GatewayRefusedError(`Transfer ${id} was reversed in full`);
     transfer.released = true;
+  }
+
+  async reverseTransferPartial(transferId: string, amountPaise: number, idempotencyKey: string): Promise<{ id: string }> {
+    const sent = this.transferReversals.find((r) => r.idempotencyKey === idempotencyKey);
+    if (sent) return { id: sent.id };
+
+    const transfer = this.transfers.find((t) => t.id === transferId);
+    if (!transfer) throw new Error(`No fake transfer ${transferId}`);
+    if (amountPaise > transfer.remainingPaise) {
+      throw new GatewayRefusedError(`Reversal exceeds what is left of transfer ${transferId}`);
+    }
+    transfer.remainingPaise -= amountPaise;
+    const reversal = { id: `rvrsl_fake_${this.transferReversals.length + 1}`, transferId, amountPaise, idempotencyKey };
+    this.transferReversals.push(reversal);
+    return { id: reversal.id };
   }
 
   async createLinkedAccount(a: LinkedAccountInput): Promise<{ id: string }> {

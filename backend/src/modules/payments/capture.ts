@@ -69,8 +69,11 @@ async function customerDeleted(tx: Tx, userId: string): Promise<boolean> {
 async function retakeBag(tx: Tx, order: Order, now: Date): Promise<boolean> {
   if (order.userId && (await customerDeleted(tx, order.userId))) return false;
   if (order.userId && (await findNightOrder(tx, order.userId, order.outletId, order.serviceDate))) return false;
-  if (!(await takeStock(tx, order.dropId, now.toISOString()))) return false;
+  const drop = await takeStock(tx, order.dropId, now.toISOString());
+  if (!drop) return false;
   try {
+    // This is a new sale, by whoever holds the outlet now.
+    await tx.update(orders).set({ payoutAccountId: drop.payoutAccountId }).where(eq(orders.id, order.id));
     await markPaid(tx, order.id, now);
     return true;
   } catch (e) {

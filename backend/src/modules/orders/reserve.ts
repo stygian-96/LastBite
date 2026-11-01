@@ -107,6 +107,7 @@ export async function takeStock(tx: Tx, dropId: string, nowIso: string) {
       serviceDate: drops.serviceDate,
       pricePaise: drops.pricePaise,
       commissionBps: outlets.commissionBps,
+      payoutAccountId: outlets.payoutAccountId,
     });
   return drop;
 }
@@ -134,6 +135,7 @@ export async function reserveDrop(
           anonId: r.anonId,
           dropId: r.dropId,
           outletId: drop.outletId,
+          payoutAccountId: drop.payoutAccountId,
           serviceDate: drop.serviceDate,
           pricePaise: drop.pricePaise,
           commissionBps: drop.commissionBps,

@@ -342,7 +342,9 @@ export const orders = pgTable("orders", {
 	rating: smallint(),
 	payoutId: uuid("payout_id"),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	payoutAccountId: uuid("payout_account_id"),
 }, (table) => [
+	index("orders_unpaid_by_account_idx").using("btree", table.payoutAccountId.asc().nullsLast().op("uuid_ops")).where(sql`(payout_id IS NULL)`),
 	uniqueIndex("one_order_per_outlet_night").using("btree", table.userId.asc().nullsLast().op("date_ops"), table.outletId.asc().nullsLast().op("uuid_ops"), table.serviceDate.asc().nullsLast().op("uuid_ops")).where(sql`((user_id IS NOT NULL) AND (status = ANY (ARRAY['held'::text, 'paid'::text, 'collected'::text, 'no_show'::text])))`),
 	uniqueIndex("one_hold_per_anon").using("btree", table.anonId.asc().nullsLast().op("text_ops")).where(sql`((status = 'held'::text) AND (user_id IS NULL))`),
 	index("orders_drop_id_status_idx").using("btree", table.dropId.asc().nullsLast().op("text_ops"), table.status.asc().nullsLast().op("uuid_ops")),
@@ -379,6 +381,11 @@ export const orders = pgTable("orders", {
 			foreignColumns: [payouts.id],
 			name: "orders_payout_id_fkey"
 		}),
+	foreignKey({
+			columns: [table.payoutAccountId],
+			foreignColumns: [payoutAccounts.id],
+			name: "orders_payout_account_id_fkey"
+		}),
 	unique("orders_number_key").on(table.number),
 	check("orders_status_check", sql`status = ANY (ARRAY['held'::text, 'expired'::text, 'paid'::text, 'collected'::text, 'no_show'::text, 'cancelled'::text])`),
 	check("orders_rating_check", sql`(rating >= 1) AND (rating <= 5)`),
@@ -399,6 +406,7 @@ export const payments = pgTable("payments", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	lastCheckedAt: timestamp("last_checked_at", { withTimezone: true, mode: 'string' }),
 	transferClaimedAt: timestamp("transfer_claimed_at", { withTimezone: true, mode: 'string' }),
+	reversedPaise: integer("reversed_paise").default(0).notNull(),
 }, (table) => [
 	index("payments_order_id_idx").using("btree", table.orderId.asc().nullsLast().op("uuid_ops")),
 	index("payments_to_transfer_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((status = 'captured'::text) AND (transfer_status = 'none'::text))`),
@@ -411,6 +419,7 @@ export const payments = pgTable("payments", {
 	unique("payments_razorpay_payment_id_key").on(table.razorpayPaymentId),
 	unique("payments_razorpay_transfer_id_key").on(table.razorpayTransferId),
 	check("payments_status_check", sql`status = ANY (ARRAY['created'::text, 'captured'::text, 'failed'::text])`),
+	check("payments_reversed_paise_check", sql`reversed_paise >= 0`),
 	check("payments_transfer_status_check", sql`transfer_status = ANY (ARRAY['none'::text, 'on_hold'::text, 'released'::text, 'reversed'::text])`),
 ]);
 

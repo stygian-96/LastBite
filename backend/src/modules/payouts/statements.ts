@@ -59,11 +59,10 @@ export async function getEarnings(userId: string, payoutAccountId: string): Prom
         feePaise: payments.feePaise,
       })
       .from(orders)
-      .innerJoin(outlets, eq(outlets.id, orders.outletId))
       .innerJoin(payments, eq(payments.orderId, orders.id))
       .where(
         and(
-          eq(outlets.payoutAccountId, payoutAccountId),
+          eq(orders.payoutAccountId, payoutAccountId),
           inArray(orders.status, EARNED_STATUSES),
           isNull(orders.payoutId),
           isBagPayment,
@@ -77,7 +76,6 @@ export async function getEarnings(userId: string, payoutAccountId: string): Prom
       .from(refunds)
       .innerJoin(payments, eq(payments.id, refunds.paymentId))
       .innerJoin(orders, eq(orders.id, refunds.orderId))
-      .innerJoin(outlets, eq(outlets.id, orders.outletId))
       .where(adjustableRefunds(payoutAccountId)),
   ]);
 

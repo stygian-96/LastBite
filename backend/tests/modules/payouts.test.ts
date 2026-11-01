@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { db } from '../../src/db/client.js';
-import { auditLog, memberships, orders, payments, payoutAccounts, payouts, refunds } from '../../src/db/schema.js';
+import { auditLog, memberships, orders, outlets, payments, payoutAccounts, payouts, refunds } from '../../src/db/schema.js';
 import { FakeGateway, setGateway } from '../../src/integrations/payments.js';
 import { decrypt, encrypt } from '../../src/lib/crypto.js';
 import { env } from '../../src/lib/env.js';
 import { ApiError } from '../../src/lib/errors.js';
 import { adminRefund } from '../../src/modules/admin/support.js';
 import { createSession } from '../../src/modules/auth/session.js';
+import { expireHolds } from '../../src/modules/orders/expire.js';
+import { reserveDrop } from '../../src/modules/orders/reserve.js';
+import { applyCapture } from '../../src/modules/payments/capture.js';
 import { updatePayoutAccount } from '../../src/modules/onboarding/payout-accounts.js';
 import { approvePayout, markPayoutPaid, verifyPayoutAccount } from '../../src/modules/payouts/approve.js';
 import { buildPayouts } from '../../src/modules/payouts/build.js';
@@ -749,14 +752,14 @@ describe('adjustments', () => {
   test('a held payout on an account on hold is not carried, as its net is not negative', async () => {
     const { account, outlet } = await linkedOutlet();
     await sale(outlet.id);
+    await sale(outlet.id, { serviceDate: '2026-11-10' });
     await createTransfers(now);
     await db.update(payoutAccounts).set({ status: 'on_hold' }).where(eq(payoutAccounts.id, account.id));
     const [held] = await buildPayouts(WEEK, now);
-    await sale(outlet.id, { serviceDate: '2026-11-10' });
 
-    const next = await built(NEXT_WEEK);
+    const [next] = await buildPayouts(NEXT_WEEK, now);
 
-    expect(next.adjustmentPaise).toBe(0);
+    expect(next!.adjustmentPaise).toBe(0);
     expect((await payoutRow(held!.id)).status).toBe('held');
   });
 });
@@ -933,7 +936,266 @@ describe('approvePayout', () => {
 
     expect((await paymentFor(week2.order.id)).transferStatus).toBe('released');
     expect((await paymentFor(week3.order.id)).transferStatus).toBe('released');
-    expect(gateway.transfers.every((t) => t.released)).toBe(true);
+  });
+});
+
+describe('settling an adjustment', () => {
+  const remainders = (ids: string[]) =>
+    gateway.transfers.filter((t) => ids.includes(t.id)).reduce((sum, t) => sum + t.remainingPaise, 0);
+  const releasedFrom = (start: number) =>
+    gateway.transfers.slice(start).filter((t) => t.released).reduce((sum, t) => sum + t.remainingPaise, 0);
+
+  test('what is released equals the net exactly, taken from the largest transfer first', async () => {
+    const { outlet } = await linkedOutlet();
+    const small = await sale(outlet.id, { pricePaise: 10000, feePaise: 200 });
+    const large = await sale(outlet.id, { pricePaise: 20000, feePaise: 400 });
+    await addRefund(small.order, small.payment, 1234);
+    const adminUser = await admin();
+    const payout = await built();
+    expect(payout).toMatchObject({ adjustmentPaise: -1234, netPaise: 7800 + 15600 - 1234 });
+
+    await approvePayout(adminUser.id, payout.id, now);
+
+    expect(releasedFrom(0)).toBe(payout.netPaise);
+    expect(gateway.transferReversals).toHaveLength(1);
+    expect(gateway.transferReversals[0]).toMatchObject({
+      transferId: (await paymentFor(large.order.id)).razorpayTransferId,
+      amountPaise: 1234,
+      idempotencyKey: `reversal-${payout.id}-${large.payment.id}`,
+    });
+    expect((await paymentFor(large.order.id)).reversedPaise).toBe(1234);
+    expect((await paymentFor(small.order.id)).reversedPaise).toBe(0);
+    expect(await payoutRow(payout.id)).toMatchObject({ status: 'released', netPaise: 22166 });
+  });
+
+  test('an adjustment bigger than one transfer spreads to the next, and a transfer used up is not released', async () => {
+    const { outlet } = await linkedOutlet();
+    const first = await sale(outlet.id);
+    const second = await sale(outlet.id);
+    await addRefund(first.order, first.payment, 12000);
+    const adminUser = await admin();
+    const payout = await built();
+    expect(payout.netPaise).toBe(23240 - 12000);
+    const realRelease = vi.spyOn(gateway, 'releaseTransfer');
+
+    await approvePayout(adminUser.id, payout.id, now);
+
+    expect(gateway.transferReversals.map((r) => r.amountPaise)).toEqual([11620, 380]);
+    expect(realRelease).toHaveBeenCalledTimes(1);
+    expect(releasedFrom(0)).toBe(payout.netPaise);
+    expect((await paymentFor(first.order.id)).transferStatus).toBe('released');
+    expect((await paymentFor(second.order.id)).transferStatus).toBe('released');
+  });
+
+  test('money released over the weeks equals what the vendor earned, through a carried negative', async () => {
+    const { outlet } = await linkedOutlet();
+    const adminUser = await admin();
+    const first = await sale(outlet.id);
+    await approvePayout(adminUser.id, (await built()).id, now);
+    const paidSoFar = gateway.transfers.length;
+    await addRefund(first.order, first.payment, 14900);
+
+    await sale(outlet.id, { serviceDate: '2026-11-10' });
+    const negative = await built(NEXT_WEEK);
+    expect(negative).toMatchObject({ netPaise: -3280, status: 'held' });
+    await sale(outlet.id, { serviceDate: '2026-11-17' });
+    const next = await built(WEEK_AFTER);
+    expect(next).toMatchObject({ adjustmentPaise: -3280, netPaise: 8340 });
+
+    await approvePayout(adminUser.id, next.id, now);
+
+    const later = gateway.transfers.slice(paidSoFar);
+    expect(remainders(later.map((t) => t.id))).toBe(next.netPaise);
+    expect(later.filter((t) => t.remainingPaise > 0).every((t) => t.released)).toBe(true);
+    // Earned 3 x 11620 less the 14900 refund, and that is what left in all.
+    expect(remainders(gateway.transfers.map((t) => t.id))).toBe(3 * 11620 - 14900);
+  });
+
+  test('a reversal that fails leaves a draft, and a retry never reverses twice', async () => {
+    const { outlet } = await linkedOutlet();
+    const first = await sale(outlet.id);
+    await sale(outlet.id);
+    await addRefund(first.order, first.payment, 12000);
+    const adminUser = await admin();
+    const payout = await built();
+    const real = gateway.reverseTransferPartial.bind(gateway);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const spy = vi
+      .spyOn(gateway, 'reverseTransferPartial')
+      .mockImplementationOnce(real)
+      .mockRejectedValueOnce(new Error('Gateway down'));
+
+    expect(await failure(approvePayout(adminUser.id, payout.id, now))).toMatchObject({ code: 'release_incomplete' });
+    expect((await payoutRow(payout.id)).status).toBe('draft');
+    expect(gateway.transfers.some((t) => t.released)).toBe(false);
+
+    spy.mockImplementation(real);
+    await approvePayout(adminUser.id, payout.id, now);
+
+    expect(gateway.transferReversals).toHaveLength(2);
+    expect(releasedFrom(0)).toBe(payout.netPaise);
+  });
+
+  test('a release that fails after settling reverses nothing more on retry', async () => {
+    const { outlet } = await linkedOutlet();
+    const first = await sale(outlet.id);
+    await sale(outlet.id);
+    await addRefund(first.order, first.payment, 2000);
+    const adminUser = await admin();
+    const payout = await built();
+    const real = gateway.releaseTransfer.bind(gateway);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const spy = vi
+      .spyOn(gateway, 'releaseTransfer')
+      .mockImplementationOnce(real)
+      .mockRejectedValueOnce(new Error('Gateway down'));
+
+    expect(await failure(approvePayout(adminUser.id, payout.id, now))).toMatchObject({ code: 'release_incomplete' });
+    spy.mockImplementation(real);
+    await approvePayout(adminUser.id, payout.id, now);
+
+    expect(gateway.transferReversals).toHaveLength(1);
+    expect(releasedFrom(0)).toBe(payout.netPaise);
+    expect((await payoutRow(payout.id)).status).toBe('released');
+  });
+
+  test('a lost answer goes again on the same key, and is taken once', async () => {
+    const { outlet } = await linkedOutlet();
+    const first = await sale(outlet.id);
+    await addRefund(first.order, first.payment, 2000);
+    const adminUser = await admin();
+    const payout = await built();
+    const real = gateway.reverseTransferPartial.bind(gateway);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(gateway, 'reverseTransferPartial').mockImplementationOnce(async (id, paise, key) => {
+      await real(id, paise, key);
+      throw new Error('Gateway timed out');
+    });
+
+    await failure(approvePayout(adminUser.id, payout.id, now));
+    await approvePayout(adminUser.id, payout.id, now);
+
+    expect(gateway.transferReversals).toHaveLength(1);
+    expect((await paymentFor(first.order.id)).reversedPaise).toBe(2000);
+    expect(releasedFrom(0)).toBe(payout.netPaise);
+  });
+
+  test('transfers that cannot cover the adjustment leave the payout held, to carry forward', async () => {
+    const { outlet } = await linkedOutlet();
+    const kept = await sale(outlet.id);
+    const lost = await sale(outlet.id);
+    await addRefund(kept.order, kept.payment, 12000);
+    const adminUser = await admin();
+    const payout = await built();
+    expect(payout).toMatchObject({ netPaise: 23240 - 12000, status: 'draft' });
+    await adminRefund(adminUser.id, lost.order.id, { amountPaise: 14900, chargedTo: 'vendor' }, now);
+    await processRefunds(now);
+
+    const error = await failure(approvePayout(adminUser.id, payout.id, now));
+
+    expect(error).toMatchObject({ code: 'payout_negative', status: 409 });
+    expect(await payoutRow(payout.id)).toMatchObject({ status: 'held', netPaise: 11620 - 12000 });
+    expect(gateway.transferReversals).toEqual([]);
+    expect(gateway.transfers.some((t) => t.released)).toBe(false);
+
+    await sale(outlet.id, { serviceDate: '2026-11-10' });
+    const next = await built(NEXT_WEEK);
+    expect(next.adjustmentPaise).toBe(-380);
+  });
+
+  test('the fake refuses to reverse more than a transfer has left', async () => {
+    const { id } = await gateway.createTransfer({ paymentId: 'p', accountId: 'a', amountPaise: 100, idempotencyKey: 'k' });
+
+    await gateway.reverseTransferPartial(id, 60, 'r1');
+
+    expect((await failure(gateway.reverseTransferPartial(id, 41, 'r2')))?.name).toBe('GatewayRefusedError');
+    expect(gateway.transfers[0]!.remainingPaise).toBe(40);
+  });
+});
+
+describe('the account an order belongs to', () => {
+  test('no transfer goes to an account on hold, and the order waits for the new linked account', async () => {
+    const { account, outlet } = await linkedOutlet();
+    const owner = await ownerOf(account.brandId);
+    const { order } = await sale(outlet.id);
+    await updatePayoutAccount(owner.id, account.id, bankChange, now);
+
+    expect(await createTransfers(now)).toBe(0);
+    expect(gateway.transfers).toEqual([]);
+
+    await verifyPayoutAccount((await admin()).id, account.id, now);
+    expect(await createTransfers(now)).toBe(0);
+
+    await syncLinkedAccounts(now);
+    expect(await createTransfers(now)).toBe(1);
+    expect(gateway.transfers[0]!.accountId).toBe(gateway.linkedAccounts[0]!.id);
+    expect((await paymentFor(order.id)).transferStatus).toBe('on_hold');
+  });
+
+  test('a reservation records the outlet account, and a franchise switch leaves unpaid orders with the old one', async () => {
+    const { account: oldAccount, outlet } = await linkedOutlet();
+    const newAccount = await linkedAccount({ brandId: oldAccount.brandId });
+    const drop = await makeDrop({ outletId: outlet.id });
+    const reserved = await reserveDrop({ dropId: drop.id, userId: (await makeUser()).id, ip: '1.1.1.1' }, new Date('2026-11-02T10:00:00Z'));
+    expect(reserved.payoutAccountId).toBe(oldAccount.id);
+
+    const before = await sale(outlet.id);
+    const refundedBefore = await sale(outlet.id);
+    await addRefund(refundedBefore.order, refundedBefore.payment, 1000);
+    await db.update(outlets).set({ payoutAccountId: newAccount.id }).where(eq(outlets.id, outlet.id));
+    const after = await sale(outlet.id, { pricePaise: 10000, feePaise: 200 });
+
+    expect(await createTransfers(now)).toBe(3);
+    expect((await paymentFor(before.order.id)).razorpayTransferId).toBe(
+      gateway.transfers.find((t) => t.accountId === oldAccount.razorpayAccountId)!.id,
+    );
+    expect(gateway.transfers.filter((t) => t.accountId === newAccount.razorpayAccountId)).toHaveLength(1);
+
+    const built = await buildPayouts(WEEK, now);
+
+    expect(built).toHaveLength(2);
+    const oldPayout = built.find((p) => p.payoutAccountId === oldAccount.id)!;
+    const newPayout = built.find((p) => p.payoutAccountId === newAccount.id)!;
+    expect(oldPayout).toMatchObject({ grossPaise: 29800, adjustmentPaise: -1000 });
+    expect(newPayout).toMatchObject({ grossPaise: 10000, adjustmentPaise: 0 });
+    expect((await getOrderRow(before.order.id)).payoutId).toBe(oldPayout.id);
+    expect((await getOrderRow(after.order.id)).payoutId).toBe(newPayout.id);
+  });
+
+  test('earnings follow the order, not the outlet', async () => {
+    const { account: oldAccount, outlet } = await linkedOutlet();
+    const oldOwner = await ownerOf(oldAccount.brandId);
+    const newAccount = await linkedAccount();
+    await sale(outlet.id);
+    await db.update(outlets).set({ payoutAccountId: newAccount.id }).where(eq(outlets.id, outlet.id));
+
+    expect((await getEarnings(oldOwner.id, oldAccount.id)).thisWeek.orders).toBe(1);
+  });
+
+  test('an expired order sold again belongs to whoever holds the outlet by then', async () => {
+    const { account: oldAccount, outlet } = await linkedOutlet();
+    const newAccount = await linkedAccount({ brandId: oldAccount.brandId });
+    const drop = await makeDrop({ outletId: outlet.id, pricePaise: 10000 });
+    const reservedAt = new Date('2026-11-02T10:00:00Z');
+    const order = await reserveDrop({ dropId: drop.id, userId: (await makeUser()).id, ip: '1.1.1.1' }, reservedAt);
+    const payment = await makePayment({ orderId: order.id });
+    await expireHolds(new Date(reservedAt.getTime() + 7 * MINUTES));
+    await db.update(outlets).set({ payoutAccountId: newAccount.id }).where(eq(outlets.id, outlet.id));
+
+    const settled = await applyCapture(
+      {
+        id: `pay_late_${++seq}`,
+        orderId: payment.razorpayOrderId,
+        status: 'captured',
+        amountPaise: 10000,
+        feePaise: 236,
+        method: 'upi',
+      },
+      new Date(reservedAt.getTime() + 8 * MINUTES),
+    );
+
+    expect(settled).toBe(true);
+    expect(await getOrderRow(order.id)).toMatchObject({ status: 'paid', payoutAccountId: newAccount.id });
   });
 });
 

@@ -186,7 +186,11 @@ type ClaimedTransfer = {
   feePaise: number | null;
 };
 
-/** Claims payments due a transfer. Claimed rows are left alone, so a failing row waits its turn. */
+/**
+ * Claims payments due a transfer. Claimed rows are left alone, so a failing row waits its turn. An
+ * account must be verified: after a bank change the linked ID still names the old bank, and the
+ * order waits for the new one. The account is the order's own, as a franchise can change hands.
+ */
 function claimTransfers(now: Date): Promise<ClaimedTransfer[]> {
   return withTx(async (tx) => {
     const rows = await tx
@@ -202,14 +206,14 @@ function claimTransfers(now: Date): Promise<ClaimedTransfer[]> {
       })
       .from(payments)
       .innerJoin(orders, eq(orders.id, payments.orderId))
-      .innerJoin(outlets, eq(outlets.id, orders.outletId))
-      .innerJoin(payoutAccounts, eq(payoutAccounts.id, outlets.payoutAccountId))
+      .innerJoin(payoutAccounts, eq(payoutAccounts.id, orders.payoutAccountId))
       .where(
         and(
           isBagPayment,
           eq(payments.transferStatus, 'none'),
           isNotNull(payments.razorpayPaymentId),
           inArray(orders.status, TRANSFERABLE_STATUSES),
+          eq(payoutAccounts.status, 'verified'),
           isNotNull(payoutAccounts.razorpayAccountId),
           not(vendorRefundCovers),
           or(isNull(payments.transferClaimedAt), lt(payments.transferClaimedAt, staleBefore(now))),

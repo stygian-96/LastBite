@@ -513,6 +513,8 @@ ALTER TABLE refunds ADD COLUMN last_checked_at timestamptz;
 ALTER TABLE refunds ADD COLUMN reverse_transfer boolean NOT NULL DEFAULT false;
 ALTER TABLE payments ADD COLUMN transfer_claimed_at timestamptz;
 ALTER TABLE payout_accounts ADD COLUMN linked_claimed_at timestamptz;
+ALTER TABLE payments ADD COLUMN reversed_paise integer NOT NULL DEFAULT 0 CHECK (reversed_paise >= 0);
+ALTER TABLE orders ADD COLUMN payout_account_id uuid REFERENCES payout_accounts(id);
 ```
 
 - `rate_limits` gives shared counters across serverless instances.
@@ -527,6 +529,8 @@ ALTER TABLE payout_accounts ADD COLUMN linked_claimed_at timestamptz;
 - `refunds.reverse_transfer` is fixed at creation, so one idempotency key always carries one payload. It is true for a vendor-charged refund of the whole remainder of a payment while the transfer is on hold. A released transfer is deducted from the next payout instead.
 - `payments.transfer_claimed_at` marks a transfer claimed by a run, so two runs cannot both send it. A claim that runs out goes again on the same idempotency key.
 - `payout_accounts.linked_claimed_at` does the same for creating a linked account, which has no idempotency key.
+- `payments.reversed_paise` is how much of a transfer was reversed to settle a payout's negative adjustment, so a retry never reverses twice.
+- `orders.payout_account_id` is the account that sold the order. Payouts and transfers read it, so a franchise that changes hands leaves its unpaid orders with the old account.
 
 ## 6. State machines
 
@@ -639,7 +643,7 @@ Sales close Sunday night IST and payouts run on Tuesday, matching the agreement 
 
 1. Monday job groups `collected` and `no_show` orders per payout account into a `draft` payout.
 2. Admin reviews totals and approves. Automation can come later.
-3. The system releases the held Route transfers for those orders.
+3. The system settles any negative adjustment by reversing part of the held transfers, largest first, then releases them, so the money that moves equals the payout net. If they cannot cover it, the payout stays `held` and carries forward.
 4. Statements become downloadable.
 
 ```text
