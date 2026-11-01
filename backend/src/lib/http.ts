@@ -26,13 +26,13 @@ type RouteOpts<B> = {
   body?: ZodType<B>;
 };
 
-function envelope(c: Context, status: number, code: string, message: string) {
-  return c.json({ error: { code, message } }, status as ContentfulStatusCode);
+function envelope(c: Context, status: number, code: string, message: string, details?: Record<string, unknown>) {
+  return c.json({ error: { code, message, ...details } }, status as ContentfulStatusCode);
 }
 
 /** Hono onError handler: writes the error envelope, never leaking internals. */
 export function handleError(err: Error, c: Context): Response {
-  if (err instanceof ApiError) return envelope(c, err.status, err.code, err.message);
+  if (err instanceof ApiError) return envelope(c, err.status, err.code, err.message, err.details);
   if (err instanceof HTTPException) return envelope(c, err.status, 'http_error', err.message);
   console.error(err);
   return envelope(c, 500, 'internal_error', 'Something went wrong');

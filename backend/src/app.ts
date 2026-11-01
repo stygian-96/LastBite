@@ -4,6 +4,7 @@ import { env } from './lib/env.js';
 import { handleError } from './lib/http.js';
 import { auth } from './routes/auth.js';
 import { health } from './routes/health.js';
+import { vendorOnboarding } from './routes/vendor-onboarding.js';
 import { vendorStaff } from './routes/vendor-staff.js';
 
 export const app = new Hono();
@@ -23,3 +24,4 @@ app.use(
 app.route('/api/v1/health', health);
 app.route('/api/v1/auth', auth);
 app.route('/api/v1/vendor', vendorStaff);
+app.route('/api/v1/vendor', vendorOnboarding);
