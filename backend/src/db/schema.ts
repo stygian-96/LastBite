@@ -86,6 +86,7 @@ export const payoutAccounts = pgTable("payout_accounts", {
 	razorpayAccountId: text("razorpay_account_id"),
 	status: text().default('pending').notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	linkedClaimedAt: timestamp("linked_claimed_at", { withTimezone: true, mode: 'string' }),
 }, (table) => [
 	foreignKey({
 			columns: [table.brandId],
@@ -397,8 +398,10 @@ export const payments = pgTable("payments", {
 	transferStatus: text("transfer_status").default('none').notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	lastCheckedAt: timestamp("last_checked_at", { withTimezone: true, mode: 'string' }),
+	transferClaimedAt: timestamp("transfer_claimed_at", { withTimezone: true, mode: 'string' }),
 }, (table) => [
 	index("payments_order_id_idx").using("btree", table.orderId.asc().nullsLast().op("uuid_ops")),
+	index("payments_to_transfer_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((status = 'captured'::text) AND (transfer_status = 'none'::text))`),
 	foreignKey({
 			columns: [table.orderId],
 			foreignColumns: [orders.id],

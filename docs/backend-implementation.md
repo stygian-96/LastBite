@@ -511,6 +511,8 @@ ALTER TABLE refunds ADD COLUMN send_errors smallint NOT NULL DEFAULT 0;
 ALTER TABLE refunds ADD COLUMN failed_razorpay_ids text[] NOT NULL DEFAULT '{}';
 ALTER TABLE refunds ADD COLUMN last_checked_at timestamptz;
 ALTER TABLE refunds ADD COLUMN reverse_transfer boolean NOT NULL DEFAULT false;
+ALTER TABLE payments ADD COLUMN transfer_claimed_at timestamptz;
+ALTER TABLE payout_accounts ADD COLUMN linked_claimed_at timestamptz;
 ```
 
 - `rate_limits` gives shared counters across serverless instances.
@@ -523,6 +525,8 @@ ALTER TABLE refunds ADD COLUMN reverse_transfer boolean NOT NULL DEFAULT false;
 - `refunds.failed_razorpay_ids` remembers gateway IDs counted as failed, so a late report of one is not redelivered.
 - `refunds.last_checked_at` lets the refund job ask the gateway about the longest-unchecked sent refund first.
 - `refunds.reverse_transfer` is fixed at creation, so one idempotency key always carries one payload. It is true for a vendor-charged refund of the whole remainder of a payment while the transfer is on hold. A released transfer is deducted from the next payout instead.
+- `payments.transfer_claimed_at` marks a transfer claimed by a run, so two runs cannot both send it. A claim that runs out goes again on the same idempotency key.
+- `payout_accounts.linked_claimed_at` does the same for creating a linked account, which has no idempotency key.
 
 ## 6. State machines
 
@@ -691,6 +695,7 @@ All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code":
 | POST | `/vendor/uploads` | Get a signed upload link |
 | POST | `/vendor/outlets/:id/documents` | Record an uploaded document |
 | POST | `/vendor/payout-accounts` | Add PAN and bank details |
+| PATCH | `/vendor/payout-accounts/:id` | Change bank details, which holds payouts until re-verified |
 | POST | `/vendor/payout-accounts/:id/agreement` | Sign the agreement |
 | POST | `/vendor/outlets/:id/submit` | Submit for review |
 | GET | `/vendor/outlets/:id/status` | Status and anything to fix |
@@ -711,6 +716,7 @@ All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code":
 | POST | `/vendor/orders/:id/no-show` | Mark no-show |
 | POST | `/vendor/orders/:id/cancel` | Cancel one order |
 | GET | `/vendor/earnings?payout_account=` | Payouts and statements |
+| GET | `/vendor/payouts/:id/statement` | Statement as CSV |
 | POST, DELETE | `/vendor/outlets/:id/staff` | Add or remove staff |
 
 ### Admin
@@ -728,6 +734,7 @@ All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code":
 | GET | `/admin/payouts` | Weekly payouts |
 | POST | `/admin/payouts/:id/approve` | Release a payout |
 | POST | `/admin/payouts/:id/mark-paid` | Record that the money arrived |
+| POST | `/admin/payout-accounts/:id/verify` | Verify changed bank details |
 
 ### System
 
@@ -752,6 +759,8 @@ All jobs run from the one-minute tick. Each must be safe to run twice, and a fai
 | Vendor prompt | Daily, 5:00 pm IST | "How many tonight?" |
 | Followed outlet alerts | With each first drop | One message per customer, per outlet, per night |
 | Licence check | Daily | Warn at 30 and 7 days, block new drops on expiry |
+| Link payout accounts | Every minute | Create linked accounts for verified payout accounts |
+| Create transfers | Every minute | Held Route transfers for sold bags |
 | Build payouts | Monday morning | Create draft payouts |
 | Clean up | Daily | Remove old OTPs and expired sessions |
 

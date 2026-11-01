@@ -1,4 +1,5 @@
 import { and, eq, isNull, ne, or } from 'drizzle-orm';
+import { z } from 'zod';
 import { db, withTx } from '../../db/client.js';
 import { memberships, outlets, payoutAccounts, users } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
@@ -50,6 +51,7 @@ export async function requireBrandOwner(userId: string, brandId: string): Promis
  * keeps a franchisee's bank details from the brand owner.
  */
 export async function requirePayoutAccount(userId: string, payoutAccountId: string): Promise<void> {
+  if (!z.uuid().safeParse(payoutAccountId).success) throw forbidden();
   const [account] = await db
     .select({ brandId: payoutAccounts.brandId })
     .from(payoutAccounts)

@@ -8,11 +8,24 @@ export type GatewayPayment = {
   method: string | null;
 };
 
+/**
+ * What Razorpay Route needs for a linked account, from the data held here: POST /v2/accounts takes
+ * the business and contact details, and the bank details go on its route product configuration.
+ * Razorpay requires an email, and refuses one already used by a linked account. Nothing here says
+ * the business type or category, so the adapter fixes those.
+ */
 export type LinkedAccountInput = {
+  /** Razorpay's reference_id, 3 to 20 characters. */
+  referenceId: string;
   legalName: string;
+  contactName: string;
+  phone: string;
+  email: string | null;
+  pan: string;
   holderName: string;
   accountNumber: string;
   ifsc: string;
+  address: { street: string | null; city: string | null; postalCode: string | null };
 };
 
 export type GatewayRefund = { id: string; status: string };
@@ -38,7 +51,14 @@ export interface PaymentGateway {
     idempotencyKey: string;
   }): Promise<GatewayRefund>;
   fetchRefund(id: string): Promise<GatewayRefund>;
-  createTransfer(a: { paymentId: string; accountId: string; amountPaise: number }): Promise<{ id: string }>;
+  /** Always creates the transfer on hold, until releaseTransfer. A key already seen gets the same transfer back. */
+  createTransfer(a: {
+    paymentId: string;
+    accountId: string;
+    amountPaise: number;
+    idempotencyKey: string;
+  }): Promise<{ id: string }>;
+  /** Releasing a transfer twice is harmless. */
   releaseTransfer(id: string): Promise<void>;
   createLinkedAccount(a: LinkedAccountInput): Promise<{ id: string }>;
   verifyWebhook(raw: string, signature: string): boolean;
@@ -66,7 +86,14 @@ export class FakeGateway implements PaymentGateway {
   refundStatus = 'pending';
   /** How many coming refunds are accepted, but answered with a timeout. */
   timeoutsAfterAccept = 0;
-  readonly transfers: { id: string; paymentId: string; accountId: string; amountPaise: number; released: boolean }[] = [];
+  readonly transfers: {
+    id: string;
+    paymentId: string;
+    accountId: string;
+    amountPaise: number;
+    idempotencyKey: string;
+    released: boolean;
+  }[] = [];
   readonly linkedAccounts: (LinkedAccountInput & { id: string })[] = [];
 
   /** Adds a payment, or replaces the one with this ID. */
@@ -135,7 +162,14 @@ export class FakeGateway implements PaymentGateway {
     refund.status = status;
   }
 
-  async createTransfer(a: { paymentId: string; accountId: string; amountPaise: number }): Promise<{ id: string }> {
+  async createTransfer(a: {
+    paymentId: string;
+    accountId: string;
+    amountPaise: number;
+    idempotencyKey: string;
+  }): Promise<{ id: string }> {
+    const sent = this.transfers.find((t) => t.idempotencyKey === a.idempotencyKey);
+    if (sent) return { id: sent.id };
     const transfer = { id: `trf_fake_${this.transfers.length + 1}`, released: false, ...a };
     this.transfers.push(transfer);
     return { id: transfer.id };

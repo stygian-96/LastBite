@@ -14,7 +14,7 @@ const reasonSchema = z.enum(['ran_out', 'quality', 'closing_early']);
 type Cancel = { actorId: string; reason: z.infer<typeof reasonSchema>; now: Date };
 
 const LIVE_STATUSES = ['held', 'paid'];
-const NOT_THE_BAG_REASONS = ['late_payment', 'duplicate_payment'];
+export const NOT_THE_BAG_REASONS = ['late_payment', 'duplicate_payment'];
 /** A restart needs an order to land in the moment before the drop is held, so a few are plenty. */
 const DROP_CANCEL_TRIES = 5;
 

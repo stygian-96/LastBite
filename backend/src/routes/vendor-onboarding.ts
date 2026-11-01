@@ -7,13 +7,33 @@ import { route } from '../lib/http.js';
 import { MAX_UPLOAD_BYTES, uploadFile, uploadKey } from '../lib/uploads.js';
 import { addDocument } from '../modules/onboarding/documents.js';
 import { getOutletStatus, saveOutletStep, startOutlet, submitOutlet } from '../modules/onboarding/outlets.js';
-import { createPayoutAccount, signAgreement } from '../modules/onboarding/payout-accounts.js';
+import { createPayoutAccount, signAgreement, updatePayoutAccount, type PayoutAccount } from '../modules/onboarding/payout-accounts.js';
 
 const FOLDERS = { photo: 'photos', logo: 'logos', document: 'documents' } as const;
 
 const uploadBody = uploadFile
   .extend({ purpose: z.enum(['photo', 'logo', 'document']) })
   .refine((b) => b.purpose === 'document' || b.contentType.startsWith('image/'));
+
+const payoutAccountDetails = z.object({
+  legalName: z.string(),
+  pan: z.string(),
+  holderName: z.string(),
+  accountNumber: z.string(),
+  ifsc: z.string(),
+});
+
+/** The encrypted columns never leave the server. */
+const publicPayoutAccount = (a: PayoutAccount) => ({
+  id: a.id,
+  brandId: a.brandId,
+  legalName: a.legalName,
+  panLast4: a.panLast4,
+  holderName: a.holderName,
+  accountLast4: a.accountLast4,
+  ifsc: a.ifsc,
+  status: a.status,
+});
 
 /** The caller's address: the proxy header when present, else the socket. */
 function clientIp(c: Context, forwarded: string): string {
@@ -68,36 +88,16 @@ export const vendorOnboarding = new Hono()
   )
   .post(
     '/payout-accounts',
-    route(
-      {
-        auth: 'user',
-        body: z.object({
-          brandId: z.uuid(),
-          legalName: z.string(),
-          pan: z.string(),
-          holderName: z.string(),
-          accountNumber: z.string(),
-          ifsc: z.string(),
-        }),
-      },
-      async ({ user, body }) => {
-        const { brandId, ...input } = body;
-        const a = await createPayoutAccount(user!.id, brandId, input);
-        // The encrypted columns never leave the server.
-        return {
-          payoutAccount: {
-            id: a.id,
-            brandId: a.brandId,
-            legalName: a.legalName,
-            panLast4: a.panLast4,
-            holderName: a.holderName,
-            accountLast4: a.accountLast4,
-            ifsc: a.ifsc,
-            status: a.status,
-          },
-        };
-      },
-    ),
+    route({ auth: 'user', body: payoutAccountDetails.extend({ brandId: z.uuid() }) }, async ({ user, body }) => {
+      const { brandId, ...input } = body;
+      return { payoutAccount: publicPayoutAccount(await createPayoutAccount(user!.id, brandId, input)) };
+    }),
+  )
+  .patch(
+    '/payout-accounts/:id',
+    route({ auth: 'user', body: payoutAccountDetails }, async ({ user, params, body, now }) => ({
+      payoutAccount: publicPayoutAccount(await updatePayoutAccount(user!.id, params.id!, body, now)),
+    })),
   )
   .post(
     '/payout-accounts/:id/agreement',

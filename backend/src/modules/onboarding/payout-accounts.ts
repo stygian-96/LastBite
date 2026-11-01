@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { withTx } from '../../db/client.js';
 import { agreements, payoutAccounts } from '../../db/schema.js';
@@ -48,6 +49,47 @@ export async function createPayoutAccount(
       entity: 'payout_account',
       entityId: row!.id,
       detail: { brandId },
+    });
+    return row!;
+  });
+}
+
+/**
+ * Replaces the legal and bank details, and pauses payouts until an admin verifies them again, which
+ * guards against account takeover. The linked account stays until then. The audit keeps the last 4
+ * digits only.
+ */
+export async function updatePayoutAccount(
+  userId: string,
+  id: string,
+  raw: PayoutAccountInput,
+  now: Date,
+): Promise<PayoutAccount> {
+  await requirePayoutAccount(userId, id);
+  const input = parseInput(payoutInput, raw);
+  return withTx(async (tx) => {
+    const [account] = await tx.select().from(payoutAccounts).where(eq(payoutAccounts.id, id)).for('update');
+    const [row] = await tx
+      .update(payoutAccounts)
+      .set({
+        legalName: input.legalName,
+        panEncrypted: encrypt(input.pan),
+        panLast4: input.pan.slice(-4),
+        holderName: input.holderName,
+        accountEncrypted: encrypt(input.accountNumber),
+        accountLast4: input.accountNumber.slice(-4),
+        ifsc: input.ifsc,
+        status: 'on_hold',
+        linkedClaimedAt: null,
+      })
+      .where(eq(payoutAccounts.id, id))
+      .returning();
+    await audit(tx, {
+      actorId: userId,
+      action: 'payout_account.update',
+      entity: 'payout_account',
+      entityId: id,
+      detail: { from: account!.status, accountLast4: input.accountNumber.slice(-4), at: now.toISOString() },
     });
     return row!;
   });
