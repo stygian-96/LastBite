@@ -1,0 +1,134 @@
+import { and, desc, eq, gt, inArray, not, or, type SQL } from 'drizzle-orm';
+import { db } from '../../db/client.js';
+import { brands, drops, orders, outlets, refunds } from '../../db/schema.js';
+import { ApiError } from '../../lib/errors.js';
+
+export type RefundSummary = { status: string; amountPaise: number };
+
+/** What a customer sees of an order. Never carries commission or payout data. */
+export type OrderView = {
+  id: string;
+  number: string;
+  status: string;
+  pricePaise: number;
+  valuePaise: number;
+  name: string;
+  type: string;
+  diet: string;
+  allergens: string[];
+  brandName: string;
+  branchName: string;
+  address: string | null;
+  mapsUrl: string | null;
+  pickupInstructions: string | null;
+  pickupStartAt: string;
+  pickupEndAt: string;
+  holdExpiresAt: string;
+  /** Null until the order is paid; it stays visible once collected. */
+  pickupCode: string | null;
+  refund: RefundSummary | null;
+};
+
+export type Viewer = { userId?: string; anonId?: string };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const notFound = () => new ApiError('not_found', 404, 'Order not found');
+
+const columns = {
+  id: orders.id,
+  number: orders.number,
+  status: orders.status,
+  pricePaise: orders.pricePaise,
+  holdExpiresAt: orders.holdExpiresAt,
+  pickupCode: orders.pickupCode,
+  valuePaise: drops.valuePaise,
+  name: drops.name,
+  type: drops.type,
+  diet: drops.diet,
+  allergens: drops.allergens,
+  pickupStartAt: drops.pickupStartAt,
+  pickupEndAt: drops.pickupEndAt,
+  brandName: brands.name,
+  branchName: outlets.branchName,
+  address: outlets.address,
+  mapsUrl: outlets.mapsUrl,
+  pickupInstructions: outlets.pickupInstructions,
+};
+
+function selectOrders(where: SQL | undefined) {
+  return db
+    .select(columns)
+    .from(orders)
+    .innerJoin(drops, eq(drops.id, orders.dropId))
+    .innerJoin(outlets, eq(outlets.id, orders.outletId))
+    .innerJoin(brands, eq(brands.id, outlets.brandId))
+    .where(where);
+}
+
+/** The newest refund of each order. */
+async function refundsByOrder(orderIds: string[]): Promise<Map<string, RefundSummary>> {
+  const map = new Map<string, RefundSummary>();
+  if (orderIds.length === 0) return map;
+  const rows = await db
+    .select({ orderId: refunds.orderId, status: refunds.status, amountPaise: refunds.amountPaise })
+    .from(refunds)
+    .where(inArray(refunds.orderId, orderIds))
+    .orderBy(desc(refunds.createdAt));
+  for (const r of rows) if (!map.has(r.orderId)) map.set(r.orderId, { status: r.status, amountPaise: r.amountPaise });
+  return map;
+}
+
+type Row = Awaited<ReturnType<typeof selectOrders>>[number];
+
+function toView(row: Row, refund: RefundSummary | null): OrderView {
+  return {
+    id: row.id,
+    number: `SJ-${row.number.toString()}`,
+    status: row.status,
+    pricePaise: row.pricePaise,
+    valuePaise: row.valuePaise,
+    name: row.name,
+    type: row.type,
+    diet: row.diet,
+    allergens: row.allergens.filter((a) => a !== ''),
+    brandName: row.brandName,
+    branchName: row.branchName,
+    address: row.address,
+    mapsUrl: row.mapsUrl,
+    pickupInstructions: row.pickupInstructions,
+    pickupStartAt: row.pickupStartAt,
+    pickupEndAt: row.pickupEndAt,
+    holdExpiresAt: row.holdExpiresAt,
+    pickupCode: row.status === 'paid' || row.status === 'collected' ? row.pickupCode : null,
+    refund,
+  };
+}
+
+async function toViews(rows: Row[]): Promise<OrderView[]> {
+  const refundMap = await refundsByOrder(rows.map((r) => r.id));
+  return rows.map((r) => toView(r, refundMap.get(r.id) ?? null));
+}
+
+/** One order for its owner (signed-in user or anonymous holder). Anyone else gets a 404, never a 403. */
+export async function getOrder(viewer: Viewer, orderId: string): Promise<OrderView> {
+  if (!UUID.test(orderId)) throw notFound();
+  const owner: SQL[] = [];
+  if (viewer.userId) owner.push(eq(orders.userId, viewer.userId));
+  if (viewer.anonId) owner.push(eq(orders.anonId, viewer.anonId));
+  if (owner.length === 0) throw notFound();
+  const [row] = await selectOrders(and(eq(orders.id, orderId), or(...owner)));
+  if (!row) throw notFound();
+  return (await toViews([row]))[0]!;
+}
+
+/**
+ * The signed-in user's orders, newest first. Active means held or paid with pickup not yet closed;
+ * everything else, refunded orders included, is past.
+ */
+export async function listMyOrders(userId: string, status: 'active' | 'past', now: Date): Promise<OrderView[]> {
+  const active = and(inArray(orders.status, ['held', 'paid']), gt(drops.pickupEndAt, now.toISOString()));
+  const rows = await selectOrders(and(eq(orders.userId, userId), status === 'active' ? active : not(active!))).orderBy(
+    desc(orders.createdAt),
+  );
+  return toViews(rows);
+}
