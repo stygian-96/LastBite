@@ -1,6 +1,6 @@
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
-import { db } from '../../src/db/client.js';
+import { db, pool } from '../../src/db/client.js';
 import { auditLog, memberships, users } from '../../src/db/schema.js';
 import { ApiError } from '../../src/lib/errors.js';
 import { createSession } from '../../src/modules/auth/session.js';
@@ -187,6 +187,36 @@ describe('staff management', () => {
     expect(await failure(addStaff(owner.id, a.id, { phone: '123', name: 'Y', role: 'counter' }))).toMatchObject({
       code: 'invalid_phone',
     });
+  });
+
+  test('adding the same person concurrently is a 409, never a 500', async () => {
+    const { owner, a } = await setup();
+    const staff = await makeUser();
+    // The other request: past its check, with its insert not yet committed. Timing parallel calls
+    // does not reach this reliably, as the first gets ahead while the pool opens connections.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`INSERT INTO memberships (user_id, brand_id, outlet_id, role) VALUES ($1, $2, $3, 'counter')`, [
+        staff.id,
+        a.brandId,
+        a.id,
+      ]);
+      const add = failure(addStaff(owner.id, a.id, { phone: staff.phone, name: 'X', role: 'counter' }));
+      await vi.waitFor(async () => {
+        const { rows } = await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        expect(rows[0]!.n).toBeGreaterThan(0);
+      });
+      await client.query('COMMIT');
+      const err = await add;
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err).toMatchObject({ code: 'already_member', status: 409 });
+    } finally {
+      client.release();
+    }
   });
 
   test('removal sets removed_at, audits, and a person can be re-added', async () => {

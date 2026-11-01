@@ -57,6 +57,7 @@ export const auth = new Hono()
       const token = getCookie(c, SESSION_COOKIE);
       if (token) await deleteSession(token);
       deleteCookie(c, SESSION_COOKIE, { path: '/', domain: cookieDomain(), secure: true });
+      deleteCookie(c, 'anon_id', { path: '/', domain: cookieDomain(), secure: true });
       return { ok: true };
     }),
   );

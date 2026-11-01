@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { db, pool } from '../../src/db/client.js';
 import { users } from '../../src/db/schema.js';
+import { signAnonId } from '../../src/lib/crypto.js';
 import { env } from '../../src/lib/env.js';
 import { ApiError } from '../../src/lib/errors.js';
 import { handleError, route } from '../../src/lib/http.js';
@@ -224,6 +225,20 @@ describe('auth routes', () => {
     expect(out.status).toBe(200);
     const token = decodeURIComponent(pair.split('=')[1]!);
     expect(await getSessionUser(token, new Date())).toBeNull();
+  });
+
+  test('logout also clears the anon_id cookie', async () => {
+    await sendOtp(PHONE, '1.1.1.1', new Date());
+    const { token } = await verifyOtp(PHONE, lastCode(), new Date());
+    const out = await app.request('/api/v1/auth/logout', {
+      method: 'POST',
+      headers: { cookie: `session=${token}; anon_id=${signAnonId('shared')}`, origin: env().FRONTEND_ORIGIN },
+    });
+    expect(out.status).toBe(200);
+    const cleared = out.headers.getSetCookie();
+    expect(cleared.find((c) => c.startsWith('session='))).toMatch(/Max-Age=0/i);
+    expect(cleared.find((c) => c.startsWith('anon_id='))).toMatch(/Max-Age=0/i);
+    expect(cleared.find((c) => c.startsWith('anon_id='))).toMatch(/Path=\//i);
   });
 
   test('send validates the body', async () => {

@@ -1,9 +1,10 @@
 import { and, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { db, withTx, type Tx } from '../../db/client.js';
 import { drops, orders, outlets } from '../../db/schema.js';
+import { isUniqueViolation } from '../../lib/db-errors.js';
 import { ApiError } from '../../lib/errors.js';
 import { commissionPaise } from '../../lib/money.js';
-import { rateLimit } from '../../lib/rate-limit.js';
+import { checkRateLimit, countRateLimit } from '../../lib/rate-limit.js';
 import { ownedOrder, type Viewer } from './views.js';
 
 export type Order = typeof orders.$inferSelect;
@@ -15,13 +16,6 @@ const HOLD_WINDOW_SECONDS = 3600;
 
 // The statuses covered by the one_order_per_outlet_night index.
 const NIGHT_ORDER_STATUSES = ['held', 'paid', 'collected', 'no_show'];
-
-/** True when e is Postgres rejecting a write on this unique index. Drizzle wraps driver errors in `cause`. */
-function violates(e: unknown, index: string): boolean {
-  const err = e as { cause?: unknown } | null;
-  const pg = (err?.cause ?? err) as { code?: string; constraint?: string } | null;
-  return pg?.code === '23505' && pg.constraint === index;
-}
 
 async function findNightOrder(
   q: Tx | typeof db,
@@ -96,8 +90,9 @@ export async function reserveDrop(
   r: { dropId: string; userId?: string; anonId?: string; ip: string },
   now: Date,
 ): Promise<Order> {
-  // Outside the transaction, so a refused attempt still counts.
-  await rateLimit(`hold:ip:${r.ip || 'unknown'}`, HOLDS_PER_IP, HOLD_WINDOW_SECONDS, now);
+  // Signed-out holds only, and only those that succeed, so sold-out taps on a shared IP cost nothing.
+  const ipLimitKey = r.userId ? undefined : `hold:ip:${r.ip || 'unknown'}`;
+  if (ipLimitKey) await checkRateLimit(ipLimitKey, HOLDS_PER_IP, HOLD_WINDOW_SECONDS, now);
   const nowIso = now.toISOString();
 
   let order: Order | undefined;
@@ -145,9 +140,10 @@ export async function reserveDrop(
     });
   } catch (e) {
     // The rollback has put the bag back.
-    if (!violates(e, 'one_order_per_outlet_night') && !violates(e, 'one_hold_per_anon')) throw e;
+    if (!isUniqueViolation(e, 'one_order_per_outlet_night') && !isUniqueViolation(e, 'one_hold_per_anon')) throw e;
   }
   if (!order) throw await refusal(r, now);
+  if (ipLimitKey) await countRateLimit(ipLimitKey, HOLD_WINDOW_SECONDS, now);
   return order;
 }
 
@@ -214,7 +210,7 @@ export async function attachHolds(
       await tx.transaction((sp) => sp.update(orders).set({ userId }).where(eq(orders.id, hold.id)));
       return { attachedOrderId: hold.id };
     } catch (e) {
-      if (!violates(e, 'one_order_per_outlet_night')) throw e;
+      if (!isUniqueViolation(e, 'one_order_per_outlet_night')) throw e;
     }
 
     const existingOrderId = await findNightOrder(tx, userId, hold.outletId, hold.serviceDate);

@@ -4,6 +4,7 @@ import { db, withTx, type Tx } from '../../db/client.js';
 import { brands, documents, memberships, outlets, payoutAccounts } from '../../db/schema.js';
 import { getStore } from '../../integrations/storage.js';
 import { audit } from '../../lib/audit.js';
+import { isUniqueViolation } from '../../lib/db-errors.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 
 export type Document = typeof documents.$inferSelect;
@@ -30,7 +31,6 @@ export type Application = {
   warnings: { code: string; message: string; outletIds: string[] }[];
 };
 
-const isUniqueViolation = (e: unknown) => (e as { code?: string } | null)?.code === '23505';
 const invalidState = () => new ApiError('invalid_state', 409, 'That change is not allowed from the current status');
 
 // ---------- The review queue ----------

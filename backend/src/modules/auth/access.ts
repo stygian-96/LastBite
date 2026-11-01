@@ -2,6 +2,7 @@ import { and, eq, isNull, ne, or } from 'drizzle-orm';
 import { db, withTx } from '../../db/client.js';
 import { memberships, outlets, payoutAccounts, users } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
+import { isUniqueViolation } from '../../lib/db-errors.js';
 import { ApiError } from '../../lib/errors.js';
 import { normalizePhone } from './otp.js';
 
@@ -91,8 +92,6 @@ export async function listAccessibleOutlets(userId: string): Promise<Outlet[]> {
     .where(and(eq(memberships.userId, userId), isNull(memberships.removedAt)));
   return [...new Map(rows.map((r) => [r.outlet.id, r.outlet])).values()];
 }
-
-const isUniqueViolation = (e: unknown) => (e as { code?: string } | null)?.code === '23505';
 
 /** Owner-only. Finds the user by phone or creates them, then adds an outlet membership. */
 export async function addStaff(

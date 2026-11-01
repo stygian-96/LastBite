@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
 import { agreements, brands, documents, listings, memberships, outlets, payoutAccounts } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
+import { isUniqueViolation } from '../../lib/db-errors.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { requireBrandOwner, requireOutlet, requirePayoutAccount, type Outlet } from '../auth/access.js';
 import { normalizePhone } from '../auth/otp.js';
@@ -13,8 +14,6 @@ const CATEGORIES = ['bakery', 'cafe', 'restaurant', 'sweets', 'kitchen'] as cons
 const LAST_STEP = 5;
 const EDITABLE = ['draft', 'changes_needed'];
 const PHOTO_LIMIT = 8;
-
-const isUniqueViolation = (e: unknown) => (e as { code?: string } | null)?.code === '23505';
 
 // ---------- Formats ----------
 

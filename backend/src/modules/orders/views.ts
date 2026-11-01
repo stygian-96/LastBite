@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, not, or, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, not, or, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { brands, drops, orders, outlets, refunds } from '../../db/schema.js';
 import { ApiError } from '../../lib/errors.js';
@@ -109,12 +109,15 @@ async function toViews(rows: Row[]): Promise<OrderView[]> {
   return rows.map((r) => toView(r, refundMap.get(r.id) ?? null));
 }
 
-/** Matches this order only for its owner (signed-in user or anonymous holder). */
+/**
+ * Matches this order only for its owner: its user, or its anonymous holder until it has a user.
+ * Once attached, the cookie stays in the browser, and the next person on it must not own the order.
+ */
 export function ownedOrder(viewer: Viewer, orderId: string): SQL | undefined {
   if (!UUID.test(orderId)) throw notFound();
   const owner: SQL[] = [];
   if (viewer.userId) owner.push(eq(orders.userId, viewer.userId));
-  if (viewer.anonId) owner.push(eq(orders.anonId, viewer.anonId));
+  if (viewer.anonId) owner.push(and(eq(orders.anonId, viewer.anonId), isNull(orders.userId))!);
   if (owner.length === 0) throw notFound();
   return and(eq(orders.id, orderId), or(...owner));
 }

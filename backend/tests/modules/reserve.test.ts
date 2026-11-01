@@ -10,6 +10,7 @@ import { sendOtp } from '../../src/modules/auth/otp.js';
 import { createSession } from '../../src/modules/auth/session.js';
 import { expireHolds } from '../../src/modules/orders/expire.js';
 import { attachHolds, releaseHold, releaseStock, reserveDrop } from '../../src/modules/orders/reserve.js';
+import { getOrder } from '../../src/modules/orders/views.js';
 import { app } from '../../src/app.js';
 import { makeDrop, makeLiveOutlet, makeOrder, makePaidOrder, makeUser } from '../helpers/factories.js';
 import { getDropRow, getOrderRow, resetDb } from '../helpers/db.js';
@@ -151,21 +152,47 @@ describe('reserveDrop', () => {
     expect((await getDropRow(other.id)).reservedCount).toBe(0);
   });
 
-  test('sixth hold in an hour from one IP returns 429, whatever became of the attempts', async () => {
-    const drop = await makeDrop({ quantity: 3 });
-    for (let i = 0; i < 3; i++) await reserveDrop({ dropId: drop.id, anonId: `a${i}`, ip: '9.9.9.9' }, now);
-    for (let i = 3; i < 5; i++) {
-      expect(await failure(reserveDrop({ dropId: drop.id, anonId: `a${i}`, ip: '9.9.9.9' }, now))).toMatchObject({
-        code: 'sold_out',
-      });
-    }
+  test('sixth signed-out hold in an hour from one IP returns 429', async () => {
+    const drop = await makeDrop({ quantity: 10 });
+    for (let i = 0; i < 5; i++) await reserveDrop({ dropId: drop.id, anonId: `a${i}`, ip: '9.9.9.9' }, now);
     expect(await failure(reserveDrop({ dropId: drop.id, anonId: 'a5', ip: '9.9.9.9' }, now))).toMatchObject({
       code: 'rate_limited',
       status: 429,
     });
-    expect(await failure(reserveDrop({ dropId: drop.id, anonId: 'a5', ip: '9.9.9.8' }, now))).toMatchObject({
-      code: 'sold_out',
+    expect((await getDropRow(drop.id)).reservedCount).toBe(5);
+    await reserveDrop({ dropId: drop.id, anonId: 'a5', ip: '9.9.9.8' }, now);
+    await reserveDrop({ dropId: drop.id, anonId: 'a6', ip: '9.9.9.9' }, seconds(now, 3600));
+  });
+
+  test('refused attempts do not spend the IP quota', async () => {
+    const soldOut = await makeDrop({ quantity: 1 });
+    await reserveDrop({ dropId: soldOut.id, anonId: 'holder', ip: '9.9.9.9' }, now);
+    const paused = await makeDrop({ status: 'paused' });
+    for (let i = 0; i < 6; i++) {
+      expect(await failure(reserveDrop({ dropId: soldOut.id, anonId: `t${i}`, ip: '9.9.9.9' }, now))).toMatchObject({
+        code: 'sold_out',
+      });
+      expect(await failure(reserveDrop({ dropId: paused.id, anonId: `t${i}`, ip: '9.9.9.9' }, now))).toMatchObject({
+        code: 'not_on_sale',
+      });
+      expect(await failure(reserveDrop({ dropId: paused.id, anonId: 'holder', ip: '9.9.9.9' }, now))).toMatchObject({
+        code: 'hold_exists',
+      });
+    }
+    const open = await makeDrop({ quantity: 10 });
+    for (let i = 0; i < 4; i++) await reserveDrop({ dropId: open.id, anonId: `b${i}`, ip: '9.9.9.9' }, now);
+    expect(await failure(reserveDrop({ dropId: open.id, anonId: 'b4', ip: '9.9.9.9' }, now))).toMatchObject({
+      code: 'rate_limited',
     });
+  });
+
+  test('signed-in customers are exempt from the IP limit, and do not spend it', async () => {
+    const user = await makeUser();
+    for (let i = 0; i < 6; i++) await reserveDrop({ dropId: (await makeDrop()).id, userId: user.id, ip: '9.9.9.9' }, now);
+
+    const drop = await makeDrop({ quantity: 10 });
+    for (let i = 0; i < 5; i++) await reserveDrop({ dropId: drop.id, anonId: `a${i}`, ip: '9.9.9.9' }, now);
+    await reserveDrop({ dropId: (await makeDrop()).id, userId: user.id, ip: '9.9.9.9' }, now);
   });
 
   test('signed-in customer with an order at that outlet gets 409 already_ordered', async () => {
@@ -439,6 +466,25 @@ describe('attachHolds', () => {
     expect(row.userId).toBe(user.id);
     expect(row.holdExpiresAt).toBe(order.holdExpiresAt);
     expect((await getDropRow(drop.id)).reservedCount).toBe(1);
+  });
+
+  test('once attached, the anon ID no longer owns the order', async () => {
+    const user = await makeUser();
+    const drop = await makeDrop();
+    const order = await reserveDrop({ dropId: drop.id, anonId: 'shared-browser', ip: '1.1.1.1' }, now);
+    await attachHolds('shared-browser', user.id, now);
+
+    const nextPerson = { anonId: 'shared-browser' };
+    expect(await failure(getOrder(nextPerson, order.id))).toMatchObject({ code: 'not_found', status: 404 });
+    expect(await failure(releaseHold(nextPerson, order.id, now))).toMatchObject({ code: 'not_found', status: 404 });
+    const otherUser = { userId: (await makeUser()).id, anonId: 'shared-browser' };
+    expect(await failure(getOrder(otherUser, order.id))).toMatchObject({ status: 404 });
+    expect((await getOrderRow(order.id)).status).toBe('held');
+    expect((await getDropRow(drop.id)).reservedCount).toBe(1);
+
+    expect((await getOrder({ userId: user.id, anonId: 'shared-browser' }, order.id)).id).toBe(order.id);
+    await releaseHold({ userId: user.id }, order.id, now);
+    expect((await getDropRow(drop.id)).reservedCount).toBe(0);
   });
 
   test('nothing to attach, or a hold already past its expiry, returns nothing', async () => {
