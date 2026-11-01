@@ -5,6 +5,8 @@ const schema = z.object({
   TEST_DATABASE_URL: z.string().min(1).optional(),
   FRONTEND_ORIGIN: z.string().min(1),
   COOKIE_DOMAIN: z.string().min(1),
+  ENCRYPTION_KEY: z.string().min(1),
+  SESSION_SECRET: z.string().min(16),
   PORT: z.coerce.number().int().positive().default(4000),
 });
 
