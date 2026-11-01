@@ -1,8 +1,7 @@
 .remember/
 .superpowers/
 node_modules/
-.next/
+dist/
 .env*
 !.env.example
 *.tsbuildinfo
-next-env.d.ts
