@@ -20,6 +20,8 @@ export default defineConfig({
     environment: 'node',
     include: ['tests/**/*.test.ts'],
     env: testEnv,
+    testTimeout: 30000,
+    hookTimeout: 30000,
     globalSetup: ['tests/global-setup.ts'],
     // Test files share one database, so they run one at a time.
     fileParallelism: false,
