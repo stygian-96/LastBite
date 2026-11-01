@@ -507,6 +507,9 @@ ALTER TABLE refunds ADD COLUMN adjusted_payout_id uuid REFERENCES payouts(id);
 ALTER TABLE payouts ADD COLUMN tax_paise integer NOT NULL DEFAULT 0;
 ALTER TABLE payments ADD COLUMN last_checked_at timestamptz;
 ALTER TABLE refunds ADD COLUMN sending_at timestamptz;
+ALTER TABLE refunds ADD COLUMN send_errors smallint NOT NULL DEFAULT 0;
+ALTER TABLE refunds ADD COLUMN failed_razorpay_ids text[] NOT NULL DEFAULT '{}';
+ALTER TABLE refunds ADD COLUMN last_checked_at timestamptz;
 ```
 
 - `rate_limits` gives shared counters across serverless instances.
@@ -515,6 +518,9 @@ ALTER TABLE refunds ADD COLUMN sending_at timestamptz;
 - `payouts.tax_paise` keeps tax withheld separate from gateway fees.
 - `payments.last_checked_at` lets reconciliation take the longest-unchecked payment first.
 - `refunds.sending_at` marks a refund claimed by a run, so two runs cannot both send it.
+- `refunds.send_errors` counts sends with an unclear result, which keep their idempotency key.
+- `refunds.failed_razorpay_ids` remembers gateway IDs counted as failed, so a late report of one is not redelivered.
+- `refunds.last_checked_at` lets the refund job ask the gateway about the longest-unchecked sent refund first.
 
 ## 6. State machines
 

@@ -424,9 +424,11 @@ describe('handleWebhook', () => {
       expect((await refundRow(a.id)).status).toBe('processed');
     });
 
-    test('an unknown refund ID is logged and ignored', async () => {
-      await deliver(refundEvent('refund.processed', 'rfnd_unknown'), 'e1');
-      expect(await storedEvents()).toMatchObject([{ eventId: 'e1', eventType: 'refund.processed' }]);
+    test('an unknown refund ID fails and stores nothing, so Razorpay delivers it again', async () => {
+      for (const type of ['refund.processed', 'refund.failed']) {
+        await expect(deliver(refundEvent(type, 'rfnd_unknown'), 'e1')).rejects.toThrow();
+      }
+      expect(await storedEvents()).toHaveLength(0);
     });
   });
 });

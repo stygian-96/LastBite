@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db, pool } from '../../src/db/client.js';
 import { auditLog, drops, memberships, orders, outlets, payments, refunds } from '../../src/db/schema.js';
-import { FakeGateway, setGateway, type GatewayPayment } from '../../src/integrations/payments.js';
+import { FakeGateway, GatewayRefusedError, setGateway, type GatewayPayment } from '../../src/integrations/payments.js';
 import { env } from '../../src/lib/env.js';
 import { ApiError } from '../../src/lib/errors.js';
 import { createSession } from '../../src/modules/auth/session.js';
@@ -22,6 +22,7 @@ const seconds = (d: Date, s: number) => new Date(d.getTime() + s * 1000);
 // Past a 5 minute hold and its 60 seconds of grace.
 const later = seconds(now, 5 * 60 + 61);
 const LEASE_SECONDS = 5 * 60;
+const SWEEP_SECONDS = 15 * 60;
 
 let gateway: FakeGateway;
 let seq = 0;
@@ -92,6 +93,61 @@ async function cancelledOrder() {
   await cancelOrder(owner.id, paid.order.id, 'quality', now);
   const [refund] = await refundsFor(paid.order.id);
   return { ...paid, refund: refund! };
+}
+
+/** A refund already on the payment, as an admin's issue resolution leaves it. */
+const earlierRefund = (orderId: string, paymentId: string, amountPaise: number, status = 'processed') =>
+  db.insert(refunds).values({ orderId, paymentId, amountPaise, reason: 'issue_resolution', chargedTo: 'vendor', status });
+
+/** Many refunds on cancelled orders, unsent unless the overrides say otherwise. */
+async function manyRefunds(count: number, prefix: string, o: Partial<typeof refunds.$inferInsert> = {}) {
+  const drop = await makeDrop({ quantity: count + 5, reservedCount: count + 5 });
+  const rows = await db
+    .insert(orders)
+    .values(
+      Array.from({ length: count }, (_, i) => ({
+        anonId: `${prefix}${i}`,
+        status: 'cancelled',
+        dropId: drop.id,
+        outletId: drop.outletId,
+        serviceDate: drop.serviceDate,
+        pricePaise: 10000,
+        commissionBps: 2000,
+        commissionPaise: 2000,
+        holdExpiresAt: now.toISOString(),
+      })),
+    )
+    .returning({ id: orders.id });
+  const paid = await db
+    .insert(payments)
+    .values(
+      rows.map((r, i) => ({
+        orderId: r.id,
+        razorpayOrderId: `order_${prefix}_${i}`,
+        razorpayPaymentId: `pay_${prefix}_${i}`,
+        status: 'captured',
+        amountPaise: 10000,
+      })),
+    )
+    .returning({ id: payments.id, orderId: payments.orderId });
+  await db.insert(refunds).values(
+    paid.map((p, i) => ({
+      orderId: p.orderId,
+      paymentId: p.id,
+      amountPaise: 10000,
+      reason: 'vendor_cancelled',
+      chargedTo: 'vendor',
+      ...o,
+      ...(o.razorpayRefundId ? { razorpayRefundId: `${o.razorpayRefundId}_${i}` } : {}),
+    })),
+  );
+}
+
+/** Sends one refund, so the gateway knows it, and hands back its ID. */
+async function sentRefund() {
+  const cancelled = await cancelledOrder();
+  await processRefunds(now);
+  return { ...cancelled, sentId: gateway.refunds.at(-1)!.id };
 }
 
 const refundRow = async (id: string) => (await db.select().from(refunds).where(eq(refunds.id, id)))[0]!;
@@ -232,22 +288,40 @@ describe('cancelOrder', () => {
     });
   });
 
-  test('a paid order with nothing left to refund is refused, and nothing changes', async () => {
+  test('a paid order fully refunded already is cancelled with no new refund, and audited', async () => {
     const { order, payment, drop } = await paidOrder();
-    await db.insert(refunds).values({
-      orderId: order.id,
-      paymentId: payment.id,
-      amountPaise: 10000,
-      reason: 'issue_resolution',
-      chargedTo: 'vendor',
-    });
+    await earlierRefund(order.id, payment.id, 10000);
     const owner = await staffOf(drop.outletId);
-    expect(await failure(cancelOrder(owner.id, order.id, 'ran_out', now))).toMatchObject({
-      code: 'nothing_to_refund',
-      status: 409,
+
+    await cancelOrder(owner.id, order.id, 'ran_out', now);
+
+    expect((await getOrderRow(order.id)).status).toBe('cancelled');
+    expect((await getDropRow(drop.id)).reservedCount).toBe(0);
+    expect(await refundsFor(order.id)).toMatchObject([{ reason: 'issue_resolution' }]);
+    expect(await auditRows('order.cancel')).toHaveLength(1);
+    expect(await auditRows('order.cancel_no_refund')).toMatchObject([
+      { actorId: owner.id, entity: 'order', entityId: order.id, detail: { reason: 'ran_out', paymentId: payment.id } },
+    ]);
+  });
+
+  test('a partly refunded order gets the remainder back, alongside the earlier refund', async () => {
+    const { order, payment, drop } = await paidOrder();
+    await earlierRefund(order.id, payment.id, 3000, 'pending');
+    await cancelOrder((await staffOf(drop.outletId)).id, order.id, 'ran_out', now);
+    expect((await refundsFor(order.id)).find((r) => r.reason === 'vendor_cancelled')).toMatchObject({
+      paymentId: payment.id,
+      amountPaise: 7000,
     });
-    expect((await getOrderRow(order.id)).status).toBe('paid');
-    expect((await getDropRow(drop.id)).reservedCount).toBe(1);
+    expect(await auditRows('order.cancel_no_refund')).toHaveLength(0);
+  });
+
+  test('a failed earlier refund does not count against the remainder', async () => {
+    const { order, payment, drop } = await paidOrder();
+    await earlierRefund(order.id, payment.id, 10000, 'failed');
+    await cancelOrder((await staffOf(drop.outletId)).id, order.id, 'ran_out', now);
+    expect((await refundsFor(order.id)).find((r) => r.reason === 'vendor_cancelled')).toMatchObject({
+      amountPaise: 10000,
+    });
   });
 
   test('two cancels at once refund and free stock once', async () => {
@@ -289,6 +363,30 @@ describe('cancelDrop', () => {
       { actorId: owner.id, entity: 'drop', entityId: drop.id, detail: { reason: 'closing_early' } },
     ]);
     expect(await auditRows('order.cancel')).toHaveLength(2);
+  });
+
+  test('earlier refunds on some orders do not block the drop, and each gets what is left', async () => {
+    const good = await paidOrder();
+    const { drop } = good;
+    const full = await anotherOrder(drop.id, 'paid');
+    await earlierRefund(full.order.id, full.payment.id, 10000);
+    const part = await anotherOrder(drop.id, 'paid');
+    await earlierRefund(part.order.id, part.payment.id, 2500);
+    const alsoGood = await anotherOrder(drop.id, 'paid');
+
+    await cancelDrop((await staffOf(drop.outletId)).id, drop.id, 'ran_out', now);
+
+    expect(await getDropRow(drop.id)).toMatchObject({ status: 'cancelled', reservedCount: 0 });
+    for (const { order } of [good, full, part, alsoGood]) {
+      expect((await getOrderRow(order.id)).status).toBe('cancelled');
+    }
+    const cancelRefund = async (orderId: string) =>
+      (await refundsFor(orderId)).find((r) => r.reason === 'vendor_cancelled');
+    expect((await cancelRefund(good.order.id))!.amountPaise).toBe(10000);
+    expect((await cancelRefund(alsoGood.order.id))!.amountPaise).toBe(10000);
+    expect((await cancelRefund(part.order.id))!.amountPaise).toBe(7500);
+    expect(await cancelRefund(full.order.id)).toBeUndefined();
+    expect(await auditRows('order.cancel_no_refund')).toMatchObject([{ entityId: full.order.id }]);
   });
 
   test('cancelling a drop expires its held orders and blocks new holds', async () => {
@@ -589,8 +687,7 @@ describe('processRefunds', () => {
 
   test('marks the refund processed at once if the gateway says so', async () => {
     const { refund } = await cancelledOrder();
-    const send = gateway.refund.bind(gateway);
-    gateway.refund = async (a) => ({ ...(await send(a)), status: 'processed' });
+    gateway.refundStatus = 'processed';
     await processRefunds(now);
     expect(await refundRow(refund.id)).toMatchObject({ status: 'processed', razorpayRefundId: gateway.refunds[0]!.id });
   });
@@ -635,7 +732,7 @@ describe('processRefunds', () => {
     const keys: string[] = [];
     gateway.refund = (a) => {
       keys.push(a.idempotencyKey);
-      return Promise.reject(new Error('gateway down'));
+      return Promise.reject(new GatewayRefusedError('refused'));
     };
 
     expect(await processRefunds(now)).toBe(0);
@@ -662,6 +759,7 @@ describe('processRefunds', () => {
     await processRefunds(now);
     expect((await paymentRow(payment.id)).transferStatus).toBe('reversed');
 
+    gateway.setRefundStatus(gateway.refunds[0]!.id, 'failed');
     await deliver(refundEvent('refund.failed', gateway.refunds[0]!.id));
     expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 1, razorpayRefundId: null });
     expect((await paymentRow(payment.id)).transferStatus).toBe('on_hold');
@@ -681,7 +779,105 @@ describe('processRefunds', () => {
     gateway.refund = (a) => (a.paymentId === bad.gp.id ? Promise.reject(new Error('gateway down')) : send(a));
     expect(await processRefunds(now)).toBe(1);
     expect((await refundRow(good.refund.id)).razorpayRefundId).not.toBeNull();
-    expect((await refundRow(bad.refund.id)).attempts).toBe(1);
+    expect((await refundRow(bad.refund.id)).sendErrors).toBe(1);
+  });
+
+  test('a timed-out send that the gateway accepted is sent once, partial or not', async () => {
+    const { order, payment } = await paidOrder();
+    await db.update(orders).set({ status: 'cancelled' }).where(eq(orders.id, order.id));
+    await earlierRefund(order.id, payment.id, 4000, 'pending');
+    const [refund] = await refundsFor(order.id);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    gateway.timeoutsAfterAccept = 1;
+
+    expect(await processRefunds(now)).toBe(0);
+    expect(await refundRow(refund!.id)).toMatchObject({
+      status: 'pending',
+      attempts: 0,
+      sendErrors: 1,
+      sendingAt: null,
+      razorpayRefundId: null,
+    });
+
+    // A new key here would pay out twice: 8000 is within the payment, so the gateway would not stop it.
+    expect(await processRefunds(now)).toBe(1);
+    expect(gateway.refunds).toMatchObject([{ amountPaise: 4000, idempotencyKey: `${refund!.id}-0` }]);
+    expect(await refundRow(refund!.id)).toMatchObject({ razorpayRefundId: gateway.refunds[0]!.id, attempts: 0 });
+  });
+
+  test('an over-refund the gateway refuses moves to the next attempt', async () => {
+    const { refund, gp } = await cancelledOrder();
+    await gateway.refund({ paymentId: gp.id, amountPaise: 1, reverseTransfer: false, idempotencyKey: 'other' });
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await processRefunds(now)).toBe(0);
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 1, sendErrors: 0 });
+  });
+
+  test('five unclear results audit refund.stuck once, and it keeps trying on one key', async () => {
+    const { refund } = await cancelledOrder();
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const keys = new Set<string>();
+    gateway.refund = (a) => {
+      keys.add(a.idempotencyKey);
+      return Promise.reject(new Error('502'));
+    };
+
+    for (let i = 0; i < 4; i++) await processRefunds(now);
+    expect(await auditRows('refund.stuck')).toHaveLength(0);
+    await processRefunds(now);
+    expect(await auditRows('refund.stuck')).toMatchObject([
+      { entity: 'refund', entityId: refund.id, detail: { sendErrors: 5, attempts: 0 } },
+    ]);
+    await processRefunds(now);
+    expect(await auditRows('refund.stuck')).toHaveLength(1);
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 0, sendErrors: 6 });
+    expect([...keys]).toEqual([`${refund.id}-0`]);
+  });
+
+  test('a failed response from the gateway is a definite failure', async () => {
+    const { refund, payment } = await cancelledOrder();
+    await setTransfer(payment.id, 'on_hold');
+    gateway.refundStatus = 'failed';
+    expect(await processRefunds(now)).toBe(0);
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 1, razorpayRefundId: null });
+    expect((await paymentRow(payment.id)).transferStatus).toBe('on_hold');
+
+    gateway.refundStatus = 'pending';
+    await processRefunds(now);
+    expect(gateway.refunds[1]).toMatchObject({ idempotencyKey: `${refund.id}-1` });
+    await deliver(refundEvent('refund.failed', gateway.refunds[0]!.id));
+    expect((await refundRow(refund.id)).attempts).toBe(1);
+  });
+
+  test('a claim is renewed before each send, so a long batch does not outlive it', async () => {
+    const first = await cancelledOrder();
+    const second = await cancelledOrder();
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skew);
+    const send = gateway.refund.bind(gateway);
+    let stampAtSecond: string | null = null;
+    gateway.refund = async (a) => {
+      if (a.idempotencyKey === `${first.refund.id}-0`) skew = (LEASE_SECONDS + 60) * 1000;
+      else stampAtSecond = (await refundRow(second.refund.id)).sendingAt;
+      return send(a);
+    };
+    await processRefunds(now);
+    expect(new Date(stampAtSecond!).getTime()).toBeGreaterThanOrEqual(seconds(now, LEASE_SECONDS + 60).getTime());
+  });
+
+  test('a row another run has taken since is not sent by this one', async () => {
+    const first = await cancelledOrder();
+    const second = await cancelledOrder();
+    const send = gateway.refund.bind(gateway);
+    const taken = seconds(now, LEASE_SECONDS + 1).toISOString();
+    gateway.refund = async (a) => {
+      await db.update(refunds).set({ sendingAt: taken }).where(eq(refunds.id, second.refund.id));
+      return send(a);
+    };
+    expect(await processRefunds(now)).toBe(1);
+    expect(gateway.refunds).toMatchObject([{ idempotencyKey: `${first.refund.id}-0` }]);
+    expect(new Date((await refundRow(second.refund.id)).sendingAt!).getTime()).toBe(new Date(taken).getTime());
   });
 
   test('rows already sent, processed or failed are left alone', async () => {
@@ -718,7 +914,7 @@ describe('processRefunds', () => {
     const transaction = db.transaction.bind(db);
     let calls = 0;
     const spy = vi.spyOn(db, 'transaction').mockImplementation(((fn: never) =>
-      ++calls === 1 ? transaction(fn) : Promise.reject(new Error('process died'))) as never);
+      ++calls === 2 ? Promise.reject(new Error('process died')) : transaction(fn)) as never);
     expect(await processRefunds(now)).toBe(0);
     spy.mockRestore();
     expect(logged).toHaveBeenCalled();
@@ -736,7 +932,7 @@ describe('processRefunds', () => {
     expect(calledWith).toHaveLength(0);
 
     // Past it, the same attempt goes again with the same key, and the gateway answers with the same refund.
-    expect(await processRefunds(seconds(now, LEASE_SECONDS + 1))).toBe(1);
+    expect(await processRefunds(seconds(now, LEASE_SECONDS + 10))).toBe(1);
     expect(calledWith).toEqual([`${refund.id}-0`]);
     expect(gateway.refunds).toHaveLength(1);
     expect(await refundRow(refund.id)).toMatchObject({ razorpayRefundId: gateway.refunds[0]!.id, attempts: 0 });
@@ -744,45 +940,7 @@ describe('processRefunds', () => {
   });
 
   test('sends at most 100 in a run', async () => {
-    const drop = await makeDrop({ quantity: 110, reservedCount: 110 });
-    const rows = await db
-      .insert(orders)
-      .values(
-        Array.from({ length: 101 }, (_, i) => ({
-          anonId: `a${i}`,
-          status: 'cancelled',
-          dropId: drop.id,
-          outletId: drop.outletId,
-          serviceDate: drop.serviceDate,
-          pricePaise: 10000,
-          commissionBps: 2000,
-          commissionPaise: 2000,
-          holdExpiresAt: now.toISOString(),
-        })),
-      )
-      .returning({ id: orders.id });
-    const paid = await db
-      .insert(payments)
-      .values(
-        rows.map((r, i) => ({
-          orderId: r.id,
-          razorpayOrderId: `order_b_${i}`,
-          razorpayPaymentId: `pay_b_${i}`,
-          status: 'captured',
-          amountPaise: 10000,
-        })),
-      )
-      .returning({ id: payments.id, orderId: payments.orderId });
-    await db.insert(refunds).values(
-      paid.map((p) => ({
-        orderId: p.orderId,
-        paymentId: p.id,
-        amountPaise: 10000,
-        reason: 'vendor_cancelled',
-        chargedTo: 'vendor',
-      })),
-    );
-
+    await manyRefunds(101, 'b');
     expect(await processRefunds(now)).toBe(100);
     expect(gateway.refunds).toHaveLength(100);
     expect(await processRefunds(now)).toBe(1);
@@ -795,6 +953,123 @@ describe('processRefunds', () => {
     const [refund] = await refundsFor(order.id);
     await processRefunds(now);
     expect(gateway.refunds).toMatchObject([{ paymentId: second.id, idempotencyKey: `${refund!.id}-0` }]);
+  });
+});
+
+describe('refunds lost between the gateway and us', () => {
+  test('a refund.processed that beats the saved ID fails, and its redelivery lands', async () => {
+    const { refund } = await cancelledOrder();
+    const send = gateway.refund.bind(gateway);
+    const early = 'evt_early';
+    let raw = '';
+    gateway.refund = async (a) => {
+      const sent = await send(a);
+      raw = refundEvent('refund.processed', sent.id);
+      await expect(handleWebhook(raw, 'valid', early, now)).rejects.toThrow();
+      return sent;
+    };
+    await processRefunds(now);
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'pending' });
+
+    await handleWebhook(raw, 'valid', early, now);
+    expect((await refundRow(refund.id)).status).toBe('processed');
+  });
+
+  test('a lost refund.processed is found by the sweep after 15 minutes', async () => {
+    const { refund, sentId } = await sentRefund();
+    gateway.setRefundStatus(sentId, 'processed');
+
+    await processRefunds(seconds(now, SWEEP_SECONDS - 60));
+    expect(gateway.refundFetches).toHaveLength(0);
+    expect((await refundRow(refund.id)).status).toBe('pending');
+
+    await processRefunds(seconds(now, SWEEP_SECONDS + 60));
+    expect(gateway.refundFetches).toEqual([sentId]);
+    expect((await refundRow(refund.id)).status).toBe('processed');
+  });
+
+  test('a lost refund.failed is found by the sweep, and goes through the shared rules', async () => {
+    const { refund, payment, sentId } = await (async () => {
+      const c = await cancelledOrder();
+      await setTransfer(c.payment.id, 'on_hold');
+      await processRefunds(now);
+      return { ...c, sentId: gateway.refunds[0]!.id };
+    })();
+    gateway.setRefundStatus(sentId, 'failed');
+
+    const sweep = seconds(now, SWEEP_SECONDS + 60);
+    await processRefunds(sweep);
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 1, razorpayRefundId: null });
+    expect((await paymentRow(payment.id)).transferStatus).toBe('on_hold');
+
+    await processRefunds(sweep);
+    expect(gateway.refunds[1]).toMatchObject({ idempotencyKey: `${refund.id}-1`, reverseTransfer: true });
+
+    // The webhook turns up after all, and is known, so it neither counts again nor gets redelivered.
+    await deliver(refundEvent('refund.failed', sentId));
+    expect((await refundRow(refund.id)).attempts).toBe(1);
+  });
+
+  test('a third failure found by the sweep ends the refund for an admin', async () => {
+    const { refund, sentId } = await sentRefund();
+    await db.update(refunds).set({ attempts: 2 }).where(eq(refunds.id, refund.id));
+    gateway.setRefundStatus(sentId, 'failed');
+    await processRefunds(seconds(now, SWEEP_SECONDS + 60));
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'failed', attempts: 3 });
+    expect(await auditRows('refund.failed')).toMatchObject([{ entityId: refund.id, detail: { razorpayRefundId: sentId } }]);
+  });
+
+  test('a refund the gateway still has pending is asked about again 15 minutes on', async () => {
+    const { refund, sentId } = await sentRefund();
+    const first = seconds(now, SWEEP_SECONDS + 60);
+    await processRefunds(first);
+    await processRefunds(seconds(first, 60));
+    expect(gateway.refundFetches).toEqual([sentId]);
+    expect((await refundRow(refund.id)).status).toBe('pending');
+
+    await processRefunds(seconds(first, SWEEP_SECONDS + 60));
+    expect(gateway.refundFetches).toEqual([sentId, sentId]);
+  });
+
+  test('one bad fetch does not stop the sweep', async () => {
+    const bad = await sentRefund();
+    const good = await sentRefund();
+    gateway.setRefundStatus(good.sentId, 'processed');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const fetchRefund = gateway.fetchRefund.bind(gateway);
+    gateway.fetchRefund = (id) => (id === bad.sentId ? Promise.reject(new Error('gateway down')) : fetchRefund(id));
+    await processRefunds(seconds(now, SWEEP_SECONDS + 60));
+    expect((await refundRow(good.refund.id)).status).toBe('processed');
+  });
+
+  test('the sweep asks about at most 100 in a run, longest unchecked first', async () => {
+    await manyRefunds(101, 'c', { razorpayRefundId: 'rfnd_c' });
+    gateway.fetchRefund = (id) => {
+      gateway.refundFetches.push(id);
+      return Promise.resolve({ id, status: 'pending' });
+    };
+    await processRefunds(now);
+    expect(gateway.refundFetches).toHaveLength(100);
+    const firstRun = new Set(gateway.refundFetches);
+
+    gateway.refundFetches.length = 0;
+    await processRefunds(seconds(now, 60));
+    expect(gateway.refundFetches).toHaveLength(1);
+    expect(firstRun.has(gateway.refundFetches[0]!)).toBe(false);
+  });
+
+  test('sends go first: a full batch of sends leaves no room for the sweep that run', async () => {
+    await manyRefunds(1, 'old', { razorpayRefundId: 'rfnd_old' });
+    await manyRefunds(100, 'new');
+    gateway.fetchRefund = (id) => {
+      gateway.refundFetches.push(id);
+      return Promise.resolve({ id, status: 'pending' });
+    };
+    expect(await processRefunds(now)).toBe(100);
+    expect(gateway.refundFetches).toHaveLength(0);
+
+    await processRefunds(seconds(now, 60));
+    expect(gateway.refundFetches).toEqual(['rfnd_old_0']);
   });
 });
 

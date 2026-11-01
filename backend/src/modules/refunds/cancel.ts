@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, ne, notExists, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
 import { drops, orders, payments, refunds } from '../../db/schema.js';
@@ -13,6 +13,7 @@ const reasonSchema = z.enum(['ran_out', 'quality', 'closing_early']);
 type Cancel = { actorId: string; reason: z.infer<typeof reasonSchema>; now: Date };
 
 const LIVE_STATUSES = ['held', 'paid'];
+const NOT_THE_BAG_REASONS = ['late_payment', 'duplicate_payment'];
 /** A restart needs an order to land in the moment before the drop is held, so a few are plenty. */
 const DROP_CANCEL_TRIES = 5;
 
@@ -20,39 +21,63 @@ const isId = (id: string) => z.uuid().safeParse(id).success;
 const orderNotFound = () => new ApiError('not_found', 404, 'Order not found');
 const dropNotFound = () => new ApiError('not_found', 404, 'Drop not found');
 
-/** The payment that bought the bag: any other captured row on the order has a refund of its own. */
+/** The payment that bought the bag: any other captured row was refunded as late or duplicate. */
 async function bagPayment(tx: Tx, orderId: string) {
   const [payment] = await tx
     .select({ id: payments.id, amountPaise: payments.amountPaise })
     .from(payments)
-    .leftJoin(refunds, eq(refunds.paymentId, payments.id))
-    .where(and(eq(payments.orderId, orderId), eq(payments.status, 'captured'), isNull(refunds.id)));
-  if (!payment) throw new ApiError('nothing_to_refund', 409, 'This order has no payment left to refund');
+    .where(
+      and(
+        eq(payments.orderId, orderId),
+        eq(payments.status, 'captured'),
+        notExists(
+          tx
+            .select({ id: refunds.id })
+            .from(refunds)
+            .where(and(eq(refunds.paymentId, payments.id), inArray(refunds.reason, NOT_THE_BAG_REASONS))),
+        ),
+      ),
+    );
   return payment;
 }
 
-/** Ends a paid order the caller has locked, once the caller holds its drop. */
+/** What is left of a payment after its refunds, those that failed aside. */
+async function unrefundedPaise(tx: Tx, payment: { id: string; amountPaise: number }): Promise<number> {
+  const [refunded] = await tx
+    .select({ paise: sql<number>`coalesce(sum(${refunds.amountPaise}), 0)::int` })
+    .from(refunds)
+    .where(and(eq(refunds.paymentId, payment.id), ne(refunds.status, 'failed')));
+  return payment.amountPaise - refunded!.paise;
+}
+
+/**
+ * Ends a paid order the caller has locked, once the caller holds its drop. The order always ends,
+ * and the customer gets back what they have not had yet: an admin may have refunded some or all of
+ * it. UNIQUE (payment_id, reason) allows this, as an earlier refund has another reason and an order
+ * can be cancelled only once, so no vendor_cancelled refund can be there already.
+ */
 async function cancelPaidOrder(tx: Tx, order: Order, { actorId, reason, now }: Cancel): Promise<void> {
   const payment = await bagPayment(tx, order.id);
+  const remainder = payment ? await unrefundedPaise(tx, payment) : 0;
   await tx
     .update(orders)
     .set({ status: 'cancelled', cancelledAt: now.toISOString(), cancelledBy: actorId, cancelReason: reason })
     .where(eq(orders.id, order.id));
-  await createRefund(tx, {
-    orderId: order.id,
-    paymentId: payment.id,
-    amountPaise: payment.amountPaise,
-    reason: 'vendor_cancelled',
-    chargedTo: 'vendor',
-    createdBy: actorId,
-  });
-  await audit(tx, {
-    actorId,
-    action: 'order.cancel',
-    entity: 'order',
-    entityId: order.id,
-    detail: { reason, dropId: order.dropId, paymentId: payment.id },
-  });
+  if (payment && remainder > 0) {
+    await createRefund(tx, {
+      orderId: order.id,
+      paymentId: payment.id,
+      amountPaise: remainder,
+      reason: 'vendor_cancelled',
+      chargedTo: 'vendor',
+      createdBy: actorId,
+    });
+  }
+  const detail = { reason, dropId: order.dropId, paymentId: payment?.id ?? null, refundPaise: Math.max(remainder, 0) };
+  await audit(tx, { actorId, action: 'order.cancel', entity: 'order', entityId: order.id, detail });
+  if (remainder <= 0) {
+    await audit(tx, { actorId, action: 'order.cancel_no_refund', entity: 'order', entityId: order.id, detail });
+  }
 }
 
 /**

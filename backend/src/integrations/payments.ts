@@ -15,17 +15,29 @@ export type LinkedAccountInput = {
   ifsc: string;
 };
 
+export type GatewayRefund = { id: string; status: string };
+
+/** The gateway definitely said no. Anything else thrown by a refund call leaves the outcome unknown. */
+export class GatewayRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GatewayRefusedError';
+  }
+}
+
 export interface PaymentGateway {
   keyId: string;
   createOrder(a: { amountPaise: number; receipt: string }): Promise<{ id: string }>;
   fetchPayment(id: string): Promise<GatewayPayment>;
   listOrderPayments(orderId: string): Promise<GatewayPayment[]>;
+  /** Throws GatewayRefusedError on a definite refusal. A network error, timeout or 5xx throws anything else. */
   refund(a: {
     paymentId: string;
     amountPaise: number;
     reverseTransfer: boolean;
     idempotencyKey: string;
-  }): Promise<{ id: string; status: string }>;
+  }): Promise<GatewayRefund>;
+  fetchRefund(id: string): Promise<GatewayRefund>;
   createTransfer(a: { paymentId: string; accountId: string; amountPaise: number }): Promise<{ id: string }>;
   releaseTransfer(id: string): Promise<void>;
   createLinkedAccount(a: LinkedAccountInput): Promise<{ id: string }>;
@@ -40,7 +52,20 @@ export class FakeGateway implements PaymentGateway {
   /** Payment IDs passed to fetchPayment, and order IDs passed to listOrderPayments. */
   readonly fetches: string[] = [];
   readonly listed: string[] = [];
-  readonly refunds: { id: string; paymentId: string; amountPaise: number; reverseTransfer: boolean; idempotencyKey: string }[] = [];
+  readonly refunds: {
+    id: string;
+    paymentId: string;
+    amountPaise: number;
+    reverseTransfer: boolean;
+    idempotencyKey: string;
+    status: string;
+  }[] = [];
+  /** Refund IDs passed to fetchRefund. */
+  readonly refundFetches: string[] = [];
+  /** The status new refunds get. */
+  refundStatus = 'pending';
+  /** How many coming refunds are accepted, but answered with a timeout. */
+  timeoutsAfterAccept = 0;
   readonly transfers: { id: string; paymentId: string; accountId: string; amountPaise: number; released: boolean }[] = [];
   readonly linkedAccounts: (LinkedAccountInput & { id: string })[] = [];
 
@@ -73,13 +98,41 @@ export class FakeGateway implements PaymentGateway {
     amountPaise: number;
     reverseTransfer: boolean;
     idempotencyKey: string;
-  }): Promise<{ id: string; status: string }> {
+  }): Promise<GatewayRefund> {
     // Like Razorpay, a key already seen gets the same refund back.
     const sent = this.refunds.find((r) => r.idempotencyKey === a.idempotencyKey);
-    if (sent) return { id: sent.id, status: 'pending' };
-    const refund = { id: `rfnd_fake_${this.refunds.length + 1}`, ...a };
+    if (sent) return { id: sent.id, status: sent.status };
+
+    // Payments this fake was never told about have no known amount, so only known ones are checked.
+    const payment = this.payments.get(a.paymentId);
+    const refunded = this.refunds
+      .filter((r) => r.paymentId === a.paymentId && r.status !== 'failed')
+      .reduce((total, r) => total + r.amountPaise, 0);
+    if (payment && refunded + a.amountPaise > payment.amountPaise) {
+      throw new GatewayRefusedError(`Refund exceeds what is left of payment ${a.paymentId}`);
+    }
+
+    const refund = { id: `rfnd_fake_${this.refunds.length + 1}`, status: this.refundStatus, ...a };
     this.refunds.push(refund);
-    return { id: refund.id, status: 'pending' };
+    if (this.timeoutsAfterAccept > 0) {
+      this.timeoutsAfterAccept--;
+      throw new Error('Gateway timed out');
+    }
+    return { id: refund.id, status: refund.status };
+  }
+
+  async fetchRefund(id: string): Promise<GatewayRefund> {
+    this.refundFetches.push(id);
+    const refund = this.refunds.find((r) => r.id === id);
+    if (!refund) throw new Error(`No fake refund ${id}`);
+    return { id: refund.id, status: refund.status };
+  }
+
+  /** Moves a refund on, as the gateway would in its own time. */
+  setRefundStatus(id: string, status: string): void {
+    const refund = this.refunds.find((r) => r.id === id);
+    if (!refund) throw new Error(`No fake refund ${id}`);
+    refund.status = status;
   }
 
   async createTransfer(a: { paymentId: string; accountId: string; amountPaise: number }): Promise<{ id: string }> {
