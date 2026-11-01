@@ -505,12 +505,14 @@ CREATE TABLE rate_limits (
 ALTER TABLE refunds ADD COLUMN attempts smallint NOT NULL DEFAULT 0;
 ALTER TABLE refunds ADD COLUMN adjusted_payout_id uuid REFERENCES payouts(id);
 ALTER TABLE payouts ADD COLUMN tax_paise integer NOT NULL DEFAULT 0;
+ALTER TABLE payments ADD COLUMN last_checked_at timestamptz;
 ```
 
 - `rate_limits` gives shared counters across serverless instances.
 - `refunds.attempts` supports alerting after 3 failures.
 - `refunds.adjusted_payout_id` stops a refund being deducted twice.
 - `payouts.tax_paise` keeps tax withheld separate from gateway fees.
+- `payments.last_checked_at` lets reconciliation take the longest-unchecked payment first.
 
 ## 6. State machines
 
@@ -593,7 +595,7 @@ Webhook handling:
 | `expired`, sold out, sales ended, or customer already has a newer order there | Full refund, reason `late_payment`, tell the customer |
 | `cancelled` | Full refund |
 
-A reconciliation job also polls Razorpay for orders that have a payment record and are still `held` near expiry, in case a webhook is delayed.
+A reconciliation job also polls Razorpay for orders that have a payment record and are still `held` near expiry, in case a webhook is delayed. It then checks `expired` and `cancelled` orders whose payment record from the last 3 days isn't captured, in case every webhook was lost, and applies the table above.
 
 ### 7.3 Pickup
 

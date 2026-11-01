@@ -376,14 +376,45 @@ describe('handleWebhook', () => {
     };
     const refundRow = async (id: string) => (await db.select().from(refunds).where(eq(refunds.id, id)))[0]!;
 
-    test('refund.processed and refund.failed update the row, without calling the gateway', async () => {
+    test('refund.processed marks the row, without calling the gateway', async () => {
       const a = await refundWithId('rfnd_a');
-      const b = await refundWithId('rfnd_b');
       await deliver(refundEvent('refund.processed', 'rfnd_a'));
-      await deliver(refundEvent('refund.failed', 'rfnd_b'));
       expect((await refundRow(a.id)).status).toBe('processed');
-      expect((await refundRow(b.id)).status).toBe('failed');
       expect(gateway.fetches).toHaveLength(0);
+    });
+
+    test('a failed refund stays pending for a resend, and the third failure ends it', async () => {
+      const a = await refundWithId('rfnd_1');
+      const resentAs = (razorpayRefundId: string) =>
+        db.update(refunds).set({ razorpayRefundId }).where(eq(refunds.id, a.id));
+
+      await deliver(refundEvent('refund.failed', 'rfnd_1'));
+      expect(await refundRow(a.id)).toMatchObject({ status: 'pending', attempts: 1, razorpayRefundId: null });
+
+      await resentAs('rfnd_2');
+      await deliver(refundEvent('refund.failed', 'rfnd_2'));
+      expect(await refundRow(a.id)).toMatchObject({ status: 'pending', attempts: 2, razorpayRefundId: null });
+      expect(await auditRows('refund.failed')).toHaveLength(0);
+
+      await resentAs('rfnd_3');
+      await deliver(refundEvent('refund.failed', 'rfnd_3'));
+      expect(await refundRow(a.id)).toMatchObject({ status: 'failed', attempts: 3, razorpayRefundId: 'rfnd_3' });
+      expect(await auditRows('refund.failed')).toMatchObject([
+        { entity: 'refund', entityId: a.id, detail: { razorpayRefundId: 'rfnd_3', attempts: 3 } },
+      ]);
+    });
+
+    test('a failure reported twice counts once', async () => {
+      const a = await refundWithId('rfnd_1');
+      await deliver(refundEvent('refund.failed', 'rfnd_1'));
+      await deliver(refundEvent('refund.failed', 'rfnd_1'));
+      expect((await refundRow(a.id)).attempts).toBe(1);
+
+      await db.update(refunds).set({ attempts: 2, razorpayRefundId: 'rfnd_3' }).where(eq(refunds.id, a.id));
+      await deliver(refundEvent('refund.failed', 'rfnd_3'));
+      await deliver(refundEvent('refund.failed', 'rfnd_3'));
+      expect((await refundRow(a.id)).attempts).toBe(3);
+      expect(await auditRows('refund.failed')).toHaveLength(1);
     });
 
     test('a late refund.failed does not undo a processed refund', async () => {
@@ -643,6 +674,32 @@ describe('applyCapture', () => {
     await applyCapture(gp, now);
     expect(await refundsFor(order.id)).toMatchObject([{ reason: 'vendor_cancelled' }]);
   });
+
+  test('applyCapture reports whether it acted', async () => {
+    const confirmed = await heldOrder();
+    expect(await applyCapture(confirmed.gp, now)).toBe(true);
+    expect(await applyCapture(confirmed.gp, now)).toBe(false);
+    expect(await applyCapture(capturedPayment(confirmed.gp.orderId), now)).toBe(true);
+
+    const mismatched = await heldOrder();
+    expect(await applyCapture({ ...mismatched.gp, amountPaise: 9999 }, now)).toBe(false);
+    expect(await applyCapture(capturedPayment('order_nobody'), now)).toBe(false);
+
+    const late = await expiredOrder({ quantity: 1 });
+    await reserveDrop({ dropId: late.drop.id, anonId: 'next', ip: '1.1.1.1' }, later);
+    expect(await applyCapture(late.gp, later)).toBe(true);
+  });
+
+  test('a mismatched payment is audited once, and another payment on the order separately', async () => {
+    const { gp } = await heldOrder();
+    const wrong = { ...gp, amountPaise: 9999 };
+    await applyCapture(wrong, now);
+    await applyCapture(wrong, now);
+    expect(await auditRows('payment.amount_mismatch')).toHaveLength(1);
+
+    await applyCapture(capturedPayment(gp.orderId, { amountPaise: 1 }), now);
+    expect(await auditRows('payment.amount_mismatch')).toHaveLength(2);
+  });
 });
 
 describe('createRefund', () => {
@@ -732,6 +789,162 @@ describe('reconcilePayments', () => {
     expect((await getOrderRow(first.order.id)).status).toBe('held');
     expect((await getOrderRow(second.order.id)).status).toBe('paid');
     expect(logged).toHaveBeenCalled();
+  });
+
+  test('counts only real changes, so a mismatched payment counts for nothing', async () => {
+    const { gp } = await heldOrder();
+    gateway.addPayment({ ...gp, amountPaise: 9999 });
+    const end = seconds(now, HOLD_SECONDS);
+    expect(await reconcilePayments(end)).toBe(0);
+    expect(await reconcilePayments(end)).toBe(0);
+    expect(await auditRows('payment.amount_mismatch')).toHaveLength(1);
+  });
+
+  describe('orders past their hold', () => {
+    /** Payment rows take their created_at from the real clock unless a test sets it. */
+    const madeAt = (paymentId: string, createdAt: Date) =>
+      db.update(payments).set({ createdAt: createdAt.toISOString() }).where(eq(payments.id, paymentId));
+
+    const expiredRows = async (count: number, prefix: string) => {
+      const drop = await makeDrop({ quantity: 10 });
+      const rows = await db
+        .insert(orders)
+        .values(
+          Array.from({ length: count }, (_, i) => ({
+            anonId: `${prefix}${i}`,
+            status: 'expired',
+            dropId: drop.id,
+            outletId: drop.outletId,
+            serviceDate: drop.serviceDate,
+            pricePaise: 10000,
+            commissionBps: 2000,
+            commissionPaise: 2000,
+            holdExpiresAt: now.toISOString(),
+          })),
+        )
+        .returning({ id: orders.id });
+      await db.insert(payments).values(
+        rows.map((r, i) => ({
+          orderId: r.id,
+          razorpayOrderId: `order_${prefix}_${i}`,
+          amountPaise: 10000,
+          createdAt: now.toISOString(),
+        })),
+      );
+      return rows.map((_, i) => `order_${prefix}_${i}`);
+    };
+
+    test('a captured payment on an expired order with no stock is refunded with no webhook', async () => {
+      const { order, payment, drop, gp } = await expiredOrder({ quantity: 1 });
+      await madeAt(payment.id, now);
+      await reserveDrop({ dropId: drop.id, anonId: 'next', ip: '1.1.1.1' }, later);
+
+      expect(await reconcilePayments(later)).toBe(1);
+      expect((await getOrderRow(order.id)).status).toBe('expired');
+      expect(await paymentRow(payment.id)).toMatchObject({ status: 'captured', razorpayPaymentId: gp.id });
+      expect(await refundsFor(order.id)).toMatchObject([
+        { paymentId: payment.id, amountPaise: 10000, reason: 'late_payment', chargedTo: 'platform' },
+      ]);
+      expect(await reconcilePayments(later)).toBe(0);
+      expect(await refundsFor(order.id)).toHaveLength(1);
+    });
+
+    test('a captured payment on an expired order with stock left confirms it', async () => {
+      const { order, payment, drop } = await expiredOrder();
+      await madeAt(payment.id, now);
+      expect(await reconcilePayments(later)).toBe(1);
+      expect((await getOrderRow(order.id)).status).toBe('paid');
+      expect((await getDropRow(drop.id)).reservedCount).toBe(1);
+    });
+
+    test('a captured payment on a cancelled order is refunded with no webhook', async () => {
+      const { order, payment } = await heldOrder();
+      await madeAt(payment.id, now);
+      await db.update(orders).set({ status: 'cancelled' }).where(eq(orders.id, order.id));
+
+      expect(await reconcilePayments(later)).toBe(1);
+      expect((await getOrderRow(order.id)).status).toBe('cancelled');
+      expect(await refundsFor(order.id)).toMatchObject([{ paymentId: payment.id, reason: 'late_payment' }]);
+    });
+
+    test('rows older than 3 days, captured rows and extra-payment rows are not checked', async () => {
+      const threeDays = 3 * 24 * 3600;
+      const inWindow = await expiredOrder();
+      await madeAt(inWindow.payment.id, seconds(later, -threeDays));
+      expect(await reconcilePayments(later)).toBe(1);
+      gateway.listed.length = 0;
+
+      const tooOld = await expiredOrder();
+      await madeAt(tooOld.payment.id, seconds(later, -threeDays - 1));
+
+      const settled = await expiredOrder();
+      await db
+        .update(payments)
+        .set({ status: 'captured', razorpayPaymentId: settled.gp.id, createdAt: now.toISOString() })
+        .where(eq(payments.id, settled.payment.id));
+
+      const extra = await makeOrder({ status: 'expired' });
+      await makePayment({
+        orderId: extra.id,
+        razorpayOrderId: 'order_extra:pay_extra',
+        status: 'failed',
+        createdAt: now.toISOString(),
+      });
+
+      expect(await reconcilePayments(later)).toBe(0);
+      expect(gateway.listed).toEqual([]);
+    });
+
+    test('old rows cannot starve new ones, even when the gateway fails on all of them', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      gateway.listOrderPayments = (id) => {
+        gateway.listed.push(id);
+        return Promise.reject(new Error('gateway down'));
+      };
+      const old = await expiredRows(120, 'old');
+
+      await reconcilePayments(later);
+      expect(gateway.listed).toHaveLength(100);
+      const missed = old.filter((id) => !gateway.listed.includes(id));
+      expect(missed).toHaveLength(20);
+
+      gateway.listed.length = 0;
+      const [fresh] = await expiredRows(1, 'fresh');
+      await reconcilePayments(seconds(later, 60));
+      expect(gateway.listed).toHaveLength(100);
+      expect(gateway.listed.slice(0, 21).sort()).toEqual([fresh!, ...missed].sort());
+
+      const checked = await db.select().from(payments).where(eq(payments.razorpayOrderId, fresh!));
+      expect(new Date(checked[0]!.lastCheckedAt!).getTime()).toBe(seconds(later, 60).getTime());
+    });
+
+    test('holds near their end go first, and one run makes at most 100 checks', async () => {
+      const swept = await expiredRows(5, 'swept');
+      const drop = await makeDrop({ quantity: 110, reservedCount: 110 });
+      const held = await db
+        .insert(orders)
+        .values(
+          Array.from({ length: 98 }, (_, i) => ({
+            anonId: `h${i}`,
+            dropId: drop.id,
+            outletId: drop.outletId,
+            serviceDate: drop.serviceDate,
+            pricePaise: 10000,
+            commissionBps: 2000,
+            commissionPaise: 2000,
+            holdExpiresAt: now.toISOString(),
+          })),
+        )
+        .returning({ id: orders.id });
+      await db
+        .insert(payments)
+        .values(held.map((r, i) => ({ orderId: r.id, razorpayOrderId: `order_h_${i}`, amountPaise: 10000 })));
+
+      await reconcilePayments(later);
+      expect(gateway.listed).toHaveLength(100);
+      expect(gateway.listed.filter((id) => id.startsWith('order_h_'))).toHaveLength(98);
+      expect(gateway.listed.filter((id) => swept.includes(id))).toHaveLength(2);
+    });
   });
 });
 

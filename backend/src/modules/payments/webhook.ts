@@ -3,11 +3,13 @@ import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
 import { payments, refunds, webhookEvents } from '../../db/schema.js';
 import { getGateway, type GatewayPayment } from '../../integrations/payments.js';
+import { audit } from '../../lib/audit.js';
 import { ApiError } from '../../lib/errors.js';
+import { MAX_REFUND_ATTEMPTS } from '../refunds/create.js';
 import { applyCaptureInTx } from './capture.js';
 
 const PAYMENT_EVENTS = new Set(['payment.captured', 'payment.failed']);
-const REFUND_STATUS: Record<string, string> = { 'refund.processed': 'processed', 'refund.failed': 'failed' };
+const REFUND_EVENTS = new Set(['refund.processed', 'refund.failed']);
 
 const entity = z.object({ entity: z.object({ id: z.string().min(1) }) });
 const eventSchema = z.object({
@@ -22,7 +24,7 @@ const badEvent = () => new ApiError('invalid_event', 400, 'Unreadable webhook ev
 function subjectId(e: Event): string | undefined {
   const subject = PAYMENT_EVENTS.has(e.event)
     ? e.payload?.payment
-    : e.event in REFUND_STATUS
+    : REFUND_EVENTS.has(e.event)
       ? e.payload?.refund
       : undefined;
   return subject?.entity.id;
@@ -37,7 +39,7 @@ function parseEvent(raw: string): { event: Event; payload: unknown } {
   }
   const parsed = eventSchema.safeParse(payload);
   if (!parsed.success) throw badEvent();
-  const handled = PAYMENT_EVENTS.has(parsed.data.event) || parsed.data.event in REFUND_STATUS;
+  const handled = PAYMENT_EVENTS.has(parsed.data.event) || REFUND_EVENTS.has(parsed.data.event);
   if (handled && !subjectId(parsed.data)) throw badEvent();
   return { event: parsed.data, payload };
 }
@@ -58,11 +60,42 @@ async function applyPayment(tx: Tx, eventType: string, gp: GatewayPayment, now: 
   // Anything else is a payment since refunded, or a failure event with nothing to record.
 }
 
+/**
+ * A failed refund goes back to pending with no gateway ID, so the refund job sends it again. Only
+ * pending rows count a failure, and a resend has a new ID, so a repeated report counts once.
+ */
+async function recordRefundFailure(tx: Tx, razorpayRefundId: string): Promise<void> {
+  const [refund] = await tx
+    .select({ id: refunds.id, attempts: refunds.attempts })
+    .from(refunds)
+    .where(and(eq(refunds.razorpayRefundId, razorpayRefundId), eq(refunds.status, 'pending')))
+    .for('update');
+  if (!refund) return;
+
+  const attempts = refund.attempts + 1;
+  if (attempts < MAX_REFUND_ATTEMPTS) {
+    await tx.update(refunds).set({ attempts, razorpayRefundId: null }).where(eq(refunds.id, refund.id));
+    return;
+  }
+  await tx.update(refunds).set({ attempts, status: 'failed' }).where(eq(refunds.id, refund.id));
+  await audit(tx, {
+    actorId: null,
+    action: 'refund.failed',
+    entity: 'refund',
+    entityId: refund.id,
+    detail: { razorpayRefundId, attempts },
+  });
+}
+
 async function applyRefund(tx: Tx, eventType: string, razorpayRefundId: string): Promise<void> {
+  if (eventType === 'refund.failed') {
+    await recordRefundFailure(tx, razorpayRefundId);
+    return;
+  }
   await tx
     .update(refunds)
-    .set({ status: REFUND_STATUS[eventType]! })
-    .where(and(eq(refunds.razorpayRefundId, razorpayRefundId), ne(refunds.status, 'processed')));
+    .set({ status: 'processed' })
+    .where(eq(refunds.razorpayRefundId, razorpayRefundId));
 }
 
 /**

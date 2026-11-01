@@ -1,6 +1,9 @@
 import type { Tx } from '../../db/client.js';
 import { refunds } from '../../db/schema.js';
 
+/** The attempt that fails on reaching this ends the refund, for an admin to pick up. */
+export const MAX_REFUND_ATTEMPTS = 3;
+
 export type NewRefund = {
   orderId: string;
   paymentId: string;

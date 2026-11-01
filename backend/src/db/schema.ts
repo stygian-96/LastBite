@@ -396,6 +396,7 @@ export const payments = pgTable("payments", {
 	transferPaise: integer("transfer_paise"),
 	transferStatus: text("transfer_status").default('none').notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	lastCheckedAt: timestamp("last_checked_at", { withTimezone: true, mode: 'string' }),
 }, (table) => [
 	index("payments_order_id_idx").using("btree", table.orderId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({

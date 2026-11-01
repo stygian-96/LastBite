@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import { withTx, type Tx } from '../../db/client.js';
-import { orders, payments } from '../../db/schema.js';
+import { auditLog, orders, payments } from '../../db/schema.js';
 import type { GatewayPayment } from '../../integrations/payments.js';
 import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
@@ -10,6 +10,9 @@ import { findNightOrder, releaseStock, takeStock, type Order } from '../orders/r
 import { createRefund } from '../refunds/create.js';
 
 const CODE_ATTEMPTS = 10;
+
+/** Joins a Razorpay order and payment ID into the razorpay_order_id of a row for an extra payment. */
+export const EXTRA_PAYMENT_SEPARATOR = ':';
 
 /**
  * Stores a captured payment. It takes the Razorpay order's own row, unless an earlier payment has
@@ -27,7 +30,7 @@ async function recordCapture(tx: Tx, orderId: string, gp: GatewayPayment): Promi
 
   const [extra] = await tx
     .insert(payments)
-    .values({ orderId, razorpayOrderId: `${gp.orderId}:${gp.id}`, amountPaise: gp.amountPaise, ...details })
+    .values({ orderId, razorpayOrderId: `${gp.orderId}${EXTRA_PAYMENT_SEPARATOR}${gp.id}`, amountPaise: gp.amountPaise, ...details })
     .returning({ id: payments.id });
   return extra!.id;
 }
@@ -76,6 +79,28 @@ async function refundCapture(
   await createRefund(tx, { orderId: order.id, paymentId, amountPaise: gp.amountPaise, reason, chargedTo: 'platform' });
 }
 
+/** Flags a payment whose amount is wrong, once however many times it is seen. The caller holds the order. */
+async function flagMismatch(tx: Tx, order: Order, gp: GatewayPayment): Promise<void> {
+  const [flagged] = await tx
+    .select({ id: auditLog.id })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.action, 'payment.amount_mismatch'),
+        eq(auditLog.entityId, order.id),
+        sql`${auditLog.detail}->>'razorpayPaymentId' = ${gp.id}`,
+      ),
+    );
+  if (flagged) return;
+  await audit(tx, {
+    actorId: null,
+    action: 'payment.amount_mismatch',
+    entity: 'order',
+    entityId: order.id,
+    detail: { razorpayPaymentId: gp.id, amountPaise: gp.amountPaise, expectedPaise: order.pricePaise },
+  });
+}
+
 /**
  * Applies a captured payment inside the caller's transaction: every capture ends in a confirmed bag
  * or a refund (spec 7.2). The two exceptions are flagged in the audit log for an admin.
@@ -84,8 +109,10 @@ async function refundCapture(
  * is the order expireHolds uses, so taking the drop first would deadlock against it. Waiting on the
  * drop is safe: its holders are expireHolds, which skips locked orders, and hold endings and reserves,
  * which never touch this order unless it has changed.
+ *
+ * Returns whether the payment settled: false if it had already, or if it is one of those exceptions.
  */
-export async function applyCaptureInTx(tx: Tx, gp: GatewayPayment, now: Date): Promise<void> {
+export async function applyCaptureInTx(tx: Tx, gp: GatewayPayment, now: Date): Promise<boolean> {
   const [known] = await tx
     .select({ orderId: payments.orderId })
     .from(payments)
@@ -99,7 +126,7 @@ export async function applyCaptureInTx(tx: Tx, gp: GatewayPayment, now: Date): P
       entityId: randomUUID(),
       detail: { razorpayOrderId: gp.orderId, razorpayPaymentId: gp.id, amountPaise: gp.amountPaise },
     });
-    return;
+    return false;
   }
 
   const [order] = await tx.select().from(orders).where(eq(orders.id, known.orderId)).for('update');
@@ -110,38 +137,33 @@ export async function applyCaptureInTx(tx: Tx, gp: GatewayPayment, now: Date): P
     .select({ id: payments.id })
     .from(payments)
     .where(eq(payments.razorpayPaymentId, gp.id));
-  if (applied) return;
+  if (applied) return false;
 
   if (gp.amountPaise !== order.pricePaise) {
-    await audit(tx, {
-      actorId: null,
-      action: 'payment.amount_mismatch',
-      entity: 'order',
-      entityId: order.id,
-      detail: { razorpayPaymentId: gp.id, amountPaise: gp.amountPaise, expectedPaise: order.pricePaise },
-    });
-    return;
+    await flagMismatch(tx, order, gp);
+    return false;
   }
 
   switch (order.status) {
     case 'held':
       await recordCapture(tx, order.id, gp);
       await markPaid(tx, order.id, now);
-      return;
+      return true;
     case 'expired':
       if (await retakeBag(tx, order, now)) await recordCapture(tx, order.id, gp);
       else await refundCapture(tx, order, gp, 'late_payment');
-      return;
+      return true;
     case 'cancelled':
       await refundCapture(tx, order, gp, 'late_payment');
-      return;
+      return true;
     default:
       // paid, collected or no_show: a different payment already bought this bag.
       await refundCapture(tx, order, gp, 'duplicate_payment');
+      return true;
   }
 }
 
 /** Applies a payment the gateway reports as captured. Safe to run twice for one payment. */
-export function applyCapture(gp: GatewayPayment, now: Date): Promise<void> {
+export function applyCapture(gp: GatewayPayment, now: Date): Promise<boolean> {
   return withTx((tx) => applyCaptureInTx(tx, gp, now));
 }
