@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, test, vi } from 'vitest';
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { route, handleError } from '../../src/lib/http';
 import { ApiError } from '../../src/lib/errors';
@@ -67,6 +68,18 @@ describe('route', () => {
   });
 });
 
+describe('handleError', () => {
+  test('HTTPException maps to the envelope with its status', async () => {
+    const t = harness();
+    t.get('/x', () => {
+      throw new HTTPException(413, { message: 'Too big' });
+    });
+    const res = await t.request('/x');
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: { code: 'http_error', message: 'Too big' } });
+  });
+});
+
 describe('app', () => {
   test('CORS allows FRONTEND_ORIGIN with credentials and refuses other origins', async () => {
     const { app } = await import('../../src/app');
@@ -76,6 +89,18 @@ describe('app', () => {
 
     const bad = await app.request('/api/v1/health', { headers: { origin: 'https://evil.test' } });
     expect(bad.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  test('unknown paths return the not_found envelope', async () => {
+    const { app } = await import('../../src/app');
+    const res = await app.request('/api/v1/nope');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: { code: 'not_found', message: 'Not found' } });
+  });
+
+  test('app wires handleError as its error handler', async () => {
+    const { app } = await import('../../src/app');
+    expect((app as unknown as { errorHandler: unknown }).errorHandler).toBe(handleError);
   });
 
   test('GET /api/v1/health returns 200', async () => {

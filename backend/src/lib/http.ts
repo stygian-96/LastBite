@@ -1,5 +1,6 @@
 import type { Context, Handler } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import { HTTPException } from 'hono/http-exception';
 import type { ZodType } from 'zod';
 import { ApiError } from './errors.js';
 
@@ -27,6 +28,7 @@ function envelope(c: Context, status: number, code: string, message: string) {
 /** Hono onError handler: writes the error envelope, never leaking internals. */
 export function handleError(err: Error, c: Context): Response {
   if (err instanceof ApiError) return envelope(c, err.status, err.code, err.message);
+  if (err instanceof HTTPException) return envelope(c, err.status, 'http_error', err.message);
   console.error(err);
   return envelope(c, 500, 'internal_error', 'Something went wrong');
 }
