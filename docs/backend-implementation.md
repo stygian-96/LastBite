@@ -658,7 +658,7 @@ All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code":
 
 | Method | Route | Purpose |
 |---|---|---|
-| POST | `/orders` | Reserve, body `{ drop_id }` |
+| POST | `/orders` | Reserve, body `{ dropId }`. JSON bodies use camelCase, query params use snake_case |
 | GET | `/orders/:id` | Order status, used while confirming |
 | POST | `/orders/:id/pay` | Create the Razorpay order |
 | DELETE | `/orders/:id/hold` | Release a hold |
