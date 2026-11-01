@@ -154,7 +154,8 @@ export const TEMPLATES: Record<TemplateName, Template> = {
   },
   followed_outlet_listed: {
     audience: 'customer',
-    marketing: true,
+    // Not marketing: the customer asked for it by tapping Follow.
+    marketing: false,
     whatsapp: (v) =>
       `${s(v.name)}, ${s(v.vendor)} just listed tonight’s bags.\n\nPickup ${window(v, true)}, from ₹${rupees(v.fromPaise)}\nQuantities are limited, so reserve soon if you want one.`,
     sms: (v) =>
@@ -177,7 +178,29 @@ export const TEMPLATES: Record<TemplateName, Template> = {
   },
 };
 
-/** The text of a message for a channel. */
+/** One SMS segment is 160 characters. */
+const SMS_LIMIT = 159;
+/** Free text that may be shortened to fit an SMS, in the order it is shortened. Codes, links, times and amounts never are. */
+const TRIMMABLE = ['vendor', 'business', 'address', 'item', 'reason', 'area', 'name', 'owner'];
+const MIN_KEPT = 8;
+
+function fitSms(template: TemplateName, variables: Vars): string {
+  let text = TEMPLATES[template].sms(variables);
+  const v: Vars = { ...variables };
+  for (const key of TRIMMABLE) {
+    const excess = text.length - SMS_LIMIT;
+    if (excess <= 0) break;
+    const value = v[key];
+    if (typeof value !== 'string') continue;
+    const keep = Math.max(value.length - excess, MIN_KEPT);
+    if (keep >= value.length) continue;
+    v[key] = `${value.slice(0, keep - 3).trimEnd()}...`;
+    text = TEMPLATES[template].sms(v);
+  }
+  return text;
+}
+
+/** The text of a message for a channel. An SMS has its vendor, address and similar names shortened to fit. */
 export function renderMessage(template: TemplateName, channel: 'whatsapp' | 'sms', variables: Vars): string {
-  return TEMPLATES[template][channel](variables);
+  return channel === 'sms' ? fitSms(template, variables) : TEMPLATES[template].whatsapp(variables);
 }

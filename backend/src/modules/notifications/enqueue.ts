@@ -1,4 +1,4 @@
-import { inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { Tx } from '../../db/client.js';
 import { notifications, users } from '../../db/schema.js';
 import { TEMPLATES, type TemplateName, type Vars } from './templates.js';
@@ -59,6 +59,17 @@ export async function enqueueMany(tx: Tx, list: NewNotification[]): Promise<numb
     added += inserted.length;
   }
   return added;
+}
+
+/**
+ * Gives up on a phone's pending messages. Deleting an account rewrites its phone, so the send job
+ * could no longer tell which queued rows were theirs: the deletion calls this first, in its transaction.
+ */
+export async function cancelPendingFor(tx: Tx, phone: string): Promise<void> {
+  await tx
+    .update(notifications)
+    .set({ status: 'failed', sendingAt: null })
+    .where(and(eq(notifications.phone, phone), eq(notifications.status, 'pending')));
 }
 
 export async function enqueue(tx: Tx, n: NewNotification): Promise<void> {

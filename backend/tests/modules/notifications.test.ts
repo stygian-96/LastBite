@@ -9,7 +9,7 @@ import { ApiError } from '../../src/lib/errors.js';
 import { isoWeekday, serviceDate } from '../../src/lib/time.js';
 import { decideOutlet } from '../../src/modules/admin/review.js';
 import { publishDrop } from '../../src/modules/catalogue/drops.js';
-import { enqueue } from '../../src/modules/notifications/enqueue.js';
+import { cancelPendingFor, enqueue } from '../../src/modules/notifications/enqueue.js';
 import { checkLicences, queueDailyPrompts, queuePickupReminders } from '../../src/modules/notifications/scheduled.js';
 import { sendPending } from '../../src/modules/notifications/send.js';
 import { renderMessage, TEMPLATES, type TemplateName, type Vars } from '../../src/modules/notifications/templates.js';
@@ -174,6 +174,24 @@ describe('templates', () => {
     }
   });
 
+  test('worst-case names, addresses and reasons still fit one SMS, and the fixed parts survive', () => {
+    const long = 'Wxyz '.repeat(60);
+    for (const name of Object.keys(TEMPLATES) as TemplateName[]) {
+      const v: Vars = { ...sample[name]! };
+      for (const key of ['name', 'owner', 'vendor', 'business', 'address', 'item', 'reason', 'area']) {
+        if (key in v) v[key] = long;
+      }
+      const sms = renderMessage(name, 'sms', v);
+      expect(sms.length, `${name}: ${sms}`).toBeLessThan(160);
+      expect(sms, name).toMatch(/^[\x20-\x7e]+$/);
+      if ('link' in v) expect(sms, name).toContain(String(v.link));
+      if ('code' in v) expect(sms, name).toContain('K472');
+      if ('amountPaise' in v) expect(sms, name).toContain('129');
+      if ('pickupStartAt' in v && name !== 'pickup_reminder') expect(sms, name).toContain('8:30');
+      if (name === 'pickup_reminder') expect(sms).toMatch(/opens 8:30pm.*Code K472\. Collect by 9:30pm/);
+    }
+  });
+
   test('copy names the brand from the environment, and times and amounts read plainly', () => {
     const confirmed = renderMessage('order_confirmed', 'sms', sample.order_confirmed!);
     expect(confirmed).toBe(
@@ -221,17 +239,42 @@ describe('enqueue', () => {
   });
 
   test('marketing templates respect marketing_opt_in', async () => {
-    const yes = await makeUser({ marketingOptIn: true });
-    const no = await makeUser({ marketingOptIn: false });
-    const vars = { name: 'A', vendor: 'B', pickupStartAt: now.toISOString(), pickupEndAt: now.toISOString(), fromPaise: 100, link: 'x' };
+    // No template is marketing yet, so a test-only one stands in for the later offers templates.
+    const table = TEMPLATES as Record<string, unknown>;
+    table.test_offer = { ...TEMPLATES.outlet_closed, marketing: true };
+    try {
+      const yes = await makeUser({ marketingOptIn: true });
+      const no = await makeUser({ marketingOptIn: false });
+      const vars = { name: 'A', vendor: 'B' };
+      const offer = 'test_offer' as TemplateName;
+      await withTx(async (tx) => {
+        await enqueue(tx, { dedupeKey: 'm1', phone: yes.phone, template: offer, variables: vars });
+        await enqueue(tx, { dedupeKey: 'm2', phone: no.phone, template: offer, variables: vars });
+        await enqueue(tx, { dedupeKey: 'm3', phone: '+919876500009', template: offer, variables: vars });
+        // Not marketing, so it goes to someone who has not opted in.
+        await enqueue(tx, { dedupeKey: 'm4', phone: no.phone, template: 'outlet_closed', variables: vars });
+      });
+      expect((await queued()).map((n) => n.dedupeKey).sort()).toEqual(['m1', 'm4']);
+    } finally {
+      delete table.test_offer;
+    }
+  });
+
+  test("cancelPendingFor fails that phone's pending rows and no others", async () => {
+    const gone = await makeUser();
+    const other = await makeUser();
+    const vars = { name: 'A', vendor: 'B' };
     await withTx(async (tx) => {
-      await enqueue(tx, { dedupeKey: 'm1', phone: yes.phone, template: 'followed_outlet_listed', variables: vars });
-      await enqueue(tx, { dedupeKey: 'm2', phone: no.phone, template: 'followed_outlet_listed', variables: vars });
-      await enqueue(tx, { dedupeKey: 'm3', phone: '+919876500009', template: 'followed_outlet_listed', variables: vars });
-      // Not marketing, so it goes to someone who has not opted in.
-      await enqueue(tx, { dedupeKey: 'm4', phone: no.phone, template: 'outlet_closed', variables: vars });
+      await enqueue(tx, { dedupeKey: 'c1', phone: gone.phone, template: 'outlet_closed', variables: vars });
+      await enqueue(tx, { dedupeKey: 'c2', phone: gone.phone, template: 'outlet_closed', variables: vars });
+      await enqueue(tx, { dedupeKey: 'c3', phone: other.phone, template: 'outlet_closed', variables: vars });
     });
-    expect((await queued()).map((n) => n.dedupeKey).sort()).toEqual(['m1', 'm4']);
+    await db.update(notifications).set({ status: 'sent' }).where(eq(notifications.dedupeKey, 'c2'));
+    await withTx((tx) => cancelPendingFor(tx, gone.phone));
+    const status = Object.fromEntries((await queued()).map((n) => [n.dedupeKey, n.status]));
+    expect(status).toEqual({ c1: 'failed', c2: 'sent', c3: 'pending' });
+    expect(await sendPending(now)).toBe(1);
+    expect(messenger.attempts.map((m) => m.phone)).toEqual([other.phone]);
   });
 });
 
@@ -456,9 +499,9 @@ describe('followers', () => {
 
   test('first drop alerts followers once a night per outlet', async () => {
     const { outlet, a } = await outletWithListings();
-    const fan = await follow(outlet.id, { marketingOptIn: true });
+    // The default customer has marketing_opt_in false, and still gets the alert they asked for.
+    const fan = await follow(outlet.id);
     const other = await follow(outlet.id, { marketingOptIn: true });
-    await follow(outlet.id, { marketingOptIn: false });
 
     await publishDrop(null, a.id, 5, now);
     const rows = await queuedFor('followed_outlet_listed');
@@ -478,7 +521,7 @@ describe('followers', () => {
 
   test('a second drop that night sends no alert', async () => {
     const { outlet, a, b } = await outletWithListings();
-    await follow(outlet.id, { marketingOptIn: true });
+    await follow(outlet.id);
     await publishDrop(null, a.id, 5, now);
     await publishDrop(null, b.id, 5, now);
     expect(await queuedFor('followed_outlet_listed')).toHaveLength(1);
@@ -486,7 +529,7 @@ describe('followers', () => {
 
   test('two first drops at once still alert each follower once', async () => {
     const { outlet, a, b } = await outletWithListings();
-    await follow(outlet.id, { marketingOptIn: true });
+    await follow(outlet.id);
     await Promise.all([publishDrop(null, a.id, 5, now), publishDrop(null, b.id, 5, now)]);
     expect(await queuedFor('followed_outlet_listed')).toHaveLength(1);
   });
@@ -494,7 +537,7 @@ describe('followers', () => {
   test('a drop that does not commit alerts no one', async () => {
     const outlet = await makeLiveOutlet({ status: 'suspended' });
     const listing = await makeListing({ outletId: outlet.id });
-    await follow(outlet.id, { marketingOptIn: true });
+    await follow(outlet.id);
     expect(await failure(publishDrop(null, listing.id, 5, now))).toBeInstanceOf(ApiError);
     expect(await queued()).toHaveLength(0);
   });

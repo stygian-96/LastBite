@@ -36,7 +36,7 @@ class UnconfiguredMessenger implements MessageSender {
   }
 
   verifyWebhook(_raw: string, signature: string): boolean {
-    return process.env.NODE_ENV !== 'production' && signature === 'valid';
+    return process.env.NODE_ENV === 'test' && signature === 'valid';
   }
 }
 

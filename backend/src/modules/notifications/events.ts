@@ -256,24 +256,18 @@ export async function queueApplicationNotice(
 // ---------- Followers ----------
 
 /** Followers of an outlet who are still users, with the phone each can be reached on. */
-async function followersOf(tx: Tx, outletId: string, marketingOnly: boolean): Promise<Recipient[]> {
+async function followersOf(tx: Tx, outletId: string): Promise<Recipient[]> {
   return tx
     .select({ userId: users.id, phone: users.phone, name: users.name })
     .from(follows)
     .innerJoin(users, eq(users.id, follows.userId))
-    .where(
-      and(
-        eq(follows.outletId, outletId),
-        isNull(users.deletedAt),
-        marketingOnly ? eq(users.marketingOptIn, true) : undefined,
-      ),
-    );
+    .where(and(eq(follows.outletId, outletId), isNull(users.deletedAt)));
 }
 
 /** The outlet is closed for good. One message to each follower. */
 export async function queueOutletClosed(tx: Tx, outletId: string): Promise<void> {
   const info = await outletInfo(tx, outletId);
-  const followers = await followersOf(tx, outletId, false);
+  const followers = await followersOf(tx, outletId);
   await enqueueMany(
     tx,
     followers.map((f) => ({
@@ -292,7 +286,7 @@ type NewDrop = Pick<
 
 /**
  * A drop was just created. If it is the outlet's first of that service date, followers who accept
- * marketing hear of it. A second drop that night finds the first and does nothing; two first drops
+ * hear of it: they asked for it by following. A second drop that night finds the first and does nothing; two first drops
  * racing each other meet at the dedupe key, so a follower gets one message a night either way.
  */
 export async function queueFollowerAlert(tx: Tx, drop: NewDrop): Promise<void> {
@@ -303,7 +297,7 @@ export async function queueFollowerAlert(tx: Tx, drop: NewDrop): Promise<void> {
     .limit(1);
   if (earlier) return;
 
-  const followers = await followersOf(tx, drop.outletId, true);
+  const followers = await followersOf(tx, drop.outletId);
   if (followers.length === 0) return;
   const info = await outletInfo(tx, drop.outletId);
   const [slug] = await tx
