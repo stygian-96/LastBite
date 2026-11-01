@@ -11,6 +11,9 @@ export type { SessionUser };
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+// Domain is only sent when COOKIE_DOMAIN is set, so localhost works without it.
+export const cookieDomain = () => env().COOKIE_DOMAIN || undefined;
+
 export type RouteCtx<B> = {
   c: Context;
   params: Record<string, string>;
@@ -48,7 +51,8 @@ export function route<B = undefined>(
 
     // CSRF guard: a cookie-authenticated request that is not a plain read must
     // come from the frontend. Cookie-less requests (webhooks) are unaffected.
-    if (token && !SAFE_METHODS.has(c.req.method) && c.req.header('origin') !== env().FRONTEND_ORIGIN) {
+    const hasAuthCookie = token || getCookie(c, 'anon_id');
+    if (hasAuthCookie && !SAFE_METHODS.has(c.req.method) && c.req.header('origin') !== env().FRONTEND_ORIGIN) {
       throw new ApiError('bad_origin', 403, 'Request origin not allowed');
     }
 

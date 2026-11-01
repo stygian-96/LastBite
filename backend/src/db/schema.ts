@@ -343,6 +343,7 @@ export const orders = pgTable("orders", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	uniqueIndex("one_order_per_outlet_night").using("btree", table.userId.asc().nullsLast().op("date_ops"), table.outletId.asc().nullsLast().op("uuid_ops"), table.serviceDate.asc().nullsLast().op("uuid_ops")).where(sql`((user_id IS NOT NULL) AND (status = ANY (ARRAY['held'::text, 'paid'::text, 'collected'::text, 'no_show'::text])))`),
+	uniqueIndex("one_hold_per_anon").using("btree", table.anonId.asc().nullsLast().op("text_ops")).where(sql`((status = 'held'::text) AND (user_id IS NULL))`),
 	index("orders_drop_id_status_idx").using("btree", table.dropId.asc().nullsLast().op("text_ops"), table.status.asc().nullsLast().op("uuid_ops")),
 	index("orders_status_hold_expires_at_idx").using("btree", table.status.asc().nullsLast().op("timestamptz_ops"), table.holdExpiresAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'held'::text)`),
 	index("orders_user_id_created_at_idx").using("btree", table.userId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("uuid_ops")),

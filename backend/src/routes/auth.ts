@@ -1,15 +1,24 @@
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { z } from 'zod';
-import { env } from '../lib/env.js';
-import { route } from '../lib/http.js';
+import { verifyAnonId } from '../lib/crypto.js';
+import { cookieDomain, route } from '../lib/http.js';
 import { sendOtp, verifyOtp } from '../modules/auth/otp.js';
 import { deleteSession, SESSION_MAX_AGE_SECONDS } from '../modules/auth/session.js';
+import { attachHolds } from '../modules/orders/reserve.js';
 
 const SESSION_COOKIE = 'session';
 
-// Domain is only sent when COOKIE_DOMAIN is set, so localhost works without it.
-const cookieDomain = () => env().COOKIE_DOMAIN || undefined;
+/** Sign-in has already happened, so a failure here is logged and never reaches the customer. */
+async function attachAnonHold(signedAnonId: string | undefined, userId: string, now: Date) {
+  try {
+    const anonId = signedAnonId ? verifyAnonId(signedAnonId) : null;
+    return anonId ? await attachHolds(anonId, userId, now) : {};
+  } catch (err) {
+    console.error(err);
+    return {};
+  }
+}
 
 export const auth = new Hono()
   .post(
@@ -33,7 +42,12 @@ export const auth = new Hono()
           maxAge: SESSION_MAX_AGE_SECONDS,
           domain: cookieDomain(),
         });
-        return { user: { id: user.id, phone: user.phone, name: user.name, isAdmin: user.isAdmin } };
+        const { attachedOrderId, existingOrderId } = await attachAnonHold(getCookie(c, 'anon_id'), user.id, now);
+        return {
+          user: { id: user.id, phone: user.phone, name: user.name, isAdmin: user.isAdmin },
+          attachedOrderId,
+          existingOrderId,
+        };
       },
     ),
   )

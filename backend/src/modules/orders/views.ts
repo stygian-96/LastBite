@@ -109,14 +109,19 @@ async function toViews(rows: Row[]): Promise<OrderView[]> {
   return rows.map((r) => toView(r, refundMap.get(r.id) ?? null));
 }
 
-/** One order for its owner (signed-in user or anonymous holder). Anyone else gets a 404, never a 403. */
-export async function getOrder(viewer: Viewer, orderId: string): Promise<OrderView> {
+/** Matches this order only for its owner (signed-in user or anonymous holder). */
+export function ownedOrder(viewer: Viewer, orderId: string): SQL | undefined {
   if (!UUID.test(orderId)) throw notFound();
   const owner: SQL[] = [];
   if (viewer.userId) owner.push(eq(orders.userId, viewer.userId));
   if (viewer.anonId) owner.push(eq(orders.anonId, viewer.anonId));
   if (owner.length === 0) throw notFound();
-  const [row] = await selectOrders(and(eq(orders.id, orderId), or(...owner)));
+  return and(eq(orders.id, orderId), or(...owner));
+}
+
+/** One order for its owner. Anyone else gets a 404, never a 403. */
+export async function getOrder(viewer: Viewer, orderId: string): Promise<OrderView> {
+  const [row] = await selectOrders(ownedOrder(viewer, orderId));
   if (!row) throw notFound();
   return (await toViews([row]))[0]!;
 }
