@@ -9,6 +9,10 @@ const schema = z.object({
   ENCRYPTION_KEY: z.string().min(1),
   SESSION_SECRET: z.string().min(16),
   PORT: z.coerce.number().int().positive().default(4000),
+  // Optional until the real gateway arrives, then required in production.
+  RAZORPAY_KEY_ID: z.string().optional(),
+  RAZORPAY_KEY_SECRET: z.string().optional(),
+  RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
 });
 
 export type Env = z.infer<typeof schema>;

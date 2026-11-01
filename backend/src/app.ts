@@ -10,6 +10,7 @@ import { publicBrowse } from './routes/public.js';
 import { vendorCatalogue } from './routes/vendor-catalogue.js';
 import { vendorOnboarding } from './routes/vendor-onboarding.js';
 import { vendorStaff } from './routes/vendor-staff.js';
+import { webhooks } from './routes/webhooks.js';
 
 export const app = new Hono();
 
@@ -33,3 +34,4 @@ app.route('/api/v1/vendor', vendorCatalogue);
 app.route('/api/v1/admin', adminReview);
 app.route('/api/v1', publicBrowse);
 app.route('/api/v1', customerOrders);
+app.route('/api/v1', webhooks);

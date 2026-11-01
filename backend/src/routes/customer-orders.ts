@@ -8,6 +8,7 @@ import { cookieDomain, route } from '../lib/http.js';
 import { getSessionUser } from '../modules/auth/session.js';
 import { releaseHold, reserveDrop } from '../modules/orders/reserve.js';
 import { getOrder, listMyOrders, type Viewer } from '../modules/orders/views.js';
+import { startPayment } from '../modules/payments/start.js';
 
 const ANON_MAX_AGE_SECONDS = 86_400;
 
@@ -55,6 +56,12 @@ export const customerOrders = new Hono()
       await releaseHold(await readViewer(c, now), params.id!, now);
       return { ok: true };
     }),
+  )
+  .post(
+    '/orders/:id/pay',
+    route({ auth: 'user', body: z.object({ allergenAck: z.boolean() }) }, async ({ params, body, user, now }) =>
+      startPayment(user!.id, params.id!, body, now),
+    ),
   )
   .get(
     '/me/orders',

@@ -17,7 +17,7 @@ const HOLD_WINDOW_SECONDS = 3600;
 // The statuses covered by the one_order_per_outlet_night index.
 const NIGHT_ORDER_STATUSES = ['held', 'paid', 'collected', 'no_show'];
 
-async function findNightOrder(
+export async function findNightOrder(
   q: Tx | typeof db,
   userId: string,
   outletId: string,
@@ -85,6 +85,32 @@ async function refusal(r: { dropId: string; userId?: string; anonId?: string }, 
     : new ApiError('not_on_sale', 409, 'This bag is not on sale');
 }
 
+/** Takes one bag if this drop is on sale with stock left. The conditional update prevents overselling. */
+export async function takeStock(tx: Tx, dropId: string, nowIso: string) {
+  const [drop] = await tx
+    .update(drops)
+    .set({ reservedCount: sql`${drops.reservedCount} + 1` })
+    .from(outlets)
+    .where(
+      and(
+        eq(drops.id, dropId),
+        eq(outlets.id, drops.outletId),
+        eq(drops.status, 'live'),
+        eq(outlets.status, 'live'),
+        or(isNull(outlets.pausedUntil), lt(outlets.pausedUntil, nowIso)),
+        gt(drops.salesEndAt, nowIso),
+        lt(drops.reservedCount, drops.quantity),
+      ),
+    )
+    .returning({
+      outletId: drops.outletId,
+      serviceDate: drops.serviceDate,
+      pricePaise: drops.pricePaise,
+      commissionBps: outlets.commissionBps,
+    });
+  return drop;
+}
+
 /** Holds one bag for 5 minutes. The conditional update is what prevents overselling (spec 7.1). */
 export async function reserveDrop(
   r: { dropId: string; userId?: string; anonId?: string; ip: string },
@@ -98,27 +124,7 @@ export async function reserveDrop(
   let order: Order | undefined;
   try {
     order = await withTx(async (tx) => {
-      const [drop] = await tx
-        .update(drops)
-        .set({ reservedCount: sql`${drops.reservedCount} + 1` })
-        .from(outlets)
-        .where(
-          and(
-            eq(drops.id, r.dropId),
-            eq(outlets.id, drops.outletId),
-            eq(drops.status, 'live'),
-            eq(outlets.status, 'live'),
-            or(isNull(outlets.pausedUntil), lt(outlets.pausedUntil, nowIso)),
-            gt(drops.salesEndAt, nowIso),
-            lt(drops.reservedCount, drops.quantity),
-          ),
-        )
-        .returning({
-          outletId: drops.outletId,
-          serviceDate: drops.serviceDate,
-          pricePaise: drops.pricePaise,
-          commissionBps: outlets.commissionBps,
-        });
+      const drop = await takeStock(tx, r.dropId, nowIso);
       if (!drop) return undefined;
 
       const [row] = await tx
