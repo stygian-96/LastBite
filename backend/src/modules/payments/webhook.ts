@@ -61,23 +61,24 @@ async function applyPayment(tx: Tx, eventType: string, gp: GatewayPayment, now: 
 }
 
 /**
- * A failed refund goes back to pending with no gateway ID, so the refund job sends it again. Only
- * pending rows count a failure, and a resend has a new ID, so a repeated report counts once.
+ * Counts one failed attempt on a pending refund the caller has locked. It goes back to pending with
+ * no gateway ID, so the refund job sends it again, until the last attempt ends it for an admin.
+ * A failure with no gateway ID is a send that the gateway refused or never answered.
  */
-async function recordRefundFailure(tx: Tx, razorpayRefundId: string): Promise<void> {
-  const [refund] = await tx
-    .select({ id: refunds.id, attempts: refunds.attempts })
-    .from(refunds)
-    .where(and(eq(refunds.razorpayRefundId, razorpayRefundId), eq(refunds.status, 'pending')))
-    .for('update');
-  if (!refund) return;
-
+export async function countRefundFailure(
+  tx: Tx,
+  refund: { id: string; attempts: number },
+  razorpayRefundId: string | null,
+): Promise<void> {
   const attempts = refund.attempts + 1;
   if (attempts < MAX_REFUND_ATTEMPTS) {
-    await tx.update(refunds).set({ attempts, razorpayRefundId: null }).where(eq(refunds.id, refund.id));
+    await tx
+      .update(refunds)
+      .set({ attempts, razorpayRefundId: null, sendingAt: null })
+      .where(eq(refunds.id, refund.id));
     return;
   }
-  await tx.update(refunds).set({ attempts, status: 'failed' }).where(eq(refunds.id, refund.id));
+  await tx.update(refunds).set({ attempts, status: 'failed', sendingAt: null }).where(eq(refunds.id, refund.id));
   await audit(tx, {
     actorId: null,
     action: 'refund.failed',
@@ -85,6 +86,25 @@ async function recordRefundFailure(tx: Tx, razorpayRefundId: string): Promise<vo
     entityId: refund.id,
     detail: { razorpayRefundId, attempts },
   });
+}
+
+/**
+ * Only pending rows count a failure, and a resend has a new ID, so a repeated report counts once.
+ * The transfer goes back on hold, so that the resend asks for the reversal again.
+ */
+async function recordRefundFailure(tx: Tx, razorpayRefundId: string): Promise<void> {
+  const [refund] = await tx
+    .select({ id: refunds.id, attempts: refunds.attempts, paymentId: refunds.paymentId })
+    .from(refunds)
+    .where(and(eq(refunds.razorpayRefundId, razorpayRefundId), eq(refunds.status, 'pending')))
+    .for('update');
+  if (!refund) return;
+
+  await tx
+    .update(payments)
+    .set({ transferStatus: 'on_hold' })
+    .where(and(eq(payments.id, refund.paymentId), eq(payments.transferStatus, 'reversed')));
+  await countRefundFailure(tx, refund, razorpayRefundId);
 }
 
 async function applyRefund(tx: Tx, eventType: string, razorpayRefundId: string): Promise<void> {

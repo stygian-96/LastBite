@@ -166,7 +166,7 @@ export async function releaseStock(tx: Tx, dropId: string): Promise<void> {
  * Stock goes first: a reserve holds the drop row and then may wait on a changed order row, so
  * changing the order before taking the drop would deadlock against it.
  */
-async function endHold(tx: Tx, hold: Hold, endedAt: string): Promise<void> {
+export async function endHold(tx: Tx, hold: Hold, endedAt: string): Promise<void> {
   await releaseStock(tx, hold.dropId);
   await tx.update(orders).set({ status: 'expired', holdExpiresAt: endedAt }).where(eq(orders.id, hold.id));
 }

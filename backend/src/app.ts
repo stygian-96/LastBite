@@ -9,6 +9,7 @@ import { health } from './routes/health.js';
 import { publicBrowse } from './routes/public.js';
 import { vendorCatalogue } from './routes/vendor-catalogue.js';
 import { vendorOnboarding } from './routes/vendor-onboarding.js';
+import { vendorOrders } from './routes/vendor-orders.js';
 import { vendorStaff } from './routes/vendor-staff.js';
 import { webhooks } from './routes/webhooks.js';
 
@@ -31,6 +32,7 @@ app.route('/api/v1/auth', auth);
 app.route('/api/v1/vendor', vendorStaff);
 app.route('/api/v1/vendor', vendorOnboarding);
 app.route('/api/v1/vendor', vendorCatalogue);
+app.route('/api/v1/vendor', vendorOrders);
 app.route('/api/v1/admin', adminReview);
 app.route('/api/v1', publicBrowse);
 app.route('/api/v1', customerOrders);

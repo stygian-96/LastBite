@@ -107,8 +107,8 @@ async function flagMismatch(tx: Tx, order: Order, gp: GatewayPayment): Promise<v
  *
  * Lock order is the order row, then the drop, with no order changed before the drop is held. That
  * is the order expireHolds uses, so taking the drop first would deadlock against it. Waiting on the
- * drop is safe: its holders are expireHolds, which skips locked orders, and hold endings and reserves,
- * which never touch this order unless it has changed.
+ * drop is safe: its holders are expireHolds, which skips locked orders, hold endings and reserves,
+ * which never touch this order unless it has changed, and cancels, which lock their orders first.
  *
  * Returns whether the payment settled: false if it had already, or if it is one of those exceptions.
  */

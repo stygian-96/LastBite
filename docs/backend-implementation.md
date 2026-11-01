@@ -506,6 +506,7 @@ ALTER TABLE refunds ADD COLUMN attempts smallint NOT NULL DEFAULT 0;
 ALTER TABLE refunds ADD COLUMN adjusted_payout_id uuid REFERENCES payouts(id);
 ALTER TABLE payouts ADD COLUMN tax_paise integer NOT NULL DEFAULT 0;
 ALTER TABLE payments ADD COLUMN last_checked_at timestamptz;
+ALTER TABLE refunds ADD COLUMN sending_at timestamptz;
 ```
 
 - `rate_limits` gives shared counters across serverless instances.
@@ -513,6 +514,7 @@ ALTER TABLE payments ADD COLUMN last_checked_at timestamptz;
 - `refunds.adjusted_payout_id` stops a refund being deducted twice.
 - `payouts.tax_paise` keeps tax withheld separate from gateway fees.
 - `payments.last_checked_at` lets reconciliation take the longest-unchecked payment first.
+- `refunds.sending_at` marks a refund claimed by a run, so two runs cannot both send it.
 
 ## 6. State machines
 

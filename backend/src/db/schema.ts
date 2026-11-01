@@ -520,7 +520,9 @@ export const refunds = pgTable("refunds", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	attempts: smallint().default(0).notNull(),
 	adjustedPayoutId: uuid("adjusted_payout_id"),
+	sendingAt: timestamp("sending_at", { withTimezone: true, mode: 'string' }),
 }, (table) => [
+	index("refunds_to_send_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((status = 'pending'::text) AND (razorpay_refund_id IS NULL))`),
 	foreignKey({
 			columns: [table.orderId],
 			foreignColumns: [orders.id],

@@ -74,6 +74,9 @@ export class FakeGateway implements PaymentGateway {
     reverseTransfer: boolean;
     idempotencyKey: string;
   }): Promise<{ id: string; status: string }> {
+    // Like Razorpay, a key already seen gets the same refund back.
+    const sent = this.refunds.find((r) => r.idempotencyKey === a.idempotencyKey);
+    if (sent) return { id: sent.id, status: 'pending' };
     const refund = { id: `rfnd_fake_${this.refunds.length + 1}`, ...a };
     this.refunds.push(refund);
     return { id: refund.id, status: 'pending' };
