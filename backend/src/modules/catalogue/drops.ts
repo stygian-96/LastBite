@@ -6,6 +6,7 @@ import { audit } from '../../lib/audit.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { pickupBounds, serviceDate } from '../../lib/time.js';
 import { requireOutlet } from '../auth/access.js';
+import { queueFollowerAlert } from '../notifications/events.js';
 import { assertPrice, assertWindow, hhmm, MANAGERS, toHhmm } from './listings.js';
 
 export type Drop = typeof drops.$inferSelect;
@@ -94,6 +95,7 @@ export async function publishDrop(
         entityId: created.id,
         detail: { listingId, quantity, serviceDate: date },
       });
+      await queueFollowerAlert(tx, created);
       return created;
     }
 

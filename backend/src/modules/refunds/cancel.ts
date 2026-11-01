@@ -5,6 +5,7 @@ import { drops, orders, payments, refunds } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { requireOutlet, type Role } from '../auth/access.js';
+import { queueVendorCancelled } from '../notifications/events.js';
 import { endHold, releaseStock, type Order } from '../orders/reserve.js';
 import { createRefund } from './create.js';
 
@@ -73,6 +74,7 @@ async function cancelPaidOrder(tx: Tx, order: Order, { actorId, reason, now }: C
       createdBy: actorId,
     });
   }
+  await queueVendorCancelled(tx, order.id, reason, remainder);
   const detail = { reason, dropId: order.dropId, paymentId: payment?.id ?? null, refundPaise: Math.max(remainder, 0) };
   await audit(tx, { actorId, action: 'order.cancel', entity: 'order', entityId: order.id, detail });
   if (remainder <= 0) {

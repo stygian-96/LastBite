@@ -2,6 +2,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import type { Tx } from '../../db/client.js';
 import { payments, refunds } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
+import { queueRefundIssued } from '../notifications/events.js';
 
 /** The attempt that fails on reaching this ends the refund, for an admin to pick up. */
 export const MAX_REFUND_ATTEMPTS = 3;
@@ -71,6 +72,7 @@ export async function settleRefund(
 ): Promise<void> {
   if (result === 'processed') {
     await tx.update(refunds).set({ status: 'processed' }).where(eq(refunds.id, refund.id));
+    await queueRefundIssued(tx, refund.id);
     return;
   }
   if (refund.status !== 'pending') return;

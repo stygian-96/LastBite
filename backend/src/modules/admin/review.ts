@@ -6,6 +6,7 @@ import { getStore } from '../../integrations/storage.js';
 import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
+import { queueApplicationNotice, queueOutletClosed } from '../notifications/events.js';
 
 export type Document = typeof documents.$inferSelect;
 export type Outlet = typeof outlets.$inferSelect;
@@ -216,6 +217,7 @@ export async function reviewDocument(adminId: string, docId: string, raw: Review
         .where(and(dependants, eq(outlets.status, 'in_review')))
         .returning({ id: outlets.id });
       sentBack.push(...back.map((b) => b.id));
+      for (const id of sentBack) await queueApplicationNotice(tx, id, 'changes_needed', docId, input.reason);
     }
 
     await audit(tx, {
@@ -313,6 +315,11 @@ export async function decideOutlet(
     }
 
     await tx.update(outlets).set({ status: move.to }).where(eq(outlets.id, outletId));
+    if (input.decision === 'approve') await queueApplicationNotice(tx, outletId, 'application_approved', 'live');
+    if (input.decision === 'request_changes') {
+      await queueApplicationNotice(tx, outletId, 'changes_needed', now.toISOString(), input.reason);
+    }
+    if (input.decision === 'close') await queueOutletClosed(tx, outletId);
     await audit(tx, {
       actorId: adminId,
       action: `outlet.${input.decision}`,

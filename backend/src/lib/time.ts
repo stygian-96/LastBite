@@ -26,3 +26,18 @@ export function pickupBounds(
   if (endAt.getTime() <= startAt.getTime()) endAt = new Date(endAt.getTime() + DAY_MS);
   return { startAt, endAt, salesEndAt: new Date(endAt.getTime() - SALES_CUTOFF_MS) };
 }
+
+/** Minutes since midnight IST. */
+export function istMinuteOfDay(at: Date): number {
+  return Math.floor((((at.getTime() + IST_OFFSET_MS) % DAY_MS) + DAY_MS) % DAY_MS / 60_000);
+}
+
+/** The date n days after an IST date (YYYY-MM-DD). */
+export function addDays(date: string, n: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
+}
+
+/** 1 = Monday to 7 = Sunday, as listings.repeat_days counts. */
+export function isoWeekday(date: string): number {
+  return new Date(`${date}T00:00:00Z`).getUTCDay() || 7;
+}

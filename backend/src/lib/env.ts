@@ -4,6 +4,8 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   TEST_DATABASE_URL: z.string().min(1).optional(),
   FRONTEND_ORIGIN: z.string().min(1),
+  // The product name in message copy.
+  BRAND_NAME: z.string().min(1).default('LastBite'),
   // Leave empty or unset for localhost: cookies then carry no Domain attribute.
   COOKIE_DOMAIN: z.string().optional(),
   ENCRYPTION_KEY: z.string().min(1),

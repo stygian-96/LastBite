@@ -3,6 +3,7 @@ import { db, withTx } from '../../db/client.js';
 import { payments, refunds } from '../../db/schema.js';
 import { getGateway, GatewayRefusedError, type GatewayRefund } from '../../integrations/payments.js';
 import { audit } from '../../lib/audit.js';
+import { queueRefundIssued } from '../notifications/events.js';
 import { countRefundFailure, settleRefund } from './create.js';
 
 /** The most gateway calls in one run, sends and checks together. */
@@ -100,6 +101,7 @@ function recordSent(row: Claimed, sent: GatewayRefund, at: Date): Promise<void> 
       })
       .where(stillSending(row))
       .returning({ id: refunds.id });
+    if (saved && sent.status === 'processed') await queueRefundIssued(tx, row.id);
     if (saved && row.transferStatus === 'on_hold') {
       await tx
         .update(payments)

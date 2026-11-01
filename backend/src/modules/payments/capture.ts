@@ -7,6 +7,7 @@ import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
 import { generatePickupCode } from '../orders/code.js';
 import { findNightOrder, releaseStock, takeStock, type Order } from '../orders/reserve.js';
+import { queueLatePaymentRefunded, queueOrderConfirmed } from '../notifications/events.js';
 import { createRefund } from '../refunds/create.js';
 
 const CODE_ATTEMPTS = 10;
@@ -77,6 +78,7 @@ async function refundCapture(
 ): Promise<void> {
   const paymentId = await recordCapture(tx, order.id, gp);
   await createRefund(tx, { orderId: order.id, paymentId, amountPaise: gp.amountPaise, reason, chargedTo: 'platform' });
+  if (reason === 'late_payment') await queueLatePaymentRefunded(tx, order.id, paymentId, gp.amountPaise);
 }
 
 /** Flags a payment whose amount is wrong, once however many times it is seen. The caller holds the order. */
@@ -148,10 +150,15 @@ export async function applyCaptureInTx(tx: Tx, gp: GatewayPayment, now: Date): P
     case 'held':
       await recordCapture(tx, order.id, gp);
       await markPaid(tx, order.id, now);
+      await queueOrderConfirmed(tx, order.id);
       return true;
     case 'expired':
-      if (await retakeBag(tx, order, now)) await recordCapture(tx, order.id, gp);
-      else await refundCapture(tx, order, gp, 'late_payment');
+      if (await retakeBag(tx, order, now)) {
+        await recordCapture(tx, order.id, gp);
+        await queueOrderConfirmed(tx, order.id);
+      } else {
+        await refundCapture(tx, order, gp, 'late_payment');
+      }
       return true;
     case 'cancelled':
       await refundCapture(tx, order, gp, 'late_payment');

@@ -477,6 +477,7 @@ export const notifications = pgTable("notifications", {
 	attempts: smallint().default(0).notNull(),
 	providerId: text("provider_id"),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	sendingAt: timestamp("sending_at", { withTimezone: true, mode: 'string' }),
 }, (table) => [
 	index("notifications_status_created_at_idx").using("btree", table.status.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("text_ops")).where(sql`(status = 'pending'::text)`),
 	unique("notifications_dedupe_key_key").on(table.dedupeKey),
