@@ -1,4 +1,4 @@
-import { and, eq, inArray, ne, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
 import { orders, payments, payoutAccounts, payouts, refunds } from '../../db/schema.js';
@@ -14,15 +14,20 @@ const notFound = (what: string) => new ApiError('not_found', 404, `${what} not f
 const incomplete = () => new ApiError('release_incomplete', 502, 'Some transfers were not released. Try again');
 const isId = (id: string) => z.uuid().safeParse(id).success;
 const holdReason = z.string().trim().min(1).max(500);
+const approvalInProgress = () =>
+  new ApiError('approval_in_progress', 409, 'An approval on this account has to finish first. Retry the payout it stopped on');
 
-/** The account is locked first, as buildPayouts and verifyPayoutAccount do, and then the payout. */
-async function lockPayout(tx: Tx, payoutId: string): Promise<Payout> {
+/**
+ * The account is locked first, as buildPayouts and verifyPayoutAccount do, and then the payout. A
+ * start takes the account exclusively, so two approvals cannot both see it free.
+ */
+async function lockPayout(tx: Tx, payoutId: string, accountLock: 'share' | 'update' = 'share'): Promise<Payout> {
   const [known] = await tx
     .select({ accountId: payouts.payoutAccountId })
     .from(payouts)
     .where(eq(payouts.id, payoutId));
   if (!known) throw notFound('Payout');
-  await tx.select({ id: payoutAccounts.id }).from(payoutAccounts).where(eq(payoutAccounts.id, known.accountId)).for('share');
+  await tx.select({ id: payoutAccounts.id }).from(payoutAccounts).where(eq(payoutAccounts.id, known.accountId)).for(accountLock);
   const [payout] = await tx.select().from(payouts).where(eq(payouts.id, payoutId)).for('update');
   return payout!;
 }
@@ -65,10 +70,14 @@ const remainingPaise = (row: Held) => row.transferPaise! - row.reversedPaise;
  * release against the net. A negative payout still waiting is taken in here, as the balance counts
  * it. A payout left negative cannot be paid: it goes back to held, to carry forward, and returns
  * nothing.
+ *
+ * One approval at a time per account, or two would each reverse the same excess. It is marked here
+ * and stays marked through a failure, with no timeout: an admin retries that payout, and until it
+ * finishes no other on the account can start.
  */
-function startApproval(adminId: string, payoutId: string) {
+function startApproval(adminId: string, payoutId: string, now: Date) {
   return withTx(async (tx) => {
-    const payout = await lockPayout(tx, payoutId);
+    const payout = await lockPayout(tx, payoutId, 'update');
     const [account] = await tx
       .select({ status: payoutAccounts.status })
       .from(payoutAccounts)
@@ -77,6 +86,13 @@ function startApproval(adminId: string, payoutId: string) {
       throw new ApiError('account_on_hold', 409, 'This payout account is on hold until its bank details are verified');
     }
     if (payout.status !== 'draft') throw invalidState();
+    const [other] = await tx
+      .select({ id: payouts.id })
+      .from(payouts)
+      .where(
+        and(eq(payouts.payoutAccountId, payout.payoutAccountId), ne(payouts.id, payoutId), isNotNull(payouts.approvingAt)),
+      );
+    if (other) throw approvalInProgress();
 
     const waiting = await tx
       .select({ id: payouts.id })
@@ -109,9 +125,14 @@ function startApproval(adminId: string, payoutId: string) {
 
     const netPaise = await reconcilePayout(tx, adminId, payout);
     if (netPaise < 0) {
-      await tx.update(payouts).set({ status: 'held' }).where(eq(payouts.id, payoutId));
+      await tx.update(payouts).set({ status: 'held', approvingAt: null }).where(eq(payouts.id, payoutId));
       await audit(tx, { actorId: adminId, action: 'payout.held', entity: 'payout', entityId: payoutId, detail: { netPaise } });
+      // A retry that lands here may have moved money on its first try.
+      if (payout.approvingAt) await flagMismatch(tx, adminId, payoutId, netPaise);
       return undefined;
+    }
+    if (!payout.approvingAt) {
+      await tx.update(payouts).set({ approvingAt: now.toISOString() }).where(eq(payouts.id, payoutId));
     }
     return { held, netPaise };
   });
@@ -236,6 +257,22 @@ async function reconcilePayout(tx: Tx, adminId: string, payout: Payout): Promise
   return netPaise;
 }
 
+/** Flags money moved by an approval that differs from the net. The next balance makes it good by itself. */
+async function flagMismatch(tx: Tx, adminId: string, payoutId: string, netPaise: number): Promise<void> {
+  const [moved] = await tx
+    .select({ paise: sql<number>`coalesce(sum(${payments.transferPaise} - ${payments.reversedPaise}), 0)::int` })
+    .from(payments)
+    .where(and(eq(payments.releasedPayoutId, payoutId), eq(payments.transferStatus, 'released')));
+  if (moved!.paise === netPaise) return;
+  await audit(tx, {
+    actorId: adminId,
+    action: 'payout.mismatch',
+    entity: 'payout',
+    entityId: payoutId,
+    detail: { movedPaise: moved!.paise, netPaise, differencePaise: moved!.paise - netPaise },
+  });
+}
+
 /**
  * Ends the approval once every transfer has gone. If what landed meanwhile turns the net negative,
  * the payout stays held and carries, as any negative one does. Money moved may then differ from the
@@ -248,21 +285,8 @@ function finishApproval(adminId: string, payoutId: string, now: Date): Promise<v
     const netPaise = await reconcilePayout(tx, adminId, payout);
     if ((await heldTransfers(tx, payout)).length > 0) throw incomplete();
     const status = netPaise < 0 ? 'held' : 'released';
-    await tx.update(payouts).set({ status }).where(eq(payouts.id, payoutId));
-
-    const [moved] = await tx
-      .select({ paise: sql<number>`coalesce(sum(${payments.transferPaise} - ${payments.reversedPaise}), 0)::int` })
-      .from(payments)
-      .where(and(eq(payments.releasedPayoutId, payoutId), eq(payments.transferStatus, 'released')));
-    if (moved!.paise !== netPaise) {
-      await audit(tx, {
-        actorId: adminId,
-        action: 'payout.mismatch',
-        entity: 'payout',
-        entityId: payoutId,
-        detail: { movedPaise: moved!.paise, netPaise, differencePaise: moved!.paise - netPaise },
-      });
-    }
+    await tx.update(payouts).set({ status, approvingAt: null }).where(eq(payouts.id, payoutId));
+    await flagMismatch(tx, adminId, payoutId, netPaise);
     await audit(tx, {
       actorId: adminId,
       action: 'payout.approve',
@@ -282,7 +306,7 @@ function finishApproval(adminId: string, payoutId: string, now: Date): Promise<v
  */
 export async function approvePayout(adminId: string, payoutId: string, now: Date): Promise<void> {
   if (!isId(payoutId)) throw notFound('Payout');
-  const started = await startApproval(adminId, payoutId);
+  const started = await startApproval(adminId, payoutId, now);
   if (!started) throw new ApiError('payout_negative', 409, 'The transfers cannot cover this payout, so it stays held and carries forward');
 
   for (const row of await settleAdjustment(payoutId, started.held, started.netPaise)) {
@@ -308,6 +332,7 @@ export async function holdPayout(adminId: string, payoutId: string, rawReason: s
   const reason = parseInput(holdReason, rawReason);
   await withTx(async (tx) => {
     const payout = await lockPayout(tx, payoutId);
+    if (payout.approvingAt) throw approvalInProgress();
     if (payout.status !== 'draft') throw invalidState();
     await tx.update(payouts).set({ status: 'held', holdReason: reason }).where(eq(payouts.id, payoutId));
     await audit(tx, { actorId: adminId, action: 'payout.hold', entity: 'payout', entityId: payoutId, detail: { reason, at: now.toISOString() } });

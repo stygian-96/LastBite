@@ -370,7 +370,7 @@ function claimStaleTransfers(now: Date): Promise<StaleClaim[]> {
   });
 }
 
-/** Saves what the sweep found. The refund path never saw this transfer, so an admin is told. */
+/** Saves what the sweep found. The refund path never saw this transfer, so an admin is told, once. */
 function recordOrphan(row: StaleClaim, transfer: { id: string; amountPaise: number }): Promise<void> {
   return withTx(async (tx) => {
     await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, row.orderId)).for('update');
@@ -384,6 +384,11 @@ function recordOrphan(row: StaleClaim, transfer: { id: string; amountPaise: numb
         transferClaimedAt: null,
       })
       .where(and(eq(payments.id, row.paymentId), eq(payments.transferStatus, 'none')));
+    const [flagged] = await tx
+      .select({ id: auditLog.id })
+      .from(auditLog)
+      .where(and(eq(auditLog.action, 'transfer.orphaned'), eq(auditLog.entityId, row.paymentId)));
+    if (flagged) return;
     await audit(tx, {
       actorId: null,
       action: 'transfer.orphaned',
@@ -396,16 +401,18 @@ function recordOrphan(row: StaleClaim, transfer: { id: string; amountPaise: numb
 
 /**
  * Settles one stale claim. The run behind it may have died after the gateway took the transfer, so
- * the gateway says. Anything there is reversed in full, and with nothing there the claim just ends.
+ * the gateway says. Anything there is reversed in full and recorded, even if a lost run had reversed
+ * it already. With nothing there the claim just ends.
  */
 async function sweepClaim(row: StaleClaim): Promise<void> {
   const found = await getGateway().listPaymentTransfers(row.razorpayPaymentId);
-  const live = found.filter((t) => t.status !== 'reversed' && t.amountPaise > 0);
-  for (const transfer of live) {
-    await getGateway().reverseTransferPartial(transfer.id, transfer.amountPaise, `orphan-${row.paymentId}-${transfer.id}`);
+  for (const transfer of found) {
+    if (transfer.status !== 'reversed' && transfer.amountPaise > 0) {
+      await getGateway().reverseTransferPartial(transfer.id, transfer.amountPaise, `orphan-${row.paymentId}-${transfer.id}`);
+    }
     await recordOrphan(row, transfer);
   }
-  if (live.length > 0) return;
+  if (found.length > 0) return;
   await db
     .update(payments)
     .set({ transferClaimedAt: null })

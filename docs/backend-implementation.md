@@ -517,6 +517,7 @@ ALTER TABLE payments ADD COLUMN reversed_paise integer NOT NULL DEFAULT 0 CHECK 
 ALTER TABLE orders ADD COLUMN payout_account_id uuid REFERENCES payout_accounts(id);
 ALTER TABLE payments ADD COLUMN released_payout_id uuid REFERENCES payouts(id);
 ALTER TABLE payouts ADD COLUMN hold_reason text;
+ALTER TABLE payouts ADD COLUMN approving_at timestamptz;
 ```
 
 - `rate_limits` gives shared counters across serverless instances.
@@ -534,6 +535,7 @@ ALTER TABLE payouts ADD COLUMN hold_reason text;
 - `payments.reversed_paise` is how much of a transfer was reversed to settle a payout's negative adjustment, so a retry never reverses twice.
 - `payments.released_payout_id` is the payout whose approval released the transfer, so an approval can tell what it moved, and a retry sees the same balance.
 - `payouts.hold_reason` says why an admin holds a payout. It is null on one held for its account or a negative net.
+- `payouts.approving_at` marks an approval under way. Only one runs per payout account, and it stays marked through a failure, so that payout must be retried before any other on the account.
 - `orders.payout_account_id` is the account that sold the order. Payouts and transfers read it, so a franchise that changes hands leaves its unpaid orders with the old account.
 
 ## 6. State machines

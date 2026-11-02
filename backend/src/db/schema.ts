@@ -444,7 +444,9 @@ export const payouts = pgTable("payouts", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	taxPaise: integer("tax_paise").default(0).notNull(),
 	holdReason: text("hold_reason"),
+	approvingAt: timestamp("approving_at", { withTimezone: true, mode: 'string' }),
 }, (table) => [
+	uniqueIndex("one_approval_per_account").using("btree", table.payoutAccountId.asc().nullsLast().op("uuid_ops")).where(sql`(approving_at IS NOT NULL)`),
 	foreignKey({
 			columns: [table.payoutAccountId],
 			foreignColumns: [payoutAccounts.id],
