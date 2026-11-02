@@ -1,3 +1,5 @@
+import { whatsAppSmsFromEnv } from './whatsapp-sms.js';
+
 export type OutboundMessage = {
   phone: string;
   channel: 'whatsapp' | 'sms';
@@ -9,7 +11,7 @@ export type OutboundMessage = {
 
 export interface MessageSender {
   send(m: OutboundMessage): Promise<{ providerId: string }>;
-  /** Whether a webhook body was signed by the provider. Task 18 adds the real check. */
+  /** Whether a webhook body was signed by the provider. */
   verifyWebhook(raw: string, signature: string): boolean;
 }
 
@@ -27,22 +29,27 @@ export class FakeMessenger implements MessageSender {
   }
 }
 
-/** Stand-in until a real provider is wired: logs outside production, refuses in production. */
-class UnconfiguredMessenger implements MessageSender {
+/** Local development: logs what would be sent, which is how an OTP is read there. Trusts no webhook. */
+class ConsoleMessenger implements MessageSender {
   async send(m: OutboundMessage): Promise<{ providerId: string }> {
-    if (process.env.NODE_ENV === 'production') throw new Error('No message provider configured');
     console.log(`[messaging] ${m.channel} to ${m.phone}: ${m.template}`, m.variables);
     return { providerId: 'dev_log' };
   }
 
-  verifyWebhook(_raw: string, signature: string): boolean {
-    return process.env.NODE_ENV === 'test' && signature === 'valid';
+  verifyWebhook(): boolean {
+    return false;
   }
 }
 
-let messenger: MessageSender = new UnconfiguredMessenger();
+function defaultMessenger(): MessageSender {
+  if (process.env.NODE_ENV === 'production') return whatsAppSmsFromEnv();
+  return process.env.NODE_ENV === 'test' ? new FakeMessenger() : new ConsoleMessenger();
+}
+
+let messenger: MessageSender | undefined;
 
 export function getMessenger(): MessageSender {
+  messenger ??= defaultMessenger();
   return messenger;
 }
 

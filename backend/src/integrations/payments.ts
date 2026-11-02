@@ -1,3 +1,5 @@
+import { razorpayFromEnv } from './razorpay.js';
+
 export type GatewayPayment = {
   id: string;
   /** The Razorpay order this payment belongs to. */
@@ -73,7 +75,7 @@ export interface PaymentGateway {
   verifyWebhook(raw: string, signature: string): boolean;
 }
 
-/** Keeps everything in memory. Used by tests and local development. */
+/** Keeps everything in memory. Used by tests. */
 export class FakeGateway implements PaymentGateway {
   readonly keyId = 'rzp_test_fake';
   readonly orders: { id: string; amountPaise: number; receipt: string }[] = [];
@@ -232,11 +234,12 @@ export class FakeGateway implements PaymentGateway {
 
 let gateway: PaymentGateway | undefined;
 
-/** The fake accepts any `valid` signature, so production refuses to start one. Task 18 adds the real adapter. */
+/** The real one in production and the fake in tests. The fake accepts any `valid` signature, so nothing else gets it. */
 export function getGateway(): PaymentGateway {
   if (gateway) return gateway;
-  if (process.env.NODE_ENV === 'production') throw new Error('No payment gateway configured');
-  gateway = new FakeGateway();
+  if (process.env.NODE_ENV === 'production') gateway = razorpayFromEnv();
+  else if (process.env.NODE_ENV === 'test') gateway = new FakeGateway();
+  else throw new Error('No payment gateway outside production and tests');
   return gateway;
 }
 

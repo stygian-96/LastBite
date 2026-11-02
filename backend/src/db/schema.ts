@@ -597,6 +597,11 @@ export const follows = pgTable("follows", {
 	primaryKey({ columns: [table.userId, table.outletId], name: "follows_pkey"}),
 ]);
 
+export const jobRuns = pgTable("job_runs", {
+	name: text().primaryKey().notNull(),
+	lastRunAt: timestamp("last_run_at", { withTimezone: true, mode: 'string' }).notNull(),
+});
+
 export const rateLimits = pgTable("rate_limits", {
 	key: text().notNull(),
 	windowStart: timestamp("window_start", { withTimezone: true, mode: 'string' }).notNull(),

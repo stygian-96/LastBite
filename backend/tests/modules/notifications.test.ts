@@ -715,6 +715,13 @@ describe('handleWhatsAppWebhook', () => {
     expect(messenger.attempts.map((m) => m.channel)).toEqual(['whatsapp', 'sms']);
   });
 
+  test('a failed delivery on a deleted account is not sent again', async () => {
+    const message = { template: 'otp', variables: {}, channel: 'whatsapp', status: 'sent', providerId: 'p1' };
+    await db.insert(notifications).values({ dedupeKey: 'gone', phone: 'deleted:someone', ...message });
+    await handle(JSON.stringify({ type: 'status', providerId: 'p1', status: 'failed' }));
+    expect((await db.select().from(notifications))[0]).toMatchObject({ status: 'sent', channel: 'whatsapp' });
+  });
+
   test('a bad signature is refused, and unreadable or unknown events are handled', async () => {
     const { owner, payload } = await setup();
     expect((await failure(handle(reply(owner.phone, payload), 'forged')))?.status).toBe(401);

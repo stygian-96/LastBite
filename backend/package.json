@@ -10,13 +10,17 @@
     "lint": "eslint .",
     "test": "vitest run",
     "db:migrate": "tsx --env-file=.env scripts/migrate.ts",
-    "db:seed": "tsx --env-file=.env scripts/seed-areas.ts"
+    "db:seed": "tsx --env-file=.env scripts/seed-areas.ts",
+    "db:seed-chain": "tsx --env-file=.env scripts/seed-chain.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1161.0",
+    "@aws-sdk/s3-request-presigner": "^3.1161.0",
     "@hono/node-server": "^2.1.5",
     "drizzle-orm": "^0.45.4",
     "hono": "^4.13.16",
     "pg": "^8.23.1",
+    "razorpay": "^2.9.8",
     "zod": "^4.6.7"
   },
   "devDependencies": {

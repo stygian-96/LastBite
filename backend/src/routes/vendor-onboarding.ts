@@ -1,10 +1,8 @@
-import type { Context } from 'hono';
 import { Hono } from 'hono';
-import { getConnInfo } from '@hono/node-server/conninfo';
 import { z } from 'zod';
 import { getStore } from '../integrations/storage.js';
 import { route } from '../lib/http.js';
-import { MAX_UPLOAD_BYTES, uploadFile, uploadKey } from '../lib/uploads.js';
+import { uploadFile, uploadKey } from '../lib/uploads.js';
 import { addDocument } from '../modules/onboarding/documents.js';
 import { getOutletStatus, saveOutletStep, startOutlet, submitOutlet } from '../modules/onboarding/outlets.js';
 import { createPayoutAccount, signAgreement, updatePayoutAccount, type PayoutAccount } from '../modules/onboarding/payout-accounts.js';
@@ -35,16 +33,6 @@ const publicPayoutAccount = (a: PayoutAccount) => ({
   status: a.status,
 });
 
-/** The caller's address: the proxy header when present, else the socket. */
-function clientIp(c: Context, forwarded: string): string {
-  if (forwarded) return forwarded;
-  try {
-    return getConnInfo(c).remote.address ?? '';
-  } catch {
-    return '';
-  }
-}
-
 export const vendorOnboarding = new Hono()
   .post(
     '/outlets',
@@ -72,7 +60,7 @@ export const vendorOnboarding = new Hono()
     route({ auth: 'user', body: uploadBody }, async ({ user, body }) => {
       const key = uploadKey(FOLDERS[body.purpose], user!.id, body.contentType);
       const bucket = body.purpose === 'document' ? 'private' : 'public';
-      const url = await getStore().signedUpload(key, body.contentType, bucket, MAX_UPLOAD_BYTES);
+      const url = await getStore().signedUpload(key, body.contentType, bucket, body.size);
       return { key, url };
     }),
   )
@@ -103,8 +91,8 @@ export const vendorOnboarding = new Hono()
     '/payout-accounts/:id/agreement',
     route(
       { auth: 'user', body: z.object({ signedName: z.string(), version: z.string() }) },
-      async ({ c, user, params, body, ip, now }) => {
-        await signAgreement(user!.id, params.id!, { ...body, ip: clientIp(c, ip) }, now);
+      async ({ user, params, body, ip, now }) => {
+        await signAgreement(user!.id, params.id!, { ...body, ip }, now);
         return { ok: true };
       },
     ),

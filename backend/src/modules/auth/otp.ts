@@ -35,7 +35,8 @@ export async function sendOtp(phone: string, ip: string, now: Date): Promise<voi
   const e164 = normalizePhone(phone);
   if (!e164) throw new ApiError('invalid_phone', 400, 'Enter a valid mobile number');
 
-  await rateLimit(`otp:ip:${ip || 'unknown'}`, 20, 3600, now);
+  // With no known address the limit is skipped, or every such caller would share one bucket.
+  if (ip) await rateLimit(`otp:ip:${ip}`, 20, 3600, now);
   await rateLimit(`otp:phone:${e164}`, 3, 600, now);
 
   const code = String(randomInt(0, 1_000_000)).padStart(6, '0');

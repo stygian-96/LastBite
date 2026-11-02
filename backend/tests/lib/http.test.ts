@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { route, handleError } from '../../src/lib/http';
+import { env } from '../../src/lib/env';
 import { ApiError } from '../../src/lib/errors';
 
 // Importing route loads the db client, which caches env, so use the configured origin.
@@ -60,6 +61,31 @@ describe('route', () => {
     const res = await t.request('/x/abc', post({ n: 3 }, { 'x-forwarded-for': '1.2.3.4, 5.6.7.8' }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ n: 3, id: 'abc', ip: '1.2.3.4' });
+  });
+});
+
+describe('client address', () => {
+  const seen = async (headers: Record<string, string>) => {
+    const t = harness();
+    t.get('/x', route({}, async (c) => ({ ip: c.ip })));
+    return ((await (await t.request('/x', { headers })).json()) as { ip: string }).ip;
+  };
+
+  test('takes the left-most forwarded address when the proxy is trusted', async () => {
+    expect(await seen({ 'x-forwarded-for': ' 1.2.3.4 , 5.6.7.8' })).toBe('1.2.3.4');
+  });
+
+  test('ignores the header when the proxy is not trusted', async () => {
+    env().TRUST_PROXY = false;
+    try {
+      expect(await seen({ 'x-forwarded-for': '1.2.3.4' })).toBe('');
+    } finally {
+      env().TRUST_PROXY = true;
+    }
+  });
+
+  test('a trusted proxy that sent nothing leaves the socket address, here none', async () => {
+    expect(await seen({})).toBe('');
   });
 });
 

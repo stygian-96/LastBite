@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import { db, pool, withTx } from '../../src/db/client.js';
-import { drops, orders, outlets } from '../../src/db/schema.js';
+import { drops, orders, outlets, rateLimits } from '../../src/db/schema.js';
 import { signAnonId, verifyAnonId } from '../../src/lib/crypto.js';
 import { env } from '../../src/lib/env.js';
 import { ApiError } from '../../src/lib/errors.js';
@@ -97,6 +97,13 @@ describe('reserveDrop', () => {
     await db.update(outlets).set({ commissionBps: 3000 }).where(eq(outlets.id, outlet.id));
     await db.update(drops).set({ pricePaise: 99 }).where(eq(drops.id, drop.id));
     expect(await getOrderRow(order.id)).toMatchObject({ pricePaise: 12345, commissionBps: 1500, commissionPaise: 1852 });
+  });
+
+  test('a signed-out hold with no known IP takes no IP limit', async () => {
+    const drop = await makeDrop();
+    await reserveDrop({ dropId: drop.id, anonId: 'a', ip: '' }, now);
+    const keys = (await db.select({ key: rateLimits.key }).from(rateLimits)).map((r) => r.key);
+    expect(keys).toEqual([]);
   });
 
   test('a signed-in customer has user_id set immediately', async () => {

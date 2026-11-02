@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, test } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import { db } from '../../src/db/client.js';
-import { auditLog, follows, issues, notifications, orders, payments, refunds, sessions, users } from '../../src/db/schema.js';
+import { auditLog, follows, issues, notifications, orders, otpCodes, payments, refunds, sessions, users } from '../../src/db/schema.js';
 import { FakeMessenger, setMessenger } from '../../src/integrations/messaging.js';
 import { FakeGateway, setGateway } from '../../src/integrations/payments.js';
 import { FakeStore, setStore } from '../../src/integrations/storage.js';
@@ -276,7 +276,7 @@ describe('issues', () => {
     const { key, url } = (await res.json()) as { key: string; url: string };
     expect(key).toMatch(new RegExp(`^issues/${user.id}/[0-9a-f-]+\\.jpg$`));
     expect(url).toContain(key);
-    expect(store.uploads).toEqual([{ key, contentType: 'image/jpeg', bucket: 'private', maxBytes: 10 * 1024 * 1024 }]);
+    expect(store.uploads).toEqual([{ key, contentType: 'image/jpeg', bucket: 'private', sizeBytes: 1000 }]);
     expect(await reportIssue(user.id, order.id, { reason: 'quality', photoKey: key })).toMatchObject({ photoKey: key });
   });
 
@@ -607,6 +607,33 @@ describe('deleteAccount', () => {
     const rows = await db.select().from(notifications);
     const status = Object.fromEntries(rows.map((n) => [n.dedupeKey, n.status]));
     expect(status).toEqual({ pending: 'failed', sent: 'sent', other: 'pending' });
+  });
+
+  test('delete removes the phone from its OTP codes and from every message left', async () => {
+    const user = await makeUser();
+    const other = '+919111111111';
+    const code = { codeHash: 'h', expiresAt: NOW.toISOString() };
+    await db.insert(otpCodes).values([{ phone: user.phone, ...code }, { phone: other, ...code }]);
+    const message = { template: 'otp', variables: {}, channel: 'sms' };
+    await db.insert(notifications).values([
+      { dedupeKey: 'sent', phone: user.phone, status: 'sent', ...message },
+      { dedupeKey: `prompt:o1:${user.phone}:2026-11-02`, phone: user.phone, status: 'sent', ...message },
+      { dedupeKey: 'failed', phone: user.phone, status: 'failed', ...message },
+      { dedupeKey: 'pending', phone: user.phone, ...message },
+      { dedupeKey: 'other', phone: other, status: 'sent', ...message },
+    ]);
+
+    await deleteAccount(user.id, NOW);
+
+    const left = await db.select({ phone: otpCodes.phone }).from(otpCodes);
+    expect(left).toEqual([{ phone: other }]);
+    const rows = await db.select().from(notifications);
+    const mine = rows.filter((n) => n.dedupeKey !== 'other');
+    expect(mine).toHaveLength(4);
+    for (const n of mine) expect(n.phone).toBe(`deleted:${user.id}`);
+    expect(JSON.stringify(rows)).not.toContain(user.phone);
+    expect(rows.find((n) => n.dedupeKey === 'other')!.phone).toBe(other);
+    expect(rows.some((n) => n.dedupeKey === `prompt:o1:deleted:${user.id}:2026-11-02`)).toBe(true);
   });
 
   test('deleted phone can register again as a new user', async () => {

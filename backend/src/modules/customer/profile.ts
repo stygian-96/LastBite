@@ -1,9 +1,9 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx } from '../../db/client.js';
-import { drops, follows, orders, sessions, users } from '../../db/schema.js';
+import { drops, follows, orders, otpCodes, sessions, users } from '../../db/schema.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
-import { cancelPendingFor } from '../notifications/enqueue.js';
+import { cancelPendingFor, scrubPhone } from '../notifications/enqueue.js';
 
 export type Profile = {
   id: string;
@@ -85,12 +85,15 @@ export async function deleteAccount(userId: string, now: Date): Promise<void> {
       .limit(1);
     if (active) throw new ApiError('active_order', 409, 'Finish or cancel your active order first');
 
+    const deletedPhone = `deleted:${userId}`;
     await cancelPendingFor(tx, user.phone);
+    await scrubPhone(tx, user.phone, deletedPhone);
+    await tx.delete(otpCodes).where(eq(otpCodes.phone, user.phone));
     await tx.delete(follows).where(eq(follows.userId, userId));
     await tx.delete(sessions).where(eq(sessions.userId, userId));
     await tx
       .update(users)
-      .set({ phone: `deleted:${userId}`, name: null, email: null, deletedAt: now.toISOString() })
+      .set({ phone: deletedPhone, name: null, email: null, deletedAt: now.toISOString() })
       .where(eq(users.id, userId));
   });
 }

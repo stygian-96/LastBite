@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Tx } from '../../db/client.js';
 import { notifications, users } from '../../db/schema.js';
 import { TEMPLATES, type TemplateName, type Vars } from './templates.js';
@@ -70,6 +70,17 @@ export async function cancelPendingFor(tx: Tx, phone: string): Promise<void> {
     .update(notifications)
     .set({ status: 'failed', sendingAt: null })
     .where(and(eq(notifications.phone, phone), eq(notifications.status, 'pending')));
+}
+
+/**
+ * Takes a phone off every message kept for it. Some dedupe keys carry the phone too. Call
+ * cancelPendingFor first, so none of these is still going out.
+ */
+export async function scrubPhone(tx: Tx, phone: string, replacement: string): Promise<void> {
+  await tx
+    .update(notifications)
+    .set({ phone: replacement, dedupeKey: sql`replace(${notifications.dedupeKey}, ${phone}, ${replacement})` })
+    .where(eq(notifications.phone, phone));
 }
 
 /** A user's number changed, so what is still queued for them follows it. */

@@ -3,6 +3,7 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { HTTPException } from 'hono/http-exception';
 import type { ZodType } from 'zod';
 import { getCookie } from 'hono/cookie';
+import { getConnInfo } from '@hono/node-server/conninfo';
 import { ApiError } from './errors.js';
 import { env } from './env.js';
 import { getSessionUser, type SessionUser } from '../modules/auth/session.js';
@@ -28,6 +29,22 @@ type RouteOpts<B> = {
   auth?: 'none' | 'user' | 'admin';
   body?: ZodType<B>;
 };
+
+/**
+ * The caller's address, empty when it cannot be known. The proxy header is believed only when
+ * TRUST_PROXY says a proxy sets it, as anyone can send it to a bare server.
+ */
+function clientIp(c: Context): string {
+  if (env().TRUST_PROXY) {
+    const forwarded = c.req.header('x-forwarded-for')?.split(',')[0]?.trim();
+    if (forwarded) return forwarded;
+  }
+  try {
+    return getConnInfo(c).remote.address ?? '';
+  } catch {
+    return '';
+  }
+}
 
 function envelope(c: Context, status: number, code: string, message: string, details?: Record<string, unknown>) {
   return c.json({ error: { code, message, ...details } }, status as ContentfulStatusCode);
@@ -70,7 +87,7 @@ export function route<B = undefined>(
       if (!parsed.success) throw new ApiError('invalid_request', 400, 'Invalid request');
       body = parsed.data;
     }
-    const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? '';
+    const ip = clientIp(c);
     const result = await handler({
       c,
       params: c.req.param() as Record<string, string>,

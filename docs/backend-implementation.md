@@ -770,13 +770,13 @@ All jobs run from the one-minute tick. Each must be safe to run twice, and a fai
 | Send refunds | Every minute | Retry pending refunds |
 | Pickup reminders | Every minute | 30 minutes before pickup opens |
 | Mark no-shows | Every 5 minutes | `paid` orders 30 minutes past pickup end |
-| Vendor prompt | Daily, 5:00 pm IST | "How many tonight?" |
+| Vendor prompt | Daily, between 5:00 and 5:14 pm IST | "How many tonight?" |
 | Followed outlet alerts | With each first drop | One message per customer, per outlet, per night |
 | Licence check | Daily | Warn at 30 and 7 days, block new drops on expiry |
 | Link payout accounts | Every minute | Create linked accounts for verified payout accounts |
 | Create transfers | Every minute | Held Route transfers for sold bags |
-| Build payouts | Monday morning | Create draft payouts |
-| Clean up | Daily | Remove old OTPs and expired sessions |
+| Build payouts | Monday from 6:00 am IST, once a week | Create draft payouts for the week before |
+| Clean up | Daily | Remove used or expired OTPs and rate limit rows over a day old, expired sessions, and sent messages over 90 days old |
 
 The browse and reserve queries check dates directly, so a late job can never sell something it shouldn't. Jobs only tidy up.
 

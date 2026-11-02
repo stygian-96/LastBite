@@ -73,7 +73,7 @@ export type OutletPatch = z.input<typeof patchSchema>;
 
 // ---------- Slugs ----------
 
-function slugify(name: string, fallback: string): string {
+export function slugify(name: string, fallback: string): string {
   const s = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -84,7 +84,7 @@ function slugify(name: string, fallback: string): string {
 }
 
 /** The base slug, or base-2, base-3 and so on, whichever is free. */
-function firstFree(base: string, taken: string[]): string {
+export function firstFree(base: string, taken: string[]): string {
   const used = new Set(taken);
   if (!used.has(base)) return base;
   for (let n = 2; ; n++) if (!used.has(`${base}-${n}`)) return `${base}-${n}`;

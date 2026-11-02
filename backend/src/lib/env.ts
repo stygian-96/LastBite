@@ -11,18 +11,59 @@ const schema = z.object({
   ENCRYPTION_KEY: z.string().min(1),
   SESSION_SECRET: z.string().min(16),
   PORT: z.coerce.number().int().positive().default(4000),
-  // Optional until the real gateway arrives, then required in production.
+  // Only when a proxy in front sets x-forwarded-for. Anyone can send that header to a bare server.
+  TRUST_PROXY: z
+    .string()
+    .optional()
+    .transform((v) => v === 'true'),
+  CRON_SECRET: z.string().optional(),
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
+  // A domain of ours. Linked accounts each need an email Razorpay has not seen, and take one on this.
+  RAZORPAY_LINKED_EMAIL_DOMAIN: z.string().optional(),
+  MESSAGING_API_URL: z.string().optional(),
+  MESSAGING_API_KEY: z.string().optional(),
+  MESSAGING_WEBHOOK_SECRET: z.string().optional(),
+  MESSAGING_WEBHOOK_SIGNATURE_HEADER: z.string().min(1).default('x-webhook-signature'),
+  AWS_REGION: z.string().optional(),
+  S3_PUBLIC_BUCKET: z.string().optional(),
+  S3_PRIVATE_BUCKET: z.string().optional(),
+  // A CDN or custom domain in front of the public bucket. Without one, links go to S3 itself.
+  S3_PUBLIC_BASE_URL: z.string().optional(),
 });
 
 export type Env = z.infer<typeof schema>;
+
+/** Optional in development and tests, where the adapters that use them are not selected. */
+const REQUIRED_IN_PRODUCTION = [
+  'RAZORPAY_KEY_ID',
+  'RAZORPAY_KEY_SECRET',
+  'RAZORPAY_WEBHOOK_SECRET',
+  'RAZORPAY_LINKED_EMAIL_DOMAIN',
+  'MESSAGING_API_URL',
+  'MESSAGING_API_KEY',
+  'MESSAGING_WEBHOOK_SECRET',
+  'AWS_REGION',
+  'S3_PUBLIC_BUCKET',
+  'S3_PRIVATE_BUCKET',
+  'CRON_SECRET',
+] as const;
+
+/** Validates a set of variables. Production also refuses to start with any adapter unconfigured. */
+export function parseEnv(source: Record<string, string | undefined>): Env {
+  const parsed = schema.parse(source);
+  if (source.NODE_ENV === 'production') {
+    const missing = REQUIRED_IN_PRODUCTION.filter((name) => !parsed[name]);
+    if (missing.length > 0) throw new Error(`Missing environment variables for production: ${missing.join(', ')}`);
+  }
+  return parsed;
+}
 
 let cached: Env | undefined;
 
 /** Validates process.env on first use, then returns the cached result. */
 export function env(): Env {
-  cached ??= schema.parse(process.env);
+  cached ??= parseEnv(process.env);
   return cached;
 }

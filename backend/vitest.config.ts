@@ -12,6 +12,9 @@ const testEnv = {
   // Fixed test-only secrets (ENCRYPTION_KEY is 32 bytes, base64).
   ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
   SESSION_SECRET: 'test-session-secret-0123456789abcdef',
+  CRON_SECRET: 'test-cron-secret',
+  // Tests stand in for the proxy with x-forwarded-for.
+  TRUST_PROXY: 'true',
 };
 Object.assign(process.env, testEnv);
 

@@ -3,7 +3,7 @@ import { deleteCookie } from 'hono/cookie';
 import { z } from 'zod';
 import { getStore } from '../integrations/storage.js';
 import { cookieDomain, route } from '../lib/http.js';
-import { MAX_UPLOAD_BYTES, uploadFile, uploadKey } from '../lib/uploads.js';
+import { uploadFile, uploadKey } from '../lib/uploads.js';
 import { ISSUE_PHOTO_FOLDER, rateOrder, reportIssue } from '../modules/customer/feedback.js';
 import { follow, listFollowing, unfollow } from '../modules/customer/follow.js';
 import { deleteAccount, getProfile, updateProfile } from '../modules/customer/profile.js';
@@ -32,7 +32,7 @@ export const customer = new Hono()
     '/me/uploads',
     route({ auth: 'user', body: uploadFile }, async ({ user, body }) => {
       const key = uploadKey(ISSUE_PHOTO_FOLDER, user!.id, body.contentType);
-      return { key, url: await getStore().signedUpload(key, body.contentType, 'private', MAX_UPLOAD_BYTES) };
+      return { key, url: await getStore().signedUpload(key, body.contentType, 'private', body.size) };
     }),
   )
   .get(

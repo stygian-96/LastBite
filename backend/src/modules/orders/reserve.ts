@@ -118,7 +118,8 @@ export async function reserveDrop(
   now: Date,
 ): Promise<Order> {
   // Signed-out holds only, and only those that succeed, so sold-out taps on a shared IP cost nothing.
-  const ipLimitKey = r.userId ? undefined : `hold:ip:${r.ip || 'unknown'}`;
+  // With no known address the limit is skipped, or every such caller would share one bucket.
+  const ipLimitKey = r.userId || !r.ip ? undefined : `hold:ip:${r.ip}`;
   if (ipLimitKey) await checkRateLimit(ipLimitKey, HOLDS_PER_IP, HOLD_WINDOW_SECONDS, now);
   const nowIso = now.toISOString();
 

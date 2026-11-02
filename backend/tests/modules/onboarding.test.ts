@@ -463,7 +463,7 @@ describe('uploads', () => {
     const p = (await photo.json()) as { key: string; url: string };
     expect(p.key).toMatch(new RegExp(`^photos/${user.id}/[0-9a-f-]{36}\\.jpg$`));
     expect(p.url).toContain(p.key);
-    expect(store.uploads.at(-1)).toMatchObject({ key: p.key, contentType: 'image/jpeg', bucket: 'public', maxBytes: 10 * MB });
+    expect(store.uploads.at(-1)).toMatchObject({ key: p.key, contentType: 'image/jpeg', bucket: 'public', sizeBytes: 2 * MB });
 
     const doc = await post(user.id, { purpose: 'document', contentType: 'application/pdf', size: 10 * MB });
     expect(doc.status).toBe(200);

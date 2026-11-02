@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, notLike, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { drops, listings, notifications, users } from '../../db/schema.js';
@@ -36,8 +36,8 @@ function parseEvent(raw: string): Event | null {
 }
 
 /**
- * A message the provider could not deliver on WhatsApp goes out again on SMS. Anything else about
- * delivery is of no use to the app and is ignored.
+ * A message the provider could not deliver on WhatsApp goes out again on SMS, unless its account has
+ * since been deleted. Anything else about delivery is of no use to the app and is ignored.
  */
 async function handleStatus(providerId: string, status: string): Promise<void> {
   if (status !== 'failed') return;
@@ -45,7 +45,12 @@ async function handleStatus(providerId: string, status: string): Promise<void> {
     .update(notifications)
     .set({ status: 'pending', channel: 'sms', providerId: null, sendingAt: null })
     .where(
-      and(eq(notifications.providerId, providerId), eq(notifications.status, 'sent'), eq(notifications.channel, 'whatsapp')),
+      and(
+        eq(notifications.providerId, providerId),
+        eq(notifications.status, 'sent'),
+        eq(notifications.channel, 'whatsapp'),
+        notLike(notifications.phone, 'deleted:%'),
+      ),
     );
 }
 

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'vitest';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { db, pool } from '../../src/db/client.js';
-import { users } from '../../src/db/schema.js';
+import { rateLimits, users } from '../../src/db/schema.js';
 import { signAnonId } from '../../src/lib/crypto.js';
 import { env } from '../../src/lib/env.js';
 import { ApiError } from '../../src/lib/errors.js';
@@ -113,6 +113,12 @@ describe('OTP sign-in', () => {
       status: 429,
     });
     await sendOtp('+919111111111', '3.3.3.3', T0);
+  });
+
+  test('with no known IP the IP limit is skipped, so strangers do not share one bucket', async () => {
+    for (let i = 0; i < 21; i++) await sendOtp(`+91900${String(i).padStart(7, '0')}`, '', T0);
+    const keys = (await db.select({ key: rateLimits.key }).from(rateLimits)).map((r) => r.key);
+    expect(keys.filter((k) => k.startsWith('otp:ip:'))).toEqual([]);
   });
 
   test('rejects a malformed phone on send', async () => {
