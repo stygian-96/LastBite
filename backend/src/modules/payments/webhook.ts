@@ -104,7 +104,8 @@ async function applyRefund(
   tx: Tx,
   eventType: string,
   razorpayRefundId: string,
-  razorpayPaymentId?: string | null,
+  razorpayPaymentId: string | null | undefined,
+  now: Date,
 ): Promise<void> {
   const [refund] = await tx
     .select({
@@ -118,7 +119,7 @@ async function applyRefund(
     .where(eq(refunds.razorpayRefundId, razorpayRefundId))
     .for('update');
   if (refund) {
-    await settleRefund(tx, refund, razorpayRefundId, eventType === 'refund.failed' ? 'failed' : 'processed');
+    await settleRefund(tx, refund, razorpayRefundId, eventType === 'refund.failed' ? 'failed' : 'processed', now);
     return;
   }
 
@@ -162,6 +163,6 @@ export async function handleWebhook(raw: string, signature: string, eventId: str
     if (!fresh) return;
 
     if (gp) await applyPayment(tx, event.event, gp, now);
-    else if (subject) await applyRefund(tx, event.event, subject, event.payload?.refund?.entity.payment_id);
+    else if (subject) await applyRefund(tx, event.event, subject, event.payload?.refund?.entity.payment_id, now);
   });
 }

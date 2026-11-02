@@ -23,6 +23,8 @@ const seconds = (d: Date, s: number) => new Date(d.getTime() + s * 1000);
 const later = seconds(now, 5 * 60 + 61);
 const LEASE_SECONDS = 5 * 60;
 const SWEEP_SECONDS = 15 * 60;
+// Past the wait between attempts after a definite failure.
+const RETRY_SECONDS = 15 * 60 + 1;
 
 let gateway: FakeGateway;
 let seq = 0;
@@ -726,7 +728,7 @@ describe('processRefunds', () => {
     await setTransfer(payment.id, 'released');
     await deliver(refundEvent('refund.failed', gateway.refunds[0]!.id));
 
-    await processRefunds(now);
+    await processRefunds(seconds(now, RETRY_SECONDS));
 
     expect(gateway.refunds[1]).toMatchObject({ idempotencyKey: `${refund.id}-1`, reverseTransfer: true });
     expect((await paymentRow(payment.id)).transferStatus).toBe('released');
@@ -782,11 +784,11 @@ describe('processRefunds', () => {
 
     expect(await processRefunds(now)).toBe(0);
     expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 1, sendingAt: null });
-    await processRefunds(now);
+    await processRefunds(seconds(now, RETRY_SECONDS));
     expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 2 });
     expect(await auditRows('refund.failed')).toHaveLength(0);
 
-    await processRefunds(now);
+    await processRefunds(seconds(now, 2 * RETRY_SECONDS));
     expect(await refundRow(refund.id)).toMatchObject({ status: 'failed', attempts: 3, razorpayRefundId: null });
     expect(await auditRows('refund.failed')).toMatchObject([
       { entity: 'refund', entityId: refund.id, detail: { razorpayRefundId: null, attempts: 3 } },
@@ -794,7 +796,7 @@ describe('processRefunds', () => {
     expect(keys).toEqual([`${refund.id}-0`, `${refund.id}-1`, `${refund.id}-2`]);
     expect(logged).toHaveBeenCalled();
 
-    await processRefunds(now);
+    await processRefunds(seconds(now, 3 * RETRY_SECONDS));
     expect(keys).toHaveLength(3);
   });
 
@@ -808,7 +810,7 @@ describe('processRefunds', () => {
     expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 1, razorpayRefundId: null });
     expect((await paymentRow(payment.id)).transferStatus).toBe('on_hold');
 
-    await processRefunds(now);
+    await processRefunds(seconds(now, RETRY_SECONDS));
     expect(gateway.refunds).toHaveLength(2);
     expect(gateway.refunds[1]).toMatchObject({ idempotencyKey: `${refund.id}-1`, reverseTransfer: true });
     expect(await refundRow(refund.id)).toMatchObject({ razorpayRefundId: gateway.refunds[1]!.id });
@@ -886,7 +888,7 @@ describe('processRefunds', () => {
     expect((await paymentRow(payment.id)).transferStatus).toBe('on_hold');
 
     gateway.refundStatus = 'pending';
-    await processRefunds(now);
+    await processRefunds(seconds(now, RETRY_SECONDS));
     expect(gateway.refunds[1]).toMatchObject({ idempotencyKey: `${refund.id}-1` });
     await deliver(refundEvent('refund.failed', gateway.refunds[0]!.id));
     expect((await refundRow(refund.id)).attempts).toBe(1);
@@ -1078,7 +1080,7 @@ describe('refunds lost between the gateway and us', () => {
     expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 1, razorpayRefundId: null });
     expect((await paymentRow(payment.id)).transferStatus).toBe('on_hold');
 
-    await processRefunds(sweep);
+    await processRefunds(seconds(sweep, RETRY_SECONDS));
     expect(gateway.refunds[1]).toMatchObject({ idempotencyKey: `${refund.id}-1`, reverseTransfer: true });
 
     // The webhook turns up after all, and is known, so it neither counts again nor gets redelivered.
@@ -1189,5 +1191,152 @@ describe('vendor routes', () => {
     expect(res.status).toBe(200);
     expect((await getDropRow(drop.id)).status).toBe('cancelled');
     expect((await getOrderRow(order.id)).cancelReason).toBe('quality');
+  });
+});
+
+describe('spacing definite refusals', () => {
+  const MINUTE = 60;
+  const refuse = () => vi.spyOn(gateway, 'refund').mockRejectedValue(new GatewayRefusedError('refused'));
+
+  test('a refused refund is not tried again for 15 minutes', async () => {
+    const { refund } = await cancelledOrder();
+    const send = refuse();
+
+    await processRefunds(now);
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 1 });
+
+    await processRefunds(seconds(now, MINUTE));
+    await processRefunds(seconds(now, 14 * MINUTE));
+    expect(send).toHaveBeenCalledTimes(1);
+
+    await processRefunds(seconds(now, RETRY_SECONDS));
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 2 });
+  });
+
+  test('three refusals take at least 30 minutes to end a refund', async () => {
+    const { refund } = await cancelledOrder();
+    refuse();
+
+    for (const minute of [0, 1, 2, 3, 16]) await processRefunds(seconds(now, minute * MINUTE));
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', attempts: 2 });
+
+    await processRefunds(seconds(now, 32 * MINUTE));
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'failed', attempts: 3 });
+  });
+
+  test('a failure reported by webhook waits the same', async () => {
+    const { refund, sentId } = await sentRefund();
+    gateway.setRefundStatus(sentId, 'failed');
+    await deliver(refundEvent('refund.failed', sentId));
+    expect(await refundRow(refund.id)).toMatchObject({ attempts: 1, razorpayRefundId: null });
+
+    await processRefunds(seconds(now, 14 * MINUTE));
+    expect(gateway.refunds).toHaveLength(1);
+    await processRefunds(seconds(now, RETRY_SECONDS));
+    expect(gateway.refunds).toHaveLength(2);
+  });
+
+  test('an unclear send does not wait, as it has not failed', async () => {
+    const { refund } = await cancelledOrder();
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const send = vi.spyOn(gateway, 'refund').mockRejectedValue(new Error('timeout'));
+    await processRefunds(now);
+    await processRefunds(seconds(now, MINUTE));
+    expect(send).toHaveBeenCalledTimes(2);
+    expect((await refundRow(refund.id)).sendErrors).toBe(2);
+  });
+});
+
+describe('POST /admin/refunds/:id/retry', () => {
+  const retry = async (id: string, userId?: string) =>
+    app.request(`/api/v1/admin/refunds/${id}/retry`, {
+      method: 'POST',
+      headers: userId ? { cookie: `session=${await createSession(userId, new Date())}`, origin: env().FRONTEND_ORIGIN } : {},
+    });
+
+  async function failedRefund(transfer?: string) {
+    const cancelled = await cancelledOrder(transfer);
+    await db
+      .update(refunds)
+      .set({ status: 'failed', attempts: 3, sendErrors: 4, sendingAt: now.toISOString(), retryAt: now.toISOString() })
+      .where(eq(refunds.id, cancelled.refund.id));
+    return cancelled;
+  }
+
+  test('reopens a failed refund, which then goes out on a new key, and audits it', async () => {
+    const { refund, payment } = await failedRefund();
+    const admin = await makeUser({ isAdmin: true });
+
+    expect((await retry(refund.id, admin.id)).status).toBe(200);
+
+    expect(await refundRow(refund.id)).toMatchObject({
+      status: 'pending',
+      attempts: 3,
+      sendErrors: 0,
+      sendingAt: null,
+      retryAt: null,
+      razorpayRefundId: null,
+      amountPaise: 10000,
+      chargedTo: 'vendor',
+    });
+    expect(await auditRows('refund.retry')).toMatchObject([
+      { actorId: admin.id, entityId: refund.id, detail: { orderId: refund.orderId, paymentId: payment.id } },
+    ]);
+
+    await processRefunds(now);
+    expect(gateway.refunds.at(-1)).toMatchObject({ idempotencyKey: `${refund.id}-3`, amountPaise: 10000 });
+  });
+
+  test('recovers a failed late payment, which an admin refund cannot reach', async () => {
+    const { order, payment, gp, drop } = await heldOrder();
+    await expireHolds(later);
+    await db.update(drops).set({ status: 'cancelled' }).where(eq(drops.id, drop.id));
+    await applyCapture(gp, later);
+    const [late] = await refundsFor(order.id);
+    expect(late).toMatchObject({ reason: 'late_payment', paymentId: payment.id });
+    await db.update(refunds).set({ status: 'failed', attempts: 3 }).where(eq(refunds.id, late!.id));
+
+    const admin = await makeUser({ isAdmin: true });
+    expect((await retry(late!.id, admin.id)).status).toBe(200);
+    expect((await refundRow(late!.id)).status).toBe('pending');
+  });
+
+  test('stops reversing a transfer that has been released since', async () => {
+    const { refund, payment } = await failedRefund('on_hold');
+    expect(refund.reverseTransfer).toBe(true);
+    await setTransfer(payment.id, 'released');
+
+    await retry(refund.id, (await makeUser({ isAdmin: true })).id);
+
+    expect(await refundRow(refund.id)).toMatchObject({ status: 'pending', reverseTransfer: false });
+  });
+
+  test('refuses what is more than is left of the payment now', async () => {
+    const { refund, order, payment } = await failedRefund();
+    await earlierRefund(order.id, payment.id, 500);
+
+    const res = await retry(refund.id, (await makeUser({ isAdmin: true })).id);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: { code: 'refund_too_large' } });
+    expect((await refundRow(refund.id)).status).toBe('failed');
+  });
+
+  test('only a failed refund can be retried', async () => {
+    const { refund } = await cancelledOrder();
+    const res = await retry(refund.id, (await makeUser({ isAdmin: true })).id);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: { code: 'invalid_state' } });
+    expect(await auditRows('refund.retry')).toHaveLength(0);
+  });
+
+  test('is for admins, and an unknown ID is a 404', async () => {
+    const { refund } = await failedRefund();
+    expect((await retry(refund.id)).status).toBe(401);
+    expect((await retry(refund.id, (await makeUser()).id)).status).toBe(403);
+    const admin = await makeUser({ isAdmin: true });
+    expect((await retry('not-a-uuid', admin.id)).status).toBe(404);
+    expect((await retry('00000000-0000-4000-8000-000000000000', admin.id)).status).toBe(404);
   });
 });

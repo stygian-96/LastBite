@@ -477,10 +477,101 @@ async function sweepStaleTransfers(now: Date): Promise<void> {
   }
 }
 
+type Stranded = {
+  paymentId: string;
+  orderId: string;
+  razorpayTransferId: string;
+  transferPaise: number;
+  reversedPaise: number;
+};
+
+/**
+ * Claims transfers on hold on cancelled orders with no refund on its way to reverse them. These earn
+ * nothing and no payout will take them, so nothing else would ever move the money: a cancel with
+ * nothing left to refund, a transfer flagged orphaned, or a reversing refund that failed for good.
+ */
+function claimStrandedTransfers(now: Date): Promise<Stranded[]> {
+  return withTx(async (tx) => {
+    const rows = await tx
+      .select({
+        paymentId: payments.id,
+        orderId: orders.id,
+        razorpayTransferId: payments.razorpayTransferId,
+        transferPaise: payments.transferPaise,
+        reversedPaise: payments.reversedPaise,
+      })
+      .from(payments)
+      .innerJoin(orders, eq(orders.id, payments.orderId))
+      .where(
+        and(
+          eq(payments.transferStatus, 'on_hold'),
+          eq(orders.status, 'cancelled'),
+          notExists(
+            db
+              .select({ id: refunds.id })
+              .from(refunds)
+              .where(and(eq(refunds.paymentId, payments.id), eq(refunds.reverseTransfer, true), eq(refunds.status, 'pending'))),
+          ),
+          or(isNull(payments.transferClaimedAt), lt(payments.transferClaimedAt, staleBefore(now))),
+        ),
+      )
+      .orderBy(asc(payments.createdAt))
+      .limit(BATCH_SIZE)
+      .for('update', { of: payments, skipLocked: true });
+    if (rows.length > 0) {
+      await tx
+        .update(payments)
+        .set({ transferClaimedAt: now.toISOString() })
+        .where(
+          inArray(
+            payments.id,
+            rows.map((r) => r.paymentId),
+          ),
+        );
+    }
+    return rows as Stranded[];
+  });
+}
+
+/** Reverses all that is left of a stranded transfer. A claim run out goes again on the same key. */
+async function reverseStranded(row: Stranded): Promise<void> {
+  const amountPaise = row.transferPaise - row.reversedPaise;
+  if (amountPaise > 0) {
+    await getGateway().reverseTransferPartial(row.razorpayTransferId, amountPaise, `stranded-${row.paymentId}-${row.reversedPaise}`);
+  }
+  await withTx(async (tx) => {
+    await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, row.orderId)).for('update');
+    const [saved] = await tx
+      .update(payments)
+      .set({ reversedPaise: row.transferPaise, transferStatus: 'reversed', transferClaimedAt: null })
+      .where(and(eq(payments.id, row.paymentId), eq(payments.transferStatus, 'on_hold')))
+      .returning({ id: payments.id });
+    if (!saved) return;
+    await audit(tx, {
+      actorId: null,
+      action: 'transfer.reversed',
+      entity: 'payment',
+      entityId: row.paymentId,
+      detail: { orderId: row.orderId, razorpayTransferId: row.razorpayTransferId, amountPaise },
+    });
+  });
+}
+
+async function sweepStrandedTransfers(now: Date): Promise<void> {
+  for (const row of await claimStrandedTransfers(now)) {
+    try {
+      await reverseStranded(row);
+    } catch (e) {
+      // The claim runs out and the row goes again, and one bad row must not hold up the others.
+      console.error(`Could not reverse the stranded transfer of payment ${row.paymentId}`, e);
+    }
+  }
+}
+
 /**
  * Creates held transfers for sold bags, at most 100 a run, with the gateway calls outside any
- * transaction, then settles claims left behind on bags since cancelled or refunded. Returns how many
- * it saved. Safe to run twice.
+ * transaction, then settles claims left behind on bags since cancelled or refunded, and reverses
+ * transfers stranded on cancelled orders. Returns how many it saved. Safe to run twice.
  */
 export async function createTransfers(now: Date): Promise<number> {
   let created = 0;
@@ -493,5 +584,6 @@ export async function createTransfers(now: Date): Promise<number> {
     }
   }
   await sweepStaleTransfers(now);
+  await sweepStrandedTransfers(now);
   return created;
 }

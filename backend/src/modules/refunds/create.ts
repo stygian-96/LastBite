@@ -6,6 +6,8 @@ import { queueRefundIssued } from '../notifications/events.js';
 
 /** The attempt that fails on reaching this ends the refund, for an admin to pick up. */
 export const MAX_REFUND_ATTEMPTS = 3;
+/** The least time between attempts after a definite failure, so one bad spell cannot use them all up. */
+const RETRY_SPACING_MS = 15 * 60_000;
 
 export type NewRefund = {
   orderId: string;
@@ -48,7 +50,7 @@ export async function reopenFailedRefund(
   const { paymentId, reason, ...terms } = r;
   const [reopened] = await tx
     .update(refunds)
-    .set({ ...terms, status: 'pending', razorpayRefundId: null, sendErrors: 0, sendingAt: null, lastCheckedAt: null })
+    .set({ ...terms, status: 'pending', razorpayRefundId: null, sendErrors: 0, sendingAt: null, lastCheckedAt: null, retryAt: null })
     .where(and(eq(refunds.paymentId, paymentId), eq(refunds.reason, reason), eq(refunds.status, 'failed')))
     .returning({ id: refunds.id });
   return reopened?.id;
@@ -56,14 +58,15 @@ export async function reopenFailedRefund(
 
 /**
  * Counts one definite failure on a pending refund the caller has locked. It goes back to pending
- * with no gateway ID, so the refund job sends it again as a new attempt, until the last attempt ends
- * it for an admin. A gateway ID is remembered, so a later report of it is known. A null ID is a send
- * the gateway refused outright.
+ * with no gateway ID, so the refund job sends it again as a new attempt 15 minutes on, until the last
+ * attempt ends it for an admin. A gateway ID is remembered, so a later report of it is known. A null
+ * ID is a send the gateway refused outright.
  */
 export async function countRefundFailure(
   tx: Tx,
   refund: { id: string; attempts: number },
   razorpayRefundId: string | null,
+  at: Date,
 ): Promise<void> {
   const attempts = refund.attempts + 1;
   const remembered = razorpayRefundId
@@ -72,7 +75,13 @@ export async function countRefundFailure(
   if (attempts < MAX_REFUND_ATTEMPTS) {
     await tx
       .update(refunds)
-      .set({ attempts, razorpayRefundId: null, sendingAt: null, ...remembered })
+      .set({
+        attempts,
+        razorpayRefundId: null,
+        sendingAt: null,
+        retryAt: new Date(at.getTime() + RETRY_SPACING_MS).toISOString(),
+        ...remembered,
+      })
       .where(eq(refunds.id, refund.id));
     return;
   }
@@ -100,6 +109,7 @@ export async function settleRefund(
   refund: { id: string; attempts: number; status: string; paymentId: string; reverseTransfer: boolean },
   razorpayRefundId: string,
   result: 'processed' | 'failed',
+  at: Date,
 ): Promise<void> {
   if (result === 'processed') {
     await tx.update(refunds).set({ status: 'processed' }).where(eq(refunds.id, refund.id));
@@ -113,5 +123,5 @@ export async function settleRefund(
       .set({ transferStatus: 'on_hold' })
       .where(and(eq(payments.id, refund.paymentId), eq(payments.transferStatus, 'reversed')));
   }
-  await countRefundFailure(tx, refund, razorpayRefundId);
+  await countRefundFailure(tx, refund, razorpayRefundId, at);
 }

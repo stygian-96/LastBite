@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import { db, withTx } from '../../db/client.js';
 import { payments, refunds } from '../../db/schema.js';
 import { getGateway, GatewayRefusedError, type GatewayRefund } from '../../integrations/payments.js';
@@ -27,7 +27,8 @@ type Claimed = {
 
 /**
  * Claims a batch of unsent refunds in a transaction of its own, so the gateway calls run outside
- * one. Locked rows are skipped and claimed rows left alone, so two runs never share a row.
+ * one. Locked rows are skipped and claimed rows left alone, so two runs never share a row. A refund
+ * the gateway refused waits out its retry time.
  */
 function claimRefunds(now: Date): Promise<Claimed[]> {
   const claimedAt = now.toISOString();
@@ -49,6 +50,7 @@ function claimRefunds(now: Date): Promise<Claimed[]> {
           eq(refunds.status, 'pending'),
           isNull(refunds.razorpayRefundId),
           or(isNull(refunds.sendingAt), lt(refunds.sendingAt, staleBefore)),
+          or(isNull(refunds.retryAt), lte(refunds.retryAt, claimedAt)),
         ),
       )
       .orderBy(asc(refunds.createdAt))
@@ -112,14 +114,14 @@ function recordSent(row: Claimed, sent: GatewayRefund, at: Date): Promise<void> 
 }
 
 /** The gateway said no, so this attempt is over and the next carries a new key. */
-function recordFailure(row: Claimed, razorpayRefundId: string | null): Promise<void> {
+function recordFailure(row: Claimed, razorpayRefundId: string | null, at: Date): Promise<void> {
   return withTx(async (tx) => {
     const [refund] = await tx
       .select({ id: refunds.id, attempts: refunds.attempts })
       .from(refunds)
       .where(stillSending(row))
       .for('update');
-    if (refund) await countRefundFailure(tx, refund, razorpayRefundId);
+    if (refund) await countRefundFailure(tx, refund, razorpayRefundId, at);
   });
 }
 
@@ -162,12 +164,12 @@ async function sendRefund(row: Claimed, clock: () => Date): Promise<boolean> {
     });
   } catch (e) {
     console.error(`Refund ${row.id} failed`, e);
-    if (e instanceof GatewayRefusedError) await recordFailure(row, null);
+    if (e instanceof GatewayRefusedError) await recordFailure(row, null, clock());
     else await recordSendError(row);
     return false;
   }
   if (sent.status === 'failed') {
-    await recordFailure(row, sent.id);
+    await recordFailure(row, sent.id, clock());
     return false;
   }
   await recordSent(row, sent, clock());
@@ -209,7 +211,7 @@ function claimChecks(now: Date, limit: number): Promise<Check[]> {
 }
 
 /** Asks the gateway about one sent refund, and applies a final answer as a webhook would. */
-async function checkRefund(check: Check): Promise<void> {
+async function checkRefund(check: Check, now: Date): Promise<void> {
   const razorpayRefundId = check.razorpayRefundId!;
   const { status } = await getGateway().fetchRefund(razorpayRefundId);
   if (status !== 'processed' && status !== 'failed') return;
@@ -231,7 +233,7 @@ async function checkRefund(check: Check): Promise<void> {
         ),
       )
       .for('update');
-    if (refund) await settleRefund(tx, refund, razorpayRefundId, status);
+    if (refund) await settleRefund(tx, refund, razorpayRefundId, status, now);
   });
 }
 
@@ -260,7 +262,7 @@ export async function processRefunds(now: Date): Promise<number> {
   if (room === 0) return sent;
   for (const check of await claimChecks(now, room)) {
     try {
-      await checkRefund(check);
+      await checkRefund(check, now);
     } catch (e) {
       // Its stamp sends it to the back, and one bad row must not hold up the others.
       console.error(`Could not check refund ${check.id}`, e);

@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
-import { brands, issues, orders, outlets, sessions, users } from '../../db/schema.js';
+import { brands, issues, orders, outlets, payments, refunds, sessions, users } from '../../db/schema.js';
 import { getStore } from '../../integrations/storage.js';
 import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
@@ -9,7 +9,7 @@ import { ApiError, parseInput } from '../../lib/errors.js';
 import { normalizePhone } from '../auth/otp.js';
 import { movePendingTo } from '../notifications/enqueue.js';
 import { bagPayment, unrefundedPaise } from '../refunds/cancel.js';
-import { createRefund, reopenFailedRefund } from '../refunds/create.js';
+import { createRefund, reopenFailedRefund, type NewRefund } from '../refunds/create.js';
 
 const ORDER_LIMIT = 100;
 const STATS_WINDOW_MS = 30 * 86_400_000;
@@ -200,6 +200,48 @@ export async function adminRefund(adminId: string, orderId: string, raw: RefundI
       entity: 'refund',
       entityId: refundId,
       detail: { orderId, paymentId: payment.id, amountPaise, chargedTo, issueId: issueId ?? null },
+    });
+  });
+}
+
+/**
+ * Sends a failed refund again on the terms it had, whatever its reason, so late and duplicate payments
+ * can be recovered too. It keeps its attempts, so the send carries a new key. A transfer no longer on
+ * hold cannot be reversed, so that part of the terms stops. Holding the order keeps out a cancel or
+ * an admin refund that could use up what this needs.
+ */
+export async function retryRefund(adminId: string, refundId: string): Promise<void> {
+  if (!isId(refundId)) throw notFound('Refund');
+  const [known] = await db.select({ orderId: refunds.orderId }).from(refunds).where(eq(refunds.id, refundId));
+  if (!known) throw notFound('Refund');
+
+  await withTx(async (tx) => {
+    await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, known.orderId)).for('update');
+    const [refund] = await tx.select().from(refunds).where(eq(refunds.id, refundId)).for('update');
+    if (refund!.status !== 'failed') throw new ApiError('invalid_state', 409, 'Only a failed refund can be retried');
+    const { paymentId, amountPaise, attempts } = refund!;
+    const [payment] = await tx
+      .select({ id: payments.id, amountPaise: payments.amountPaise, transferStatus: payments.transferStatus })
+      .from(payments)
+      .where(eq(payments.id, paymentId));
+    if (amountPaise > (await unrefundedPaise(tx, payment!))) {
+      throw new ApiError('refund_too_large', 409, 'That is more than is left of the payment');
+    }
+
+    const reverseTransfer = refund!.reverseTransfer && payment!.transferStatus === 'on_hold';
+    await reopenFailedRefund(tx, {
+      paymentId,
+      reason: refund!.reason as NewRefund['reason'],
+      amountPaise,
+      chargedTo: refund!.chargedTo as NewRefund['chargedTo'],
+      reverseTransfer,
+    });
+    await audit(tx, {
+      actorId: adminId,
+      action: 'refund.retry',
+      entity: 'refund',
+      entityId: refundId,
+      detail: { orderId: known.orderId, paymentId, amountPaise, attempts, reverseTransfer },
     });
   });
 }

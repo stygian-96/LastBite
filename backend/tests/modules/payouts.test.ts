@@ -323,7 +323,7 @@ describe('createTransfers', () => {
       expect(gateway.refunds[0]).toMatchObject({ reverseTransfer: true });
     });
 
-    test('a refund already sent leaves the transfer for an admin', async () => {
+    test('a refund already sent flags the transfer, and the sweep reverses it', async () => {
       const order = await raced(() => processRefunds(now));
 
       await createTransfers(now);
@@ -333,7 +333,7 @@ describe('createTransfers', () => {
       expect(flags[0]!.detail).toMatchObject({ orderId: order.id, razorpayTransferId: gateway.transfers[0]!.id });
       const [refund] = await refundsFor(order.id);
       expect(refund!.reverseTransfer).toBe(false);
-      expect((await paymentFor(order.id)).transferStatus).toBe('on_hold');
+      expect((await paymentFor(order.id)).transferStatus).toBe('reversed');
     });
 
     test('a refund being sent is left as it is, as its payload has gone', async () => {
@@ -2358,5 +2358,130 @@ describe('a whole week', () => {
     await approvePayout(adminUser.id, payout.id, now);
     await markPayoutPaid(adminUser.id, payout.id, now);
     expect((await payoutRow(payout.id)).status).toBe('paid');
+  });
+});
+
+describe('transfers stranded on cancelled orders', () => {
+  /** An order refunded in full by the platform, with its transfer still on hold at the gateway. */
+  async function fullyRefunded() {
+    const { outlet } = await linkedOutlet();
+    const { order } = await sale(outlet.id, { status: 'paid' });
+    await createTransfers(now);
+    await adminRefund((await admin()).id, order.id, { amountPaise: 14900, chargedTo: 'platform' }, now);
+    return { order, owner: await ownerOf(outlet.brandId) };
+  }
+
+  test('a vendor cancel after a full platform refund has its transfer reversed, and audited', async () => {
+    const { order, owner } = await fullyRefunded();
+    await cancelOrder(owner.id, order.id, 'ran_out', now);
+    const before = await paymentFor(order.id);
+    expect(before).toMatchObject({ transferStatus: 'on_hold', transferPaise: 11620 });
+
+    await createTransfers(now);
+
+    expect(gateway.transferReversals).toMatchObject([{ transferId: before.razorpayTransferId, amountPaise: 11620 }]);
+    expect(await paymentFor(order.id)).toMatchObject({
+      transferStatus: 'reversed',
+      reversedPaise: 11620,
+      transferClaimedAt: null,
+    });
+    expect(await auditsFor('transfer.reversed')).toMatchObject([
+      {
+        actorId: null,
+        entity: 'payment',
+        entityId: before.id,
+        detail: { orderId: order.id, razorpayTransferId: before.razorpayTransferId, amountPaise: 11620 },
+      },
+    ]);
+  });
+
+  test('runs once', async () => {
+    const { order, owner } = await fullyRefunded();
+    await cancelOrder(owner.id, order.id, 'ran_out', now);
+    await createTransfers(now);
+    await createTransfers(now);
+    expect(gateway.transferReversals).toHaveLength(1);
+    expect(await auditsFor('transfer.reversed')).toHaveLength(1);
+  });
+
+  test('takes only what is left of a part reversed transfer', async () => {
+    const { order, owner } = await fullyRefunded();
+    await cancelOrder(owner.id, order.id, 'ran_out', now);
+    await db.update(payments).set({ reversedPaise: 620 }).where(eq(payments.orderId, order.id));
+    await createTransfers(now);
+    expect(gateway.transferReversals).toMatchObject([{ amountPaise: 11000 }]);
+    expect((await paymentFor(order.id)).reversedPaise).toBe(11620);
+  });
+
+  test('a transfer flagged orphaned has no dead end', async () => {
+    const { outlet } = await linkedOutlet();
+    const { order } = await sale(outlet.id, { status: 'paid' });
+    await cancelOrder((await ownerOf(outlet.brandId)).id, order.id, 'ran_out', now);
+    await processRefunds(now);
+    // The transfer goes out as the bag stops being the vendor's, after the refund was sent without it.
+    const payment = await paymentFor(order.id);
+    const { id } = await gateway.createTransfer({
+      paymentId: payment.razorpayPaymentId!,
+      accountId: 'acc_1',
+      amountPaise: 11620,
+      idempotencyKey: `transfer-${payment.id}`,
+    });
+    await db
+      .update(payments)
+      .set({ razorpayTransferId: id, transferPaise: 11620, feePaise: 300, transferStatus: 'on_hold' })
+      .where(eq(payments.id, payment.id));
+
+    await createTransfers(now);
+
+    expect(await paymentFor(order.id)).toMatchObject({ transferStatus: 'reversed', reversedPaise: 11620 });
+  });
+
+  test('leaves a transfer a pending refund is reversing', async () => {
+    const { outlet } = await linkedOutlet();
+    const { order } = await sale(outlet.id, { status: 'paid' });
+    await createTransfers(now);
+    await cancelOrder((await ownerOf(outlet.brandId)).id, order.id, 'ran_out', now);
+    const [refund] = await refundsFor(order.id);
+    expect(refund).toMatchObject({ status: 'pending', reverseTransfer: true });
+
+    await createTransfers(now);
+
+    expect(gateway.transferReversals).toHaveLength(0);
+    expect((await paymentFor(order.id)).transferStatus).toBe('on_hold');
+  });
+
+  test('a transfer whose reversing refund failed for good is swept', async () => {
+    const { outlet } = await linkedOutlet();
+    const { order } = await sale(outlet.id, { status: 'paid' });
+    await createTransfers(now);
+    await cancelOrder((await ownerOf(outlet.brandId)).id, order.id, 'ran_out', now);
+    await db.update(refunds).set({ status: 'failed', attempts: 3 }).where(eq(refunds.orderId, order.id));
+
+    await createTransfers(now);
+
+    expect((await paymentFor(order.id)).transferStatus).toBe('reversed');
+  });
+
+  test('leaves a transfer on an order that still stands', async () => {
+    const { order } = await fullyRefunded();
+    await createTransfers(now);
+    expect(gateway.transferReversals).toHaveLength(0);
+    expect((await paymentFor(order.id)).transferStatus).toBe('on_hold');
+  });
+
+  test('a gateway failure holds the claim, and the row goes again once it runs out', async () => {
+    const { order, owner } = await fullyRefunded();
+    await cancelOrder(owner.id, order.id, 'ran_out', now);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const reverse = vi.spyOn(gateway, 'reverseTransferPartial').mockRejectedValueOnce(new Error('timeout'));
+
+    await createTransfers(now);
+    await createTransfers(new Date(now.getTime() + MINUTES));
+    expect(reverse).toHaveBeenCalledTimes(1);
+    expect((await paymentFor(order.id)).transferStatus).toBe('on_hold');
+
+    await createTransfers(new Date(now.getTime() + 6 * MINUTES));
+    expect(reverse).toHaveBeenCalledTimes(2);
+    expect((await paymentFor(order.id)).transferStatus).toBe('reversed');
   });
 });
