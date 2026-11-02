@@ -345,6 +345,7 @@ export async function decideOutlet(
 const adminUpdateInput = z.object({
   brandId: z.uuid().optional(),
   commissionBps: z.number().int().min(0).max(10000).optional(),
+  payoutAccountId: z.uuid().optional(),
 });
 export type AdminUpdate = z.input<typeof adminUpdateInput>;
 
@@ -363,9 +364,11 @@ async function freeSlug(tx: Tx, brandId: string, base: string): Promise<string> 
 }
 
 /**
- * Sets commission and/or moves the outlet to another brand. A move takes the outlet's own staff
- * along. The payout account must belong to the new brand: if it belongs to the old one and no
- * other outlet uses it, it moves too; if another outlet uses it, the move is refused.
+ * Sets commission, moves the outlet to another brand, and/or moves it to another payout account. A
+ * brand move takes the outlet's own staff along. The payout account must belong to the new brand: if
+ * it belongs to the old one and no other outlet uses it, it moves too; if another outlet uses it, the
+ * move is refused. A franchise switch names a verified account of the brand instead, which then
+ * stays behind with its brand. Orders keep the account they were sold under.
  */
 export async function updateOutletAdmin(adminId: string, outletId: string, raw: AdminUpdate): Promise<void> {
   const input = parseInput(adminUpdateInput, raw);
@@ -388,7 +391,7 @@ export async function updateOutletAdmin(adminId: string, outletId: string, raw: 
         if (!brand) throw notFound('Brand');
 
         let movedAccount: string | null = null;
-        if (o.payoutAccountId) {
+        if (o.payoutAccountId && !input.payoutAccountId) {
           const [account] = await tx
             .select()
             .from(payoutAccounts)
@@ -433,6 +436,23 @@ export async function updateOutletAdmin(adminId: string, outletId: string, raw: 
         set.slug = await freeSlug(tx, input.brandId, o.slug);
         detail.brandId = { from: o.brandId, to: input.brandId };
         if (movedAccount) detail.payoutAccountMoved = movedAccount;
+      }
+
+      if (input.payoutAccountId !== undefined && input.payoutAccountId !== o.payoutAccountId) {
+        const [account] = await tx
+          .select({ brandId: payoutAccounts.brandId, status: payoutAccounts.status })
+          .from(payoutAccounts)
+          .where(eq(payoutAccounts.id, input.payoutAccountId))
+          .for('share');
+        if (!account) throw notFound('Payout account');
+        if (account.brandId !== (input.brandId ?? o.brandId)) {
+          throw new ApiError('invalid_request', 400, 'That payout account belongs to another brand');
+        }
+        if (account.status !== 'verified') {
+          throw new ApiError('payout_account_unverified', 409, 'That payout account is not verified');
+        }
+        set.payoutAccountId = input.payoutAccountId;
+        detail.payoutAccountId = { from: o.payoutAccountId, to: input.payoutAccountId };
       }
 
       if (Object.keys(set).length === 0) return;

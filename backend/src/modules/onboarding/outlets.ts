@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNull, like, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
-import { agreements, brands, documents, listings, memberships, outlets, payoutAccounts } from '../../db/schema.js';
+import { agreements, areas, brands, documents, listings, memberships, outlets, payoutAccounts } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
@@ -168,6 +168,25 @@ async function createOutlet(tx: Tx, userId: string, input: z.output<typeof start
 
 const badKey = () => new ApiError('invalid_request', 400, 'Upload the file first, then record it');
 
+function normalizedContactPhone(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const phone = normalizePhone(raw);
+  if (!phone) throw new ApiError('invalid_request', 400, 'Invalid value for contactPhone');
+  return phone;
+}
+
+async function assertKnownArea(areaId: string | undefined): Promise<void> {
+  if (areaId === undefined) return;
+  const [area] = await db.select({ id: areas.id }).from(areas).where(eq(areas.id, areaId));
+  if (!area) throw new ApiError('invalid_request', 400, 'Invalid value for areaId');
+}
+
+/** Keys already on the outlet stay valid. New ones must be this user's own uploads. */
+function assertOwnPhotos(photoKeys: string[] | undefined, current: Outlet, userId: string): void {
+  const fresh = photoKeys?.filter((k) => !current.photoKeys.includes(k)) ?? [];
+  if (fresh.some((k) => !k.startsWith(`photos/${userId}/`))) throw badKey();
+}
+
 /**
  * Saves some fields of a draft outlet. `step` is the step the user just finished; the outlet's
  * onboarding_step moves to the next one and never backwards.
@@ -190,12 +209,8 @@ export async function saveOutletStep(userId: string, outletId: string, raw: Outl
     }
     await requirePayoutAccount(userId, patch.payoutAccountId);
   }
-  let contactPhone: string | undefined;
-  if (patch.contactPhone !== undefined) {
-    const phone = normalizePhone(patch.contactPhone);
-    if (!phone) throw new ApiError('invalid_request', 400, 'Invalid value for contactPhone');
-    contactPhone = phone;
-  }
+  const contactPhone = normalizedContactPhone(patch.contactPhone);
+  await assertKnownArea(patch.areaId);
 
   return withTx(async (tx) => {
     const [current] = await tx.select().from(outlets).where(eq(outlets.id, outletId)).for('update');
@@ -203,11 +218,7 @@ export async function saveOutletStep(userId: string, outletId: string, raw: Outl
     if (!EDITABLE.includes(current.status)) {
       throw new ApiError('not_editable', 409, 'This outlet can no longer be edited');
     }
-    if (patch.photoKeys) {
-      // Keys already on the outlet stay valid; new ones must be this user's own uploads.
-      const fresh = patch.photoKeys.filter((k) => !current.photoKeys.includes(k));
-      if (fresh.some((k) => !k.startsWith(`photos/${userId}/`))) throw badKey();
-    }
+    assertOwnPhotos(patch.photoKeys, current, userId);
 
     const { step, logoKey, ...fields } = patch;
     const set: Partial<typeof outlets.$inferInsert> = { ...fields, ...(contactPhone ? { contactPhone } : {}) };
@@ -222,6 +233,80 @@ export async function saveOutletStep(userId: string, outletId: string, raw: Outl
       detail: { fields: Object.keys(patch) },
     });
     const [row] = await tx.select().from(outlets).where(eq(outlets.id, outletId));
+    return row!;
+  });
+}
+
+// ---------- Changing a live outlet ----------
+
+const notLive = () => new ApiError('outlet_not_live', 409, 'This outlet is not live');
+
+const settingsSchema = patchSchema.pick({
+  openingHours: true,
+  address: true,
+  pincode: true,
+  areaId: true,
+  mapsUrl: true,
+  pickupInstructions: true,
+  contactPhone: true,
+  photoKeys: true,
+});
+export type OutletSettings = z.input<typeof settingsSchema>;
+
+/** Day-to-day details of a live outlet, checked as onboarding checks them. Legal details stay with an admin. */
+export async function updateOutletSettings(userId: string, outletId: string, raw: OutletSettings): Promise<Outlet> {
+  await requireOutlet(userId, outletId, ['owner', 'manager']);
+  const patch = parseInput(settingsSchema, raw);
+  const contactPhone = normalizedContactPhone(patch.contactPhone);
+  await assertKnownArea(patch.areaId);
+
+  return withTx(async (tx) => {
+    const [current] = await tx.select().from(outlets).where(eq(outlets.id, outletId)).for('update');
+    if (current?.status !== 'live') throw notLive();
+    assertOwnPhotos(patch.photoKeys, current, userId);
+
+    const set = { ...patch, ...(contactPhone ? { contactPhone } : {}) };
+    const [row] = Object.keys(set).length > 0 ? await tx.update(outlets).set(set).where(eq(outlets.id, outletId)).returning() : [current];
+    await audit(tx, {
+      actorId: userId,
+      action: 'outlet.settings',
+      entity: 'outlet',
+      entityId: outletId,
+      detail: { fields: Object.keys(patch) },
+    });
+    return row!;
+  });
+}
+
+const pauseInput = z.object({
+  until: z.iso.datetime({ offset: true }),
+  reason: z.string().trim().min(1).max(300),
+});
+
+/**
+ * A holiday closure: the outlet leaves the feed and takes no reservations until the time given, and
+ * then comes back by itself. Paid orders stand, and no customer is told.
+ */
+export async function pauseOutlet(userId: string, outletId: string, raw: { until: string; reason: string }, now: Date): Promise<Outlet> {
+  await requireOutlet(userId, outletId, ['owner', 'manager']);
+  const { until, reason } = parseInput(pauseInput, raw);
+  if (new Date(until) <= now) throw new ApiError('invalid_request', 400, 'A closure has to end in the future');
+
+  return withTx(async (tx) => {
+    const [current] = await tx.select().from(outlets).where(eq(outlets.id, outletId)).for('update');
+    if (current?.status !== 'live') throw notLive();
+    const [row] = await tx.update(outlets).set({ pausedUntil: until, pauseReason: reason }).where(eq(outlets.id, outletId)).returning();
+    await audit(tx, { actorId: userId, action: 'outlet.pause', entity: 'outlet', entityId: outletId, detail: { until, reason } });
+    return row!;
+  });
+}
+
+/** Ends a holiday closure early. */
+export async function resumeOutlet(userId: string, outletId: string): Promise<Outlet> {
+  await requireOutlet(userId, outletId, ['owner', 'manager']);
+  return withTx(async (tx) => {
+    const [row] = await tx.update(outlets).set({ pausedUntil: null, pauseReason: null }).where(eq(outlets.id, outletId)).returning();
+    await audit(tx, { actorId: userId, action: 'outlet.resume', entity: 'outlet', entityId: outletId });
     return row!;
   });
 }

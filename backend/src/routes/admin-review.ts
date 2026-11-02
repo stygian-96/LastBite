@@ -43,7 +43,14 @@ export const adminReview = new Hono()
   .patch(
     '/outlets/:id',
     route(
-      { auth: 'admin', body: z.object({ brandId: z.string().optional(), commissionBps: z.number().optional() }) },
+      {
+        auth: 'admin',
+        body: z.object({
+          brandId: z.string().optional(),
+          commissionBps: z.number().optional(),
+          payoutAccountId: z.string().optional(),
+        }),
+      },
       async ({ user, params, body }) => {
         await updateOutletAdmin(user!.id, params.id!, body);
         return { ok: true };

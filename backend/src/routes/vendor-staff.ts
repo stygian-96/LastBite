@@ -17,11 +17,12 @@ export const vendorStaff = new Hono()
           phone: z.string().min(1).max(20),
           name: z.string().trim().min(1).max(100),
           role: z.enum(['manager', 'counter']),
+          payoutAccountId: z.uuid().optional(),
         }),
       },
       async ({ user, params, body }) => {
         const m = await addStaff(user!.id, params.id!, body);
-        return { membership: { id: m.id, userId: m.userId, outletId: m.outletId, role: m.role } };
+        return { membership: { id: m.id, userId: m.userId, outletId: m.outletId, role: m.role, payoutAccountId: m.payoutAccountId } };
       },
     ),
   )

@@ -5,7 +5,15 @@ import { ApiError } from '../lib/errors.js';
 import { route } from '../lib/http.js';
 import { uploadFile, uploadKey } from '../lib/uploads.js';
 import { addDocument } from '../modules/onboarding/documents.js';
-import { getOutletStatus, saveOutletStep, startOutlet, submitOutlet } from '../modules/onboarding/outlets.js';
+import {
+  getOutletStatus,
+  pauseOutlet,
+  resumeOutlet,
+  saveOutletStep,
+  startOutlet,
+  submitOutlet,
+  updateOutletSettings,
+} from '../modules/onboarding/outlets.js';
 import { createPayoutAccount, listPayoutAccounts, signAgreement, updatePayoutAccount, type PayoutAccount } from '../modules/onboarding/payout-accounts.js';
 
 const FOLDERS = { photo: 'photos', logo: 'logos', document: 'documents' } as const;
@@ -56,6 +64,22 @@ export const vendorOnboarding = new Hono()
       outlet: await saveOutletStep(user!.id, params.id!, body),
     })),
   )
+  .patch(
+    '/outlets/:id/settings',
+    route({ auth: 'user', body: z.record(z.string(), z.unknown()) }, async ({ user, params, body }) => ({
+      outlet: await updateOutletSettings(user!.id, params.id!, body),
+    })),
+  )
+  .post(
+    '/outlets/:id/pause',
+    route({ auth: 'user', body: z.object({ until: z.string(), reason: z.string() }) }, async ({ user, params, body, now }) => ({
+      outlet: await pauseOutlet(user!.id, params.id!, body, now),
+    })),
+  )
+  .post(
+    '/outlets/:id/resume',
+    route({ auth: 'user' }, async ({ user, params }) => ({ outlet: await resumeOutlet(user!.id, params.id!) })),
+  )
   .post(
     '/uploads',
     route({ auth: 'user', body: uploadBody }, async ({ user, body }) => {
@@ -87,7 +111,8 @@ export const vendorOnboarding = new Hono()
     '/payout-accounts',
     route({ auth: 'user', body: payoutAccountDetails.extend({ brandId: z.uuid() }) }, async ({ user, body }) => {
       const { brandId, ...input } = body;
-      return { payoutAccount: publicPayoutAccount(await createPayoutAccount(user!.id, brandId, input)) };
+      const account = await createPayoutAccount(user!.id, brandId, input);
+      return { payoutAccount: { ...publicPayoutAccount(account), nameWarning: account.nameWarning } };
     }),
   )
   .patch(

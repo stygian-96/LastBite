@@ -2,7 +2,7 @@ import { isIP } from 'node:net';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx } from '../../db/client.js';
-import { agreements, payoutAccounts } from '../../db/schema.js';
+import { agreements, payoutAccounts, users } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { encrypt } from '../../lib/crypto.js';
 import { parseInput } from '../../lib/errors.js';
@@ -32,14 +32,24 @@ export async function listPayoutAccounts(userId: string, brandId: string): Promi
     .orderBy(asc(payoutAccounts.createdAt), asc(payoutAccounts.id));
 }
 
-/** Brand-owner only. PAN and account number are stored encrypted, with the last 4 in clear for display. */
+const sameName = (a: string, b: string | null) => {
+  const plain = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
+  return b !== null && plain(a) === plain(b);
+};
+
+/**
+ * Brand-owner only. PAN and account number are stored encrypted, with the last 4 in clear for display.
+ * nameWarning says the bank holder is neither the legal name nor the owner. It stops nothing.
+ */
 export async function createPayoutAccount(
   userId: string,
   brandId: string,
   raw: PayoutAccountInput,
-): Promise<PayoutAccount> {
+): Promise<PayoutAccount & { nameWarning: boolean }> {
   await requireBrandOwner(userId, brandId);
   const input = parseInput(payoutInput, raw);
+  const [owner] = await db.select({ name: users.name }).from(users).where(eq(users.id, userId));
+  const nameWarning = !sameName(input.holderName, input.legalName) && !sameName(input.holderName, owner!.name);
   return withTx(async (tx) => {
     const [row] = await tx
       .insert(payoutAccounts)
@@ -59,9 +69,9 @@ export async function createPayoutAccount(
       action: 'payout_account.create',
       entity: 'payout_account',
       entityId: row!.id,
-      detail: { brandId },
+      detail: { brandId, nameWarning },
     });
-    return row!;
+    return { ...row!, nameWarning };
   });
 }
 

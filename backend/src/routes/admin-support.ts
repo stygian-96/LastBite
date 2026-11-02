@@ -1,7 +1,18 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { route } from '../lib/http.js';
-import { adminRefund, changeUserPhone, findUsers, getOutletStats, listAdminOrders, listAlerts, listIssues, retryRefund } from '../modules/admin/support.js';
+import {
+  adminRefund,
+  changeUserPhone,
+  findUsers,
+  getOutletStats,
+  listAdminOrders,
+  listAlerts,
+  listIssues,
+  resolveIssue,
+  retryRefund,
+} from '../modules/admin/support.js';
+import { adminCancelOrder } from '../modules/refunds/cancel.js';
 
 export const adminSupport = new Hono()
   .get(
@@ -22,6 +33,23 @@ export const adminSupport = new Hono()
   .get(
     '/issues',
     route({ auth: 'admin' }, async ({ c }) => ({ issues: await listIssues(c.req.query('status') ?? 'open') })),
+  )
+  .post(
+    '/issues/:id/resolve',
+    route({ auth: 'admin', body: z.object({ resolution: z.string() }) }, async ({ user, params, body }) => {
+      await resolveIssue(user!.id, params.id!, body.resolution);
+      return { ok: true };
+    }),
+  )
+  .post(
+    '/orders/:id/cancel',
+    route(
+      { auth: 'admin', body: z.object({ reason: z.string(), chargedTo: z.string() }) },
+      async ({ user, params, body, now }) => {
+        await adminCancelOrder(user!.id, params.id!, body, now);
+        return { ok: true };
+      },
+    ),
   )
   .post(
     '/orders/:id/refund',

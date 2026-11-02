@@ -1,15 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { db } from '../../src/db/client.js';
-import { areas, auditLog, memberships, notifications, orders } from '../../src/db/schema.js';
+import { areas, auditLog, issues, memberships, notifications, orders, outlets, payments, payoutAccounts } from '../../src/db/schema.js';
 import { FakeGateway, setGateway } from '../../src/integrations/payments.js';
 import { env } from '../../src/lib/env.js';
 import { decideOutlet } from '../../src/modules/admin/review.js';
+import { adminRefund } from '../../src/modules/admin/support.js';
 import { createSession } from '../../src/modules/auth/session.js';
 import { applyCapture } from '../../src/modules/payments/capture.js';
 import { app } from '../../src/app.js';
-import { makeBrand, makeDrop, makeLiveOutlet, makeOrder, makePayment, makePayoutAccount, makeUser } from '../helpers/factories.js';
-import { resetDb } from '../helpers/db.js';
+import { makeBrand, makeDrop, makeLiveOutlet, makeOrder, makePaidOrder, makePayment, makePayoutAccount, makeUser } from '../helpers/factories.js';
+import { getDropRow, getOrderRow, refundsFor, resetDb } from '../helpers/db.js';
 
 // 15:30 IST, with drops on sale until 20:45.
 const NOW = new Date('2026-11-02T10:00:00Z');
@@ -272,5 +273,373 @@ describe('GET /me/orders', () => {
 
     expect(status).toBe(200);
     expect(json.orders.map((o: { id: string }) => o.id)).toEqual([live.id, past.id]);
+  });
+});
+
+describe('holiday closure', () => {
+  const until = '2026-11-05T00:00:00+05:30';
+  const close = (outletId: string, userId?: string, body: unknown = { until, reason: 'Diwali' }) =>
+    call('POST', `/vendor/outlets/${outletId}/pause`, userId, body);
+
+  test('takes the outlet off sale until the date, audited, telling no customers', async () => {
+    const outlet = await makeLiveOutlet();
+    const drop = await makeDrop({ outletId: outlet.id });
+    const order = await makeOrder({ dropId: drop.id, status: 'paid' });
+    const owner = await owns(outlet.brandId);
+
+    const { status, json } = await close(outlet.id, owner.id);
+
+    expect(status).toBe(200);
+    expect(json.outlet).toMatchObject({ id: outlet.id, pauseReason: 'Diwali' });
+    expect(new Date(json.outlet.pausedUntil as string).toISOString()).toBe(new Date(until).toISOString());
+    const [area] = await db.select().from(areas).where(eq(areas.id, outlet.areaId!));
+    expect((await call('GET', `/drops?city=${area!.city}`)).json.drops).toEqual([]);
+    expect(await auditRows('outlet.pause')).toMatchObject([
+      { actorId: owner.id, entity: 'outlet', entityId: outlet.id, detail: { until, reason: 'Diwali' } },
+    ]);
+    expect(await db.select().from(notifications)).toEqual([]);
+    expect((await getOrderRow(order.id)).status).toBe('paid');
+  });
+
+  test('a manager may, counter staff and strangers may not', async () => {
+    const outlet = await makeLiveOutlet();
+    expect((await close(outlet.id, (await staffAt(outlet, 'manager')).id)).status).toBe(200);
+    expect((await close(outlet.id, (await staffAt(outlet, 'counter')).id)).status).toBe(403);
+    expect((await close(outlet.id, (await makeUser()).id)).status).toBe(403);
+  });
+
+  test('needs a reason and a time ahead', async () => {
+    const outlet = await makeLiveOutlet();
+    const owner = await owns(outlet.brandId);
+    for (const body of [
+      { until },
+      { until, reason: ' ' },
+      { reason: 'Diwali' },
+      { until: '2026-11-01T00:00:00+05:30', reason: 'Diwali' },
+      { until: '2026-02-30T00:00:00+05:30', reason: 'Diwali' },
+      { until: 'tomorrow', reason: 'Diwali' },
+    ]) {
+      expect((await close(outlet.id, owner.id, body)).status).toBe(400);
+    }
+  });
+
+  test('only a live outlet can close for a holiday', async () => {
+    const outlet = await makeLiveOutlet({ status: 'suspended' });
+    const { status, json } = await close(outlet.id, (await owns(outlet.brandId)).id);
+    expect(status).toBe(409);
+    expect(json.error.code).toBe('outlet_not_live');
+  });
+
+  test('resume puts it back on sale at once, audited', async () => {
+    const outlet = await makeLiveOutlet({ pausedUntil: until, pauseReason: 'Diwali' });
+    const owner = await owns(outlet.brandId);
+
+    const { status, json } = await call('POST', `/vendor/outlets/${outlet.id}/resume`, owner.id);
+
+    expect(status).toBe(200);
+    expect(json.outlet).toMatchObject({ pausedUntil: null, pauseReason: null });
+    expect(await auditRows('outlet.resume')).toMatchObject([{ actorId: owner.id, entityId: outlet.id }]);
+  });
+
+  test('resume by counter staff is refused', async () => {
+    const outlet = await makeLiveOutlet({ pausedUntil: until });
+    expect((await call('POST', `/vendor/outlets/${outlet.id}/resume`, (await staffAt(outlet, 'counter')).id)).status).toBe(403);
+  });
+});
+
+describe('PATCH /vendor/outlets/:id/settings', () => {
+  const save = (outletId: string, userId: string, body: unknown) =>
+    call('PATCH', `/vendor/outlets/${outletId}/settings`, userId, body);
+
+  test('edits a live outlet, audited', async () => {
+    const outlet = await makeLiveOutlet();
+    const owner = await owns(outlet.brandId);
+    const [area] = await db.select().from(areas).limit(1);
+    const body = {
+      openingHours: { mon: [['09:00', '21:00']] },
+      address: '1 New Road',
+      pincode: '560002',
+      areaId: area!.id,
+      mapsUrl: 'https://maps.app.goo.gl/xyz',
+      pickupInstructions: 'Ring the bell',
+      contactPhone: '9876543210',
+      photoKeys: [`photos/${owner.id}/a.jpg`],
+    };
+
+    const { status, json } = await save(outlet.id, owner.id, body);
+
+    expect(status).toBe(200);
+    expect(json.outlet).toMatchObject({ ...body, contactPhone: '+919876543210', status: 'live' });
+    expect(await auditRows('outlet.settings')).toMatchObject([
+      { actorId: owner.id, entityId: outlet.id, detail: { fields: Object.keys(body) } },
+    ]);
+  });
+
+  test('applies the onboarding checks', async () => {
+    const outlet = await makeLiveOutlet();
+    const owner = await owns(outlet.brandId);
+    for (const body of [
+      { pincode: '12' },
+      { mapsUrl: 'https://example.com/maps' },
+      { contactPhone: '12' },
+      { openingHours: { mon: [['25:00', '21:00']] } },
+      { photoKeys: ['photos/someone-else/a.jpg'] },
+      { areaId: '00000000-0000-4000-8000-000000000000' },
+      { areaId: 'nope' },
+    ]) {
+      expect((await save(outlet.id, owner.id, body)).status).toBe(400);
+    }
+  });
+
+  test('keeps to its list: the legal details are not editable here', async () => {
+    const outlet = await makeLiveOutlet();
+    const owner = await owns(outlet.brandId);
+    for (const body of [{ fssaiNumber: '12345678901234' }, { branchName: 'New' }, { payoutAccountId: outlet.payoutAccountId }]) {
+      expect((await save(outlet.id, owner.id, body)).status).toBe(400);
+    }
+  });
+
+  test('a manager may, counter staff may not', async () => {
+    const outlet = await makeLiveOutlet();
+    expect((await save(outlet.id, (await staffAt(outlet, 'manager')).id, { address: 'x' })).status).toBe(200);
+    expect((await save(outlet.id, (await staffAt(outlet, 'counter')).id, { address: 'x' })).status).toBe(403);
+  });
+
+  test('is for live outlets', async () => {
+    const outlet = await makeLiveOutlet({ status: 'draft' });
+    const { status, json } = await save(outlet.id, (await owns(outlet.brandId)).id, { address: 'x' });
+    expect(status).toBe(409);
+    expect(json.error.code).toBe('outlet_not_live');
+  });
+
+  test('photos already on the outlet stay valid', async () => {
+    const outlet = await makeLiveOutlet({ photoKeys: ['photos/someone-else/a.jpg'] });
+    const owner = await owns(outlet.brandId);
+    expect((await save(outlet.id, owner.id, { photoKeys: ['photos/someone-else/a.jpg'] })).status).toBe(200);
+  });
+});
+
+describe('franchise switch', () => {
+  const patch = async (outletId: string, payoutAccountId: unknown) =>
+    call('PATCH', `/admin/outlets/${outletId}`, (await admin()).id, { payoutAccountId });
+
+  test('moves the outlet to a verified account of the brand, and orders keep their snapshot', async () => {
+    const outlet = await makeLiveOutlet();
+    const order = await makeOrder({ dropId: (await makeDrop({ outletId: outlet.id })).id, status: 'paid' });
+    const next = await makePayoutAccount({ brandId: outlet.brandId });
+
+    expect((await patch(outlet.id, next.id)).status).toBe(200);
+
+    const [row] = await db.select().from(outlets).where(eq(outlets.id, outlet.id));
+    expect(row!.payoutAccountId).toBe(next.id);
+    expect((await getOrderRow(order.id)).payoutAccountId).toBe(outlet.payoutAccountId);
+    expect(await auditRows('outlet.admin_update')).toMatchObject([
+      { detail: { payoutAccountId: { from: outlet.payoutAccountId, to: next.id } } },
+    ]);
+  });
+
+  test('refuses another brand, an unverified account and an unknown one', async () => {
+    const outlet = await makeLiveOutlet();
+    expect((await patch(outlet.id, (await makePayoutAccount()).id)).status).toBe(400);
+    const pending = await makePayoutAccount({ brandId: outlet.brandId, status: 'pending' });
+    const refused = await patch(outlet.id, pending.id);
+    expect(refused.status).toBe(409);
+    expect(refused.json.error.code).toBe('payout_account_unverified');
+    expect((await patch(outlet.id, '00000000-0000-4000-8000-000000000000')).status).toBe(404);
+    expect((await patch(outlet.id, 'nope')).status).toBe(400);
+    const [row] = await db.select().from(outlets).where(eq(outlets.id, outlet.id));
+    expect(row!.payoutAccountId).toBe(outlet.payoutAccountId);
+  });
+
+  test('moving brand and account together takes an account of the new brand, and leaves the old one behind', async () => {
+    const outlet = await makeLiveOutlet();
+    const next = await makePayoutAccount();
+    const { status } = await call('PATCH', `/admin/outlets/${outlet.id}`, (await admin()).id, { brandId: next.brandId, payoutAccountId: next.id });
+
+    expect(status).toBe(200);
+    const [row] = await db.select().from(outlets).where(eq(outlets.id, outlet.id));
+    expect(row).toMatchObject({ brandId: next.brandId, payoutAccountId: next.id });
+    const [old] = await db.select().from(payoutAccounts).where(eq(payoutAccounts.id, outlet.payoutAccountId!));
+    expect(old!.brandId).toBe(outlet.brandId);
+  });
+});
+
+describe('franchisee earnings', () => {
+  const add = (outletId: string, userId: string, body: Record<string, unknown>) =>
+    call('POST', `/vendor/outlets/${outletId}/staff`, userId, { phone: '9812345678', name: 'Franchisee', role: 'manager', ...body });
+
+  test('a manager added with an account can read its earnings', async () => {
+    const outlet = await makeLiveOutlet();
+    const account = await makePayoutAccount({ brandId: outlet.brandId });
+    const owner = await owns(outlet.brandId);
+
+    const { status, json } = await add(outlet.id, owner.id, { payoutAccountId: account.id });
+
+    expect(status).toBe(200);
+    expect(json.membership).toMatchObject({ role: 'manager', payoutAccountId: account.id });
+    expect((await call('GET', `/vendor/earnings?payout_account=${account.id}`, json.membership.userId as string)).status).toBe(200);
+    expect(await auditRows('staff.add')).toMatchObject([{ detail: { payoutAccountId: account.id } }]);
+  });
+
+  test('only a manager can have one', async () => {
+    const outlet = await makeLiveOutlet();
+    const account = await makePayoutAccount({ brandId: outlet.brandId });
+    const owner = await owns(outlet.brandId);
+    expect((await add(outlet.id, owner.id, { role: 'counter', payoutAccountId: account.id })).status).toBe(400);
+  });
+
+  test('the account must be the brand own', async () => {
+    const outlet = await makeLiveOutlet();
+    const owner = await owns(outlet.brandId);
+    expect((await add(outlet.id, owner.id, { payoutAccountId: (await makePayoutAccount()).id })).status).toBe(400);
+    expect((await add(outlet.id, owner.id, { payoutAccountId: '00000000-0000-4000-8000-000000000000' })).status).toBe(400);
+  });
+
+  test('a manager cannot do this', async () => {
+    const outlet = await makeLiveOutlet();
+    const account = await makePayoutAccount({ brandId: outlet.brandId });
+    const manager = await staffAt(outlet, 'manager');
+    expect((await add(outlet.id, manager.id, { payoutAccountId: account.id })).status).toBe(403);
+  });
+});
+
+describe('POST /admin/orders/:id/cancel', () => {
+  const cancel = async (orderId: string, body: unknown, userId?: string) =>
+    call('POST', `/admin/orders/${orderId}/cancel`, userId ?? (await admin()).id, body);
+
+  async function paid(transfer = 'none') {
+    const drop = await makeDrop({ reservedCount: 1 });
+    const order = await makePaidOrder({ dropId: drop.id, userId: (await makeUser()).id });
+    await db.update(orders).set({ pickupCode: 'K472' }).where(eq(orders.id, order.id));
+    await db
+      .update(payments)
+      .set({ transferStatus: transfer, razorpayTransferId: transfer === 'none' ? null : `trf_${order.id}` })
+      .where(eq(payments.orderId, order.id));
+    return { drop, order };
+  }
+
+  test('cancels, refunds whoever is charged, returns stock, and keeps the code dead', async () => {
+    const { drop, order } = await paid();
+    const adminUser = await admin();
+
+    const { status } = await cancel(order.id, { reason: 'Food safety report', chargedTo: 'platform' }, adminUser.id);
+
+    expect(status).toBe(200);
+    expect(await getOrderRow(order.id)).toMatchObject({ status: 'cancelled', cancelledBy: adminUser.id, cancelReason: 'Food safety report' });
+    expect((await getDropRow(drop.id)).reservedCount).toBe(0);
+    expect(await refundsFor(order.id)).toMatchObject([
+      { reason: 'vendor_cancelled', chargedTo: 'platform', createdBy: adminUser.id, amountPaise: 10000, reverseTransfer: false },
+    ]);
+    expect(await auditRows('order.cancel')).toMatchObject([{ actorId: adminUser.id, detail: { chargedTo: 'platform' } }]);
+
+    const staff = await owns((await db.select().from(outlets).where(eq(outlets.id, drop.outletId)))[0]!.brandId);
+    const collected = await call('POST', `/vendor/outlets/${drop.outletId}/collect`, staff.id, { code: 'K472' });
+    expect(collected.json.error.code).toBe('code_not_found');
+  });
+
+  test('a vendor-charged cancel reverses a held transfer, a platform-charged one does not', async () => {
+    const vendor = await paid('on_hold');
+    await cancel(vendor.order.id, { reason: 'x', chargedTo: 'vendor' });
+    expect((await refundsFor(vendor.order.id))[0]).toMatchObject({ chargedTo: 'vendor', reverseTransfer: true });
+
+    const platform = await paid('on_hold');
+    await cancel(platform.order.id, { reason: 'x', chargedTo: 'platform' });
+    expect((await refundsFor(platform.order.id))[0]).toMatchObject({ chargedTo: 'platform', reverseTransfer: false });
+  });
+
+  test('only a paid order, with a reason and who pays', async () => {
+    const { order } = await paid();
+    expect((await cancel(order.id, { chargedTo: 'vendor' })).status).toBe(400);
+    expect((await cancel(order.id, { reason: ' ', chargedTo: 'vendor' })).status).toBe(400);
+    expect((await cancel(order.id, { reason: 'x', chargedTo: 'nobody' })).status).toBe(400);
+    expect((await cancel('nope', { reason: 'x', chargedTo: 'vendor' })).status).toBe(404);
+
+    await db.update(orders).set({ status: 'collected' }).where(eq(orders.id, order.id));
+    const { status, json } = await cancel(order.id, { reason: 'x', chargedTo: 'vendor' });
+    expect(status).toBe(409);
+    expect(json.error.code).toBe('not_cancellable');
+  });
+
+  test('is for admins', async () => {
+    const { order } = await paid();
+    expect((await cancel(order.id, { reason: 'x', chargedTo: 'vendor' }, (await makeUser()).id)).status).toBe(403);
+  });
+});
+
+describe('POST /admin/issues/:id/resolve', () => {
+  async function issueOn(status = 'collected') {
+    const user = await makeUser();
+    const order = await makeOrder({ userId: user.id, status });
+    const [issue] = await db.insert(issues).values({ orderId: order.id, userId: user.id, reason: 'quality' }).returning();
+    return { issue: issue!, order };
+  }
+  const resolve = async (id: string, body: unknown, userId?: string) =>
+    call('POST', `/admin/issues/${id}/resolve`, userId ?? (await admin()).id, body);
+
+  test('closes an issue with a note and no refund, audited', async () => {
+    const { issue, order } = await issueOn();
+    const adminUser = await admin();
+
+    expect((await resolve(issue.id, { resolution: 'Spoke to the customer' }, adminUser.id)).status).toBe(200);
+
+    const [row] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    expect(row).toMatchObject({ status: 'resolved', resolution: 'Spoke to the customer', resolvedBy: adminUser.id });
+    expect(await refundsFor(order.id)).toEqual([]);
+    expect(await auditRows('issue.resolve')).toMatchObject([{ actorId: adminUser.id, entityId: issue.id }]);
+  });
+
+  test('a new issue on a refunded order can be closed this way', async () => {
+    const drop = await makeDrop();
+    const user = await makeUser();
+    const order = await makePaidOrder({ dropId: drop.id, userId: user.id, status: 'collected' });
+    await adminRefund((await admin()).id, order.id, { amountPaise: 10000, chargedTo: 'platform' }, NOW);
+    const [issue] = await db.insert(issues).values({ orderId: order.id, userId: user.id, reason: 'other' }).returning();
+
+    expect((await resolve(issue!.id, { resolution: 'Already refunded' })).status).toBe(200);
+  });
+
+  test('an issue closes once, and needs a note', async () => {
+    const { issue } = await issueOn();
+    expect((await resolve(issue.id, { resolution: ' ' })).status).toBe(400);
+    expect((await resolve(issue.id, {})).status).toBe(400);
+    await resolve(issue.id, { resolution: 'Done' });
+    const again = await resolve(issue.id, { resolution: 'Again' });
+    expect(again.status).toBe(409);
+    expect(again.json.error.code).toBe('issue_resolved');
+  });
+
+  test('an unknown issue is a 404, and it is for admins', async () => {
+    const { issue } = await issueOn();
+    expect((await resolve('nope', { resolution: 'x' })).status).toBe(404);
+    expect((await resolve('00000000-0000-4000-8000-000000000000', { resolution: 'x' })).status).toBe(404);
+    expect((await resolve(issue.id, { resolution: 'x' }, (await makeUser()).id)).status).toBe(403);
+  });
+});
+
+describe('bank name mismatch', () => {
+  const details = (holderName: string) => ({
+    legalName: 'Butterfold Foods Private Limited',
+    pan: 'ABCDE1234F',
+    holderName,
+    accountNumber: '123456789012',
+    ifsc: 'HDFC0000001',
+  });
+  const create = async (holderName: string, ownerName = 'Asha Rao') => {
+    const brand = await makeBrand();
+    const owner = await makeUser({ name: ownerName });
+    await db.insert(memberships).values({ userId: owner.id, brandId: brand.id, role: 'owner' });
+    return call('POST', '/vendor/payout-accounts', owner.id, { brandId: brand.id, ...details(holderName) });
+  };
+
+  test('warns when the holder matches neither the legal name nor the owner, and still saves', async () => {
+    const { status, json } = await create('Someone Else');
+    expect(status).toBe(200);
+    expect(json.payoutAccount).toMatchObject({ holderName: 'Someone Else', nameWarning: true });
+  });
+
+  test('a match on either, in any case and spacing, does not warn', async () => {
+    for (const name of ['Butterfold Foods Private Limited', 'BUTTERFOLD  foods private   limited', 'Asha Rao', '  asha   RAO ']) {
+      expect((await create(name)).json.payoutAccount.nameWarning).toBe(false);
+    }
   });
 });

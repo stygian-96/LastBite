@@ -183,6 +183,32 @@ export async function getOutletStats(
   return { orders30d, cancelled30d, cancellationRate: orders30d === 0 ? 0 : cancelled30d / orders30d };
 }
 
+const resolutionNote = z.string().trim().min(1).max(1000);
+
+/**
+ * Closes an issue with a note and no money moved, as when it is settled another way or the order was
+ * refunded already. The order is locked first, as adminRefund does when it resolves one.
+ */
+export async function resolveIssue(adminId: string, issueId: string, rawNote: string): Promise<void> {
+  const resolution = parseInput(resolutionNote, rawNote);
+  if (!isId(issueId)) throw notFound('Issue');
+  const [known] = await db.select({ orderId: issues.orderId }).from(issues).where(eq(issues.id, issueId));
+  if (!known) throw notFound('Issue');
+
+  await withTx(async (tx) => {
+    await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, known.orderId)).for('update');
+    await lockOpenIssue(tx, issueId, known.orderId);
+    await tx.update(issues).set({ status: 'resolved', resolution, resolvedBy: adminId }).where(eq(issues.id, issueId));
+    await audit(tx, {
+      actorId: adminId,
+      action: 'issue.resolve',
+      entity: 'issue',
+      entityId: issueId,
+      detail: { orderId: known.orderId, resolution },
+    });
+  });
+}
+
 // ---------- Refunds ----------
 
 const refundInput = z.object({

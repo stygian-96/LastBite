@@ -11,7 +11,12 @@ import { createRefund } from './create.js';
 
 const CANCEL_ROLES: Role[] = ['owner', 'manager', 'counter'];
 const reasonSchema = z.enum(['ran_out', 'quality', 'closing_early']);
-type Cancel = { actorId: string; reason: z.infer<typeof reasonSchema>; now: Date };
+const adminCancelInput = z.object({
+  reason: z.string().trim().min(1).max(500),
+  chargedTo: z.enum(['vendor', 'platform']),
+});
+/** A vendor's cancel always charges the vendor. An admin says who pays, and gives a reason of their own. */
+type Cancel = { actorId: string; reason: string; now: Date; chargedTo?: 'vendor' | 'platform' };
 
 const LIVE_STATUSES = ['held', 'paid'];
 export const NOT_THE_BAG_REASONS = ['late_payment', 'duplicate_payment'];
@@ -55,9 +60,10 @@ export async function unrefundedPaise(tx: Tx, payment: { id: string; amountPaise
  * Ends a paid order the caller has locked, once the caller holds its drop. The order always ends,
  * and the customer gets back what they have not had yet: an admin may have refunded some or all of
  * it. UNIQUE (payment_id, reason) allows this, as an earlier refund has another reason and an order
- * can be cancelled only once, so no vendor_cancelled refund can be there already.
+ * can be cancelled only once, so no vendor_cancelled refund can be there already. Only a refund the
+ * vendor is charged for reverses the transfer.
  */
-async function cancelPaidOrder(tx: Tx, order: Order, { actorId, reason, now }: Cancel): Promise<void> {
+async function cancelPaidOrder(tx: Tx, order: Order, { actorId, reason, now, chargedTo = 'vendor' }: Cancel): Promise<void> {
   const payment = await bagPayment(tx, order.id);
   const remainder = payment ? await unrefundedPaise(tx, payment) : 0;
   await tx
@@ -70,17 +76,27 @@ async function cancelPaidOrder(tx: Tx, order: Order, { actorId, reason, now }: C
       paymentId: payment.id,
       amountPaise: remainder,
       reason: 'vendor_cancelled',
-      chargedTo: 'vendor',
+      chargedTo,
       createdBy: actorId,
-      reverseTransfer: payment.transferStatus === 'on_hold',
+      reverseTransfer: chargedTo === 'vendor' && payment.transferStatus === 'on_hold',
     });
   }
   await queueVendorCancelled(tx, order.id, reason, remainder);
-  const detail = { reason, dropId: order.dropId, paymentId: payment?.id ?? null, refundPaise: Math.max(remainder, 0) };
+  const detail = { reason, chargedTo, dropId: order.dropId, paymentId: payment?.id ?? null, refundPaise: Math.max(remainder, 0) };
   await audit(tx, { actorId, action: 'order.cancel', entity: 'order', entityId: order.id, detail });
   if (remainder <= 0) {
     await audit(tx, { actorId, action: 'order.cancel_no_refund', entity: 'order', entityId: order.id, detail });
   }
+}
+
+/** Locks a paid order, then its drop, and ends the order. */
+function cancelLocked(orderId: string, cancel: Cancel): Promise<void> {
+  return withTx(async (tx) => {
+    const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).for('update');
+    if (order?.status !== 'paid') throw new ApiError('not_cancellable', 409, 'Only a paid order can be cancelled');
+    await releaseStock(tx, order.dropId);
+    await cancelPaidOrder(tx, order, cancel);
+  });
 }
 
 /**
@@ -93,13 +109,21 @@ export async function cancelOrder(actorId: string, orderId: string, rawReason: u
   const [found] = await db.select({ outletId: orders.outletId }).from(orders).where(eq(orders.id, orderId));
   if (!found) throw orderNotFound();
   await requireOutlet(actorId, found.outletId, CANCEL_ROLES);
+  await cancelLocked(orderId, { actorId, reason, now });
+}
 
-  await withTx(async (tx) => {
-    const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).for('update');
-    if (order?.status !== 'paid') throw new ApiError('not_cancellable', 409, 'Only a paid order can be cancelled');
-    await releaseStock(tx, order.dropId);
-    await cancelPaidOrder(tx, order, { actorId, reason, now });
-  });
+/** An admin cancels a paid order, as a vendor would, saying who pays for the refund. */
+export async function adminCancelOrder(
+  adminId: string,
+  orderId: string,
+  raw: { reason: string; chargedTo: string },
+  now: Date,
+): Promise<void> {
+  const { reason, chargedTo } = parseInput(adminCancelInput, raw);
+  if (!isId(orderId)) throw orderNotFound();
+  const [found] = await db.select({ id: orders.id }).from(orders).where(eq(orders.id, orderId));
+  if (!found) throw orderNotFound();
+  await cancelLocked(orderId, { actorId: adminId, reason, now, chargedTo });
 }
 
 /**

@@ -143,16 +143,30 @@ export async function listStaff(userId: string, outletId: string) {
     .orderBy(asc(memberships.createdAt), asc(memberships.id));
 }
 
-/** Owner-only. Finds the user by phone or creates them, then adds an outlet membership. */
+/**
+ * Owner-only. Finds the user by phone or creates them, then adds an outlet membership. A manager may
+ * be a franchisee, earning from a payout account of the brand.
+ */
 export async function addStaff(
   actorId: string,
   outletId: string,
-  input: { phone: string; name: string; role: Role },
+  input: { phone: string; name: string; role: Role; payoutAccountId?: string },
 ): Promise<Membership> {
   const actor = await requireOutlet(actorId, outletId, ['owner']);
   if (input.role === 'owner') throw new ApiError('invalid_role', 400, 'Staff can be manager or counter');
   const phone = normalizePhone(input.phone);
   if (!phone) throw new ApiError('invalid_phone', 400, 'Enter a valid mobile number');
+  const { payoutAccountId } = input;
+  if (payoutAccountId !== undefined) {
+    if (input.role !== 'manager') throw new ApiError('invalid_role', 400, 'Only a manager can earn from a payout account');
+    const [account] = await db
+      .select({ brandId: payoutAccounts.brandId })
+      .from(payoutAccounts)
+      .where(eq(payoutAccounts.id, payoutAccountId));
+    if (account?.brandId !== actor.brandId) {
+      throw new ApiError('invalid_request', 400, 'That payout account belongs to another brand');
+    }
+  }
 
   try {
     return await withTx(async (tx) => {
@@ -168,14 +182,14 @@ export async function addStaff(
 
       const [m] = await tx
         .insert(memberships)
-        .values({ userId: user.id, brandId: actor.brandId, outletId, role: input.role })
+        .values({ userId: user.id, brandId: actor.brandId, outletId, role: input.role, payoutAccountId })
         .returning();
       await audit(tx, {
         actorId,
         action: 'staff.add',
         entity: 'membership',
         entityId: m!.id,
-        detail: { outletId, userId: user.id, role: input.role },
+        detail: { outletId, userId: user.id, role: input.role, ...(payoutAccountId ? { payoutAccountId } : {}) },
       });
       return m!;
     });
