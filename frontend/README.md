@@ -1,36 +1,37 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# LastBite frontend
 
-## Getting Started
+Next.js website for customers, vendors and admins. Every page fetches in the browser through one typed client in `src/lib/api/`.
 
-First, run the development server:
+## Run it with no backend
 
 ```bash
+cp .env.example .env.local
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000. With `NEXT_PUBLIC_API_MOCK=1`, a mock in `src/lib/api/mock.ts` stands in for the API and keeps its state in the browser's localStorage.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Sign in with any 10-digit number and any 6-digit code except `000000`.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Number starts | You are |
+|---|---|
+| `90000` | A brand new customer or vendor |
+| `98860` | Owner of Butterfold Bakehouse, two outlets (`/vendor`) |
+| `99999` | Admin (`/admin`) |
+| Anything else | Priya, a customer with past orders |
 
-## Learn More
+Dessert Surprise Bag shows one left but loses the race on Reserve, to show `sold_out`. Clear the site's localStorage to reset.
 
-To learn more about Next.js, take a look at the following resources:
+## Run it against the backend
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Set `NEXT_PUBLIC_API_MOCK=0` and `NEXT_PUBLIC_API_URL` to the API, including `/api/v1`. See [API-GAPS.md](API-GAPS.md) first: some fields aren't on `main` yet, and online payment isn't connected. `src/lib/payment.ts` is where Razorpay Checkout goes.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Where things are
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+| Path | What |
+|---|---|
+| `src/config/brand.ts` | Brand name and sample rates. The brand is undecided, so change it only here |
+| `src/lib/api/` | Types, client, mock |
+| `src/components/` | Shared UI, customer and vendor pieces |
+| `src/app/` | Pages |

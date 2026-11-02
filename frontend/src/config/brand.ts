@@ -8,3 +8,5 @@ export const brand = {
 export const COMMISSION_PERCENT = 20;
 
 export const HOLD_SECONDS = 300;
+
+export const AGREEMENT_VERSION = "2026-11";
