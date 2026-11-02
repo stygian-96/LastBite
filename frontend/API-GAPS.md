@@ -1,17 +1,17 @@
 # API gaps
 
-What the screens need that the backend on `main` doesn't give yet. Checked against `backend/src` on 2 Nov 2026. Nothing here has been invented as a route: `src/lib/api/types.ts` matches the real responses, and optional fields there are the ones listed below.
+What the screens need that the backend on `main` doesn't give yet. Checked against `backend/src` at `cfdea90` on 2 Nov 2026, and tested against a local backend. Nothing here has been invented as a route: `src/lib/api/types.ts` matches the real responses, and optional fields there are the ones listed below.
 
-## Promised in the fix pass
+## Found while connecting
 
-The frontend already expects these. Until they land, the feed and outlet page won't work properly against the real API.
+| Where | Problem | What the frontend does for now |
+|---|---|---|
+| `GET /orders/:id`, `/me/orders` and other views that pass `timestamptz` straight through | Times come as Postgres text, like `2026-11-02 15:00:00+00`, not ISO. Safari, so every iPhone, can't parse that | `toDate()` in `src/lib/format.ts` accepts both. Reported to the backend session |
+| Expired holds | A bag only goes back on sale when the cron tick runs | Nothing. Locally, call the tick by hand to see stock return |
 
-| Field or route | Used by |
-|---|---|
-| `outletId`, `city`, `brandSlug`, `outletSlug`, `salesEndAt` on drop cards and details | Vendor link on cards and listings, sales-ended state |
-| `outletId` on `GET /outlets/:brandSlug/:outletSlug` | Follow button |
-| Read routes for staff and payout accounts | Staff screen, Add another outlet |
-| Holiday pause and live outlet settings routes | Outlet settings screen |
+## Routes now on main with no screen yet
+
+Staff (`GET`, `POST`, `DELETE /vendor/outlets/:id/staff`), payout accounts (`GET /vendor/payout-accounts`), outlet settings and holiday pause (`PATCH /vendor/outlets/:id/settings`, `POST .../pause`, `POST .../resume`), and `nameWarning` from creating a payout account. These belong to the staff, Add another outlet and outlet settings screens, which aren't built.
 
 ## Missing fields
 

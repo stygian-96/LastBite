@@ -5,10 +5,10 @@ import { useEffect, useState } from "react";
 import { bagKind, MiniOrderCard } from "@/components/customer";
 import { Button, Field, LinkButton, Notice, PageSkeleton, TopBar } from "@/components/ui";
 import { HOLD_SECONDS } from "@/config/brand";
-import { api, errorCode, errorDetails, errorMessage, isMock } from "@/lib/api";
+import { api, errorCode, errorDetails, errorMessage } from "@/lib/api";
 import { clock, rupees, timeRange } from "@/lib/format";
 import { useQuery, useSecondsLeft } from "@/lib/hooks";
-import { completePayment } from "@/lib/payment";
+import { completePayment, isTestPayment } from "@/lib/payment";
 import { useSession } from "@/lib/session";
 
 const METHODS = [
@@ -222,7 +222,7 @@ export default function Checkout() {
               </label>
             ))}
           </div>
-          <span className="text-xs text-muted">{isMock ? "Test mode: payment always succeeds and no money moves." : "Processed securely by Razorpay."}</span>
+          <span className="text-xs text-muted">{isTestPayment ? "Test mode: payment always succeeds and no money moves." : "Processed securely by Razorpay."}</span>
         </fieldset>
 
         {error && (

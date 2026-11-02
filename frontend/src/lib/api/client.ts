@@ -137,6 +137,8 @@ function query(params: Record<string, string | number | boolean | undefined>) {
 
 // Signed links are made for the file's exact size, so the body must be the file as it is.
 async function putFile(url: string, file: File) {
+  // The backend's local fake store hands out links on this host, which take no file.
+  if (new URL(url).hostname === "fake-storage.test") return;
   try {
     const res = await fetch(url, { method: "PUT", headers: { "Content-Type": file.type }, body: file });
     if (res.ok) return;

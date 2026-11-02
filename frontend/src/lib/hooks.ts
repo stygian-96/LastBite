@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toDate } from "@/lib/format";
 
 type QueryOptions = { pollMs?: number; enabled?: boolean };
 
@@ -77,7 +78,7 @@ export function useNow(intervalMs = 1000): number | null {
 export function useSecondsLeft(iso: string | null | undefined): number | null {
   const now = useNow();
   if (!iso || now === null) return null;
-  return Math.max(0, (new Date(iso).getTime() - now) / 1000);
+  return Math.max(0, (toDate(iso).getTime() - now) / 1000);
 }
 
 export function useDebounced<T>(value: T, ms = 250): T {

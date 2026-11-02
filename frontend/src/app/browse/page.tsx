@@ -187,7 +187,7 @@ export default function Browse() {
           <div className="flex items-baseline justify-between px-4 pb-2.5 pt-3.5 lg:px-6 lg:pt-5">
             <h2 className="text-lg font-medium">{heading}</h2>
             <span className="flex items-baseline gap-3">
-              {!drops.loading && !drops.error && <span className="tabular text-[13px] text-muted">{bags} bags</span>}
+              {!drops.loading && !drops.error && <span className="tabular text-[13px] text-muted">{bags} {bags === 1 ? "bag" : "bags"}</span>}
               {filtered && (
                 <button type="button" onClick={reset} className="min-h-8 text-[13px] text-muted underline">
                   Clear

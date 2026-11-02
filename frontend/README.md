@@ -23,9 +23,23 @@ Sign in with any 10-digit number and any 6-digit code except `000000`.
 
 Dessert Surprise Bag shows one left but loses the race on Reserve, to show `sold_out`. Clear the site's localStorage to reset.
 
-## Run it against the backend
+## Run it against a local backend
 
-Set `NEXT_PUBLIC_API_MOCK=0` and `NEXT_PUBLIC_API_URL` to the API, including `/api/v1`. See [API-GAPS.md](API-GAPS.md) first: some fields aren't on `main` yet, and online payment isn't connected. `src/lib/payment.ts` is where Razorpay Checkout goes.
+Start the backend as its README says, with `NODE_ENV=development`, `DEV_FAKE_PROVIDERS=true` and a `CRON_SECRET`. Then in `.env.local`:
+
+```bash
+NEXT_PUBLIC_API_MOCK=0
+NEXT_PUBLIC_API_URL=http://localhost:4000/api/v1
+NEXT_PUBLIC_DEV_CAPTURE=1
+DEV_CAPTURE_SECRET=the backend's CRON_SECRET
+```
+
+- **Sign in:** the code is printed in the backend's console.
+- **Pay:** with `NEXT_PUBLIC_DEV_CAPTURE=1`, Pay finishes through the backend's fake gateway, via `src/app/dev/capture/[id]/route.ts`. That route keeps the secret on the server and answers 404 in production. Razorpay Checkout goes in `src/lib/payment.ts`.
+- **Admin:** no route makes an admin, so set `is_admin` on your user in the dev database.
+- **An empty database:** apply as a vendor at `/partner`, approve it at `/admin`, then publish tonight's quantity at `/vendor`.
+
+[API-GAPS.md](API-GAPS.md) lists what the backend doesn't give yet.
 
 ## Where things are
 

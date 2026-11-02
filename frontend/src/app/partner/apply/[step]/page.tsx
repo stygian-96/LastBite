@@ -203,7 +203,7 @@ function OutletStep({ outlet, next }: StepProps) {
   const cities = useCities();
   const [business, setBusiness] = useState(outlet?.brandName ?? "");
   const [category, setCategory] = useState<OutletCategory>(outlet?.category ?? "bakery");
-  const [city, setCity] = useState("bengaluru");
+  const [pickedCity, setCity] = useState<string | null>(null);
   const [areaId, setAreaId] = useState(outlet?.areaId ?? "");
   const [address, setAddress] = useState(outlet?.address ?? "");
   const [pincode, setPincode] = useState(outlet?.pincode ?? "");
@@ -216,6 +216,7 @@ function OutletStep({ outlet, next }: StepProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const city = pickedCity ?? cities.data?.find((c) => c.areas.some((a) => a.id === areaId))?.slug ?? "bengaluru";
   const areas = cities.data?.find((c) => c.slug === city)?.areas ?? [];
   const areaName = areas.find((a) => a.id === areaId)?.name;
   const mapsOk = isMapsUrl(mapsUrl);

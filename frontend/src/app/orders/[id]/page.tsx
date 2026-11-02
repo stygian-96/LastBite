@@ -6,7 +6,7 @@ import { bagKind, CustomerShell } from "@/components/customer";
 import { Illo } from "@/components/Illo";
 import { ErrorState, ExternalButton, LinkButton, Notice, PageSkeleton, TopBar } from "@/components/ui";
 import { api, errorMessage, type Order } from "@/lib/api";
-import { rupees, shortName, time, timeRange } from "@/lib/format";
+import { rupees, shortName, time, timeRange, toDate } from "@/lib/format";
 import { useNow, useQuery } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 import { readJson, writeJson } from "@/lib/storage";
@@ -36,9 +36,9 @@ function PickupCode({ order, offline }: { order: Order; offline: boolean }) {
   const { me } = useSession();
   const now = useNow(30_000);
   const window = timeRange(order.pickupStartAt, order.pickupEndAt);
-  const opensIn = now === null ? 0 : Math.ceil((new Date(order.pickupStartAt).getTime() - now) / 60_000);
-  const closed = now !== null && now > new Date(order.pickupEndAt).getTime();
-  const reminder = new Date(new Date(order.pickupStartAt).getTime() - 30 * 60_000).toISOString();
+  const opensIn = now === null ? 0 : Math.ceil((toDate(order.pickupStartAt).getTime() - now) / 60_000);
+  const closed = now !== null && now > toDate(order.pickupEndAt).getTime();
+  const reminder = new Date(toDate(order.pickupStartAt).getTime() - 30 * 60_000).toISOString();
   const name = shortName(me?.name ?? null);
 
   return (

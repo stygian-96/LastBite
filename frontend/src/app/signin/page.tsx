@@ -64,7 +64,8 @@ export default function SignIn() {
       await refresh();
       if (result.existingOrderId) router.replace(`/orders/${result.existingOrderId}?already=1`);
       else if (result.attachedOrderId) router.replace(checkoutUrl(result.attachedOrderId));
-      else if (orderId) router.replace("/browse");
+      // The hold ran out before sign-in finished: checkout says so and offers to hold it again.
+      else if (orderId) router.replace(checkoutUrl(orderId));
       else router.replace(next ?? "/browse");
     } catch (err) {
       setError(errorCode(err) === "otp_invalid" ? "That code isn’t right. Check the SMS and try again." : errorMessage(err));

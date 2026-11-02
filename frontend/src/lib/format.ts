@@ -1,5 +1,11 @@
 const IST = "Asia/Kolkata";
 
+// Some API times come as Postgres text ("2026-11-02 15:00:00+00"), which Safari can't parse.
+export function toDate(value: string | number): Date {
+  if (typeof value === "number") return new Date(value);
+  return new Date(value.replace(" ", "T").replace(/([+-]\d\d)$/, "$1:00"));
+}
+
 // Money from the API is integer paise.
 export function rupees(paise: number): string {
   const whole = paise % 100 === 0;
@@ -19,7 +25,7 @@ function parts(iso: string) {
     minute: "2-digit",
     hour12: true,
   })
-    .format(new Date(iso))
+    .format(toDate(iso))
     .toLowerCase();
   const [clockText, meridiem] = text.split(/\s+/);
   return { clock: clockText, meridiem };
@@ -45,7 +51,7 @@ export function shortDate(iso: string): string {
     day: "numeric",
     month: "short",
   })
-    .format(new Date(iso))
+    .format(toDate(iso))
     .replace(",", "");
 }
 
@@ -57,7 +63,7 @@ export function dayRange(startDay: string, endDay: string): string {
 
 // IST calendar date as YYYY-MM-DD.
 export function istDay(when: string | number): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(new Date(when));
+  return new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(toDate(when));
 }
 
 export function clock(seconds: number): string {

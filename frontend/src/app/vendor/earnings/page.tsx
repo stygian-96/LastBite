@@ -87,7 +87,7 @@ function Money({ outlet }: { outlet: VendorOutlet }) {
       <section className="flex flex-col gap-1 rounded-[22px] bg-dark p-5 text-white">
         <span className="text-[13px] text-dark-sub">Next payout{now === null ? "" : ` · ${nextTuesday(now)}`}</span>
         <span className="tabular text-[38px] font-black text-coral">{rupees(thisWeek.netPaise)}</span>
-        <span className="text-[13px] text-dark-sub">{thisWeek.orders} bags so far</span>
+        <span className="text-[13px] text-dark-sub">{thisWeek.orders} {thisWeek.orders === 1 ? "bag" : "bags"} so far</span>
       </section>
 
       <div className="grid gap-3.5 lg:grid-cols-2">
