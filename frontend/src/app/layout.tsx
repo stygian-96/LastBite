@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Roboto } from "next/font/google";
-import { Suspense, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { brand } from "@/config/brand";
 import { SessionProvider } from "@/lib/session";
 import "./globals.css";
@@ -23,9 +23,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={`${roboto.variable} antialiased`}>
       <body className="min-h-dvh">
-        <SessionProvider>
-          <Suspense>{children}</Suspense>
-        </SessionProvider>
+        <SessionProvider>{children}</SessionProvider>
       </body>
     </html>
   );
