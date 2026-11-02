@@ -230,6 +230,12 @@ describe('POST /webhooks/razorpay', () => {
     expect(res.status).toBe(200);
     expect((await getOrderRow(order.id)).status).toBe('paid');
     expect(await storedEvents()).toMatchObject([{ eventId: 'e1', eventType: 'payment.captured' }]);
+    expect((await storedEvents())[0]).toEqual({
+      eventId: 'e1',
+      eventType: 'payment.captured',
+      subjectId: gp.id,
+      receivedAt: expect.any(String),
+    });
   });
 
   test('stray cookies and a foreign Origin do not block a webhook', async () => {

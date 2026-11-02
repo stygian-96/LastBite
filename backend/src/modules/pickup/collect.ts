@@ -61,9 +61,10 @@ async function collectLocked(tx: Tx, staffId: string, orderId: string, now: Date
 }
 
 /**
- * Collects by the code the customer shows. The lookup covers this outlet's paid and collected orders
- * whose pickup end plus 30 minutes is still ahead, never a calendar date, as windows pass midnight.
- * Only a wrong code costs quota, so a right one never locks staff out. No provider call happens here.
+ * Collects by the code the customer shows. The lookup covers this outlet's paid, no-show and collected
+ * orders whose pickup end plus 30 minutes is still ahead, never a calendar date, as windows pass
+ * midnight, so a customer marked a no-show early can still turn up in the grace. Only a wrong code
+ * costs quota, so a right one never locks staff out. No provider call happens here.
  */
 export async function collectByCode(staffId: string, outletId: string, rawCode: string, now: Date): Promise<OrderView> {
   await requirePickupStaff(staffId, outletId);
@@ -71,7 +72,7 @@ export async function collectByCode(staffId: string, outletId: string, rawCode: 
   await checkRateLimit(key, WRONG_CODE_LIMIT, WRONG_CODE_WINDOW_SECONDS, now);
 
   const code = rawCode.trim().toUpperCase();
-  // A paid order sorts ahead of a collected one if a code was reused on two nights.
+  // An order still to collect sorts ahead of a collected one if a code was reused on two nights.
   const [found] = code
     ? await db
         .select({ id: orders.id, status: orders.status, collectedAt: orders.collectedAt })
@@ -81,11 +82,11 @@ export async function collectByCode(staffId: string, outletId: string, rawCode: 
           and(
             eq(orders.outletId, outletId),
             eq(orders.pickupCode, code),
-            inArray(orders.status, ['paid', 'collected']),
+            inArray(orders.status, ['paid', 'no_show', 'collected']),
             sql`${drops.pickupEndAt} + make_interval(mins => ${NO_SHOW_GRACE_MINUTES}) > ${now.toISOString()}::timestamptz`,
           ),
         )
-        .orderBy(sql`${orders.status} = 'paid' desc`, desc(drops.pickupEndAt))
+        .orderBy(sql`${orders.status} = 'collected' asc`, desc(drops.pickupEndAt))
         .limit(1)
     : [];
   if (!found) {

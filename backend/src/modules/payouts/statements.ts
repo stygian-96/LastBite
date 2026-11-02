@@ -68,8 +68,25 @@ export async function listAdminPayoutAccounts(status?: string) {
     .limit(LIST_LIMIT);
 }
 
+/** What a vendor sees of a payout. Why an admin holds one stays with the admin. */
+const vendorPayoutColumns = {
+  id: payouts.id,
+  payoutAccountId: payouts.payoutAccountId,
+  periodStart: payouts.periodStart,
+  periodEnd: payouts.periodEnd,
+  grossPaise: payouts.grossPaise,
+  commissionPaise: payouts.commissionPaise,
+  feesPaise: payouts.feesPaise,
+  taxPaise: payouts.taxPaise,
+  adjustmentPaise: payouts.adjustmentPaise,
+  netPaise: payouts.netPaise,
+  status: payouts.status,
+  paidAt: payouts.paidAt,
+  createdAt: payouts.createdAt,
+};
+
 export type EarningsView = {
-  payouts: Payout[];
+  payouts: Omit<Payout, 'holdReason' | 'approvingAt'>[];
   /** Everything earned that no payout has taken yet, with any balance owed, so what the next one will hold so far. */
   thisWeek: Totals & { orders: number; adjustmentPaise: number; netPaise: number };
 };
@@ -79,7 +96,7 @@ export async function getEarnings(userId: string, payoutAccountId: string): Prom
   await requirePayoutAccount(userId, payoutAccountId);
 
   const [rows, open, refunded, carriedPaise] = await Promise.all([
-    db.select().from(payouts).where(eq(payouts.payoutAccountId, payoutAccountId)).orderBy(desc(payouts.periodStart)),
+    db.select(vendorPayoutColumns).from(payouts).where(eq(payouts.payoutAccountId, payoutAccountId)).orderBy(desc(payouts.periodStart)),
     db
       .select({
         pricePaise: orders.pricePaise,

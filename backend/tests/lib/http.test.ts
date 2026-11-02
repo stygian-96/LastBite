@@ -51,7 +51,7 @@ describe('route', () => {
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe('invalid_request');
   });
 
-  test('passes parsed body, params and first forwarded ip to the handler', async () => {
+  test('passes parsed body, params and the trusted forwarded ip to the handler', async () => {
     const t = harness();
     t.post('/x/:id', route({ body: z.object({ n: z.number() }) }, async (c) => ({
       n: c.body.n,

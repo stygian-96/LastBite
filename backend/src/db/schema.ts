@@ -515,8 +515,8 @@ export const notifications = pgTable("notifications", {
 export const webhookEvents = pgTable("webhook_events", {
 	eventId: text("event_id").primaryKey().notNull(),
 	eventType: text("event_type").notNull(),
-	payload: jsonb().notNull(),
 	receivedAt: timestamp("received_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	subjectId: text("subject_id"),
 });
 
 export const auditLog = pgTable("audit_log", {

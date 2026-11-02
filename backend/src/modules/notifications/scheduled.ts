@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { withTx } from '../../db/client.js';
 import { drops, listings, orders, outlets, users } from '../../db/schema.js';
 import { addDays, isoWeekday, istMinuteOfDay, serviceDate } from '../../lib/time.js';
@@ -85,6 +85,8 @@ export function queueDailyPrompts(now: Date): Promise<number> {
         and(
           eq(outlets.status, 'live'),
           or(isNull(outlets.pausedUntil), lte(outlets.pausedUntil, now.toISOString())),
+          // As publishDrop has it: a licence that expires today is still valid today.
+          or(isNull(outlets.fssaiExpiresOn), gte(outlets.fssaiExpiresOn, date)),
           isNull(listings.archivedAt),
           sql`${weekday}::smallint = ANY(${listings.repeatDays})`,
         ),

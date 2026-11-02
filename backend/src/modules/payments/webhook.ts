@@ -36,7 +36,7 @@ function subjectId(e: Event): string | undefined {
   return subject?.entity.id;
 }
 
-function parseEvent(raw: string): { event: Event; payload: unknown } {
+function parseEvent(raw: string): Event {
   let payload: unknown;
   try {
     payload = JSON.parse(raw);
@@ -48,7 +48,7 @@ function parseEvent(raw: string): { event: Event; payload: unknown } {
   const { event } = parsed.data;
   const handled = PAYMENT_EVENTS.has(event) || REFUND_EVENTS.has(event) || TRANSFER_FAILED_EVENTS.has(event);
   if (handled && !subjectId(parsed.data)) throw badEvent();
-  return { event: parsed.data, payload };
+  return parsed.data;
 }
 
 /** The gateway's status decides, not the event's name. A captured payment is never marked failed. */
@@ -166,14 +166,15 @@ async function flagFailedTransfer(tx: Tx, razorpayTransferId: string): Promise<v
 
 /**
  * Handles one verified Razorpay event. The event row and its effect commit together, so a failure
- * leaves nothing recorded and Razorpay's retry does the work. The gateway is read before the
+ * leaves nothing recorded and Razorpay's retry does the work. The row keeps IDs only, as the body
+ * holds customer details and a replay comes from Razorpay. The gateway is read before the
  * transaction opens, because provider calls never run inside one.
  */
 export async function handleWebhook(raw: string, signature: string, eventId: string, now: Date): Promise<void> {
   const gateway = getGateway();
   if (!gateway.verifyWebhook(raw, signature)) throw new ApiError('invalid_signature', 401, 'Invalid signature');
   if (!eventId) throw badEvent();
-  const { event, payload } = parseEvent(raw);
+  const event = parseEvent(raw);
 
   const [seen] = await db
     .select({ eventId: webhookEvents.eventId })
@@ -187,7 +188,7 @@ export async function handleWebhook(raw: string, signature: string, eventId: str
   await withTx(async (tx) => {
     const [fresh] = await tx
       .insert(webhookEvents)
-      .values({ eventId, eventType: event.event, payload, receivedAt: now.toISOString() })
+      .values({ eventId, eventType: event.event, subjectId: subject, receivedAt: now.toISOString() })
       .onConflictDoNothing()
       .returning({ eventId: webhookEvents.eventId });
     if (!fresh) return;

@@ -48,6 +48,12 @@ describe('parseEnv', () => {
     expect(parseEnv(BASE).RAZORPAY_KEY_ID).toBeUndefined();
   });
 
+  test('TRUSTED_PROXY_HOPS defaults to one and must be positive', () => {
+    expect(parseEnv(BASE).TRUSTED_PROXY_HOPS).toBe(1);
+    expect(parseEnv({ ...BASE, TRUSTED_PROXY_HOPS: '2' }).TRUSTED_PROXY_HOPS).toBe(2);
+    expect(() => parseEnv({ ...BASE, TRUSTED_PROXY_HOPS: '0' })).toThrow();
+  });
+
   test('TRUST_PROXY is on only for the word true', () => {
     expect(parseEnv({ ...BASE, TRUST_PROXY: 'true' }).TRUST_PROXY).toBe(true);
     expect(parseEnv({ ...BASE, TRUST_PROXY: '1' }).TRUST_PROXY).toBe(false);

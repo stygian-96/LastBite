@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { db } from '../../src/db/client.js';
-import { areas, auditLog, documents, issues, memberships, notifications, orders, outlets, payments, payoutAccounts } from '../../src/db/schema.js';
+import { areas, auditLog, documents, issues, memberships, notifications, orders, outlets, payments, payoutAccounts, payouts } from '../../src/db/schema.js';
 import { FakeGateway, setGateway } from '../../src/integrations/payments.js';
 import { env } from '../../src/lib/env.js';
 import { decideOutlet } from '../../src/modules/admin/review.js';
 import { adminRefund } from '../../src/modules/admin/support.js';
 import { createSession } from '../../src/modules/auth/session.js';
 import { listDrops } from '../../src/modules/catalogue/feed.js';
+import { queueDailyPrompts } from '../../src/modules/notifications/scheduled.js';
 import { applyCapture } from '../../src/modules/payments/capture.js';
 import { app } from '../../src/app.js';
 import { makeBrand, makeDrop, makeListing, makeLiveOutlet, makeOrder, makePaidOrder, makePayment, makePayoutAccount, makeUser } from '../helpers/factories.js';
@@ -748,5 +749,85 @@ describe('upload links are rate limited', () => {
 
     vi.setSystemTime(new Date(NOW.getTime() + 3_600_000));
     expect((await call('POST', '/me/uploads', user.id, file)).status).toBe(200);
+  });
+});
+
+describe('vendors do not see why a payout is held', () => {
+  test('earnings leave out the hold reason', async () => {
+    const outlet = await makeLiveOutlet();
+    const owner = await owns(outlet.brandId);
+    await db.insert(payouts).values({
+      payoutAccountId: outlet.payoutAccountId!,
+      periodStart: '2026-10-26',
+      periodEnd: '2026-11-01',
+      grossPaise: 0,
+      commissionPaise: 0,
+      feesPaise: 0,
+      netPaise: 0,
+      status: 'held',
+      holdReason: 'Vendor under investigation',
+    });
+
+    const { json } = await call('GET', `/vendor/earnings?payout_account=${outlet.payoutAccountId}`, owner.id);
+
+    expect(json.payouts).toHaveLength(1);
+    expect(json.payouts[0]).toMatchObject({ status: 'held' });
+    expect(json.payouts[0]).not.toHaveProperty('holdReason');
+  });
+});
+
+describe('daily prompts and licences', () => {
+  // 17:05 IST on Monday 2 November 2026.
+  const PROMPT_TIME = new Date('2026-11-02T11:35:00Z');
+
+  async function promptable(fssaiExpiresOn: string | null) {
+    const outlet = await makeLiveOutlet({ fssaiExpiresOn });
+    await makeListing({ outletId: outlet.id, repeatDays: [1] });
+    await owns(outlet.brandId);
+  }
+
+  test('an expired licence gets no prompt, as it could not publish', async () => {
+    await promptable('2026-11-01');
+    expect(await queueDailyPrompts(PROMPT_TIME)).toBe(0);
+  });
+
+  test('a licence that expires today, or has no date, still does', async () => {
+    await promptable('2026-11-02');
+    await promptable(null);
+    expect(await queueDailyPrompts(PROMPT_TIME)).toBe(2);
+  });
+});
+
+describe('a no-show marked by hand', () => {
+  async function missed() {
+    const outlet = await makeLiveOutlet();
+    const drop = await makeDrop({
+      outletId: outlet.id,
+      pickupStartAt: '2026-11-02T09:00:00Z',
+      pickupEndAt: '2026-11-02T09:45:00Z',
+      salesEndAt: '2026-11-02T09:30:00Z',
+    });
+    const order = await makePaidOrder({ dropId: drop.id, pickupCode: 'K472' });
+    const staff = await staffAt(outlet, 'counter');
+    await call('POST', `/vendor/orders/${order.id}/no-show`, staff.id);
+    expect((await getOrderRow(order.id)).status).toBe('no_show');
+    return { outlet, order, staff };
+  }
+
+  test('can be collected by code during the grace', async () => {
+    const { outlet, order, staff } = await missed();
+
+    const { status } = await call('POST', `/vendor/outlets/${outlet.id}/collect`, staff.id, { code: 'K472' });
+
+    expect(status).toBe(200);
+    expect(await getOrderRow(order.id)).toMatchObject({ status: 'collected', collectedBy: staff.id });
+    expect(await auditRows('order.collect')).toMatchObject([{ detail: { from: 'no_show' } }]);
+  });
+
+  test('cannot once the grace is over', async () => {
+    const { outlet, staff } = await missed();
+    vi.setSystemTime(new Date('2026-11-02T10:16:00Z'));
+    const { json } = await call('POST', `/vendor/outlets/${outlet.id}/collect`, staff.id, { code: 'K472' });
+    expect(json.error.code).toBe('code_not_found');
   });
 });
