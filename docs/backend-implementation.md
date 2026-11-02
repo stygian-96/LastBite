@@ -477,7 +477,7 @@ CREATE INDEX ON notifications (status, created_at) WHERE status = 'pending';
 CREATE TABLE webhook_events (
   event_id     text PRIMARY KEY,       -- x-razorpay-event-id
   event_type   text NOT NULL,
-  payload      jsonb NOT NULL,
+  payload      jsonb NOT NULL,         -- dropped in 5.6: only IDs are kept
   received_at  timestamptz NOT NULL DEFAULT now()
 );
 
@@ -518,7 +518,29 @@ ALTER TABLE orders ADD COLUMN payout_account_id uuid REFERENCES payout_accounts(
 ALTER TABLE payments ADD COLUMN released_payout_id uuid REFERENCES payouts(id);
 ALTER TABLE payouts ADD COLUMN hold_reason text;
 ALTER TABLE payouts ADD COLUMN approving_at timestamptz;
+CREATE UNIQUE INDEX one_approval_per_account ON payouts (payout_account_id) WHERE approving_at IS NOT NULL;
+CREATE UNIQUE INDEX one_hold_per_anon ON orders (anon_id) WHERE status = 'held' AND user_id IS NULL;
+ALTER TABLE notifications ADD COLUMN sending_at timestamptz;
+
+CREATE TABLE job_runs (
+  name         text PRIMARY KEY,
+  last_run_at  timestamptz NOT NULL
+);
+
+ALTER TABLE payout_accounts
+  ADD COLUMN linked_account_step text NOT NULL DEFAULT 'none'
+    CHECK (linked_account_step IN ('none', 'account', 'stakeholder', 'product', 'done')),
+  ADD COLUMN linked_product_id text,
+  ADD COLUMN linked_account_failures integer NOT NULL DEFAULT 0 CHECK (linked_account_failures >= 0),
+  ADD COLUMN linked_account_generation integer NOT NULL DEFAULT 0 CHECK (linked_account_generation >= 0);
+
+ALTER TABLE refunds ADD COLUMN retry_at timestamptz;
+ALTER TABLE outlets ADD COLUMN changes_reason text;
+ALTER TABLE webhook_events ADD COLUMN subject_id text;
+ALTER TABLE webhook_events DROP COLUMN payload;
 ```
+
+Indexes for the jobs' queues are also added: `refunds_to_send_idx`, `refunds_to_check_idx`, `payments_to_transfer_idx` and `orders_unpaid_by_account_idx`.
 
 - `rate_limits` gives shared counters across serverless instances.
 - `refunds.attempts` supports alerting after 3 failures.
@@ -537,6 +559,13 @@ ALTER TABLE payouts ADD COLUMN approving_at timestamptz;
 - `payouts.hold_reason` says why an admin holds a payout. It is null on one held for its account or a negative net.
 - `payouts.approving_at` marks an approval under way. Only one runs per payout account, and it stays marked through a failure, so that payout must be retried before any other on the account.
 - `orders.payout_account_id` is the account that sold the order. Payouts and transfers read it, so a franchise that changes hands leaves its unpaid orders with the old account.
+- `one_hold_per_anon` allows one active hold per signed-out browser.
+- `notifications.sending_at` marks a message claimed by a send run, as `refunds.sending_at` does.
+- `job_runs` records when each job last ran, so the tick knows what is due.
+- `payout_accounts.linked_account_step` and `linked_product_id` record how far making the Razorpay linked account has got, so a retry resumes on the same account. `linked_account_failures` stops the job at 5 for an admin, and `linked_account_generation` goes up on a bank change, giving the new linked account a new unique email.
+- `refunds.retry_at` spaces attempts after a definite refusal at least 15 minutes apart.
+- `outlets.changes_reason` is the admin's reason for `changes_needed`, shown as a fix until the vendor submits again.
+- `webhook_events` keeps the event ID, type and the payment, refund or transfer ID only. The body holds customer details and nothing reads it again.
 
 ## 6. State machines
 
@@ -663,7 +692,7 @@ Commission is rounded to the nearest paisa per order. Vendors keep the money on 
 
 ## 8. API
 
-All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code": "sold_out", "message": "..." } }`.
+All routes are under `/api/v1` and return JSON, with every timestamp in ISO 8601 UTC. Errors use `{ "error": { "code": "sold_out", "message": "..." } }`.
 
 ### Public
 
@@ -690,11 +719,11 @@ All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code":
 | GET | `/orders/:id` | Order status, used while confirming |
 | POST | `/orders/:id/pay` | Create the Razorpay order |
 | DELETE | `/orders/:id/hold` | Release a hold |
-| GET | `/me/orders?status=` | Active and past orders |
+| GET | `/me/orders?status=` | Orders, all of them or `active` or `past` |
 | POST | `/orders/:id/rating` | Rate a collected order |
 | POST | `/orders/:id/issues` | Report a problem |
 | GET, PATCH, DELETE | `/me` | Profile, preferences, account deletion |
-| POST | `/me/uploads` | Get a signed upload link for an issue photo |
+| POST | `/me/uploads` | Get a signed upload link for an issue photo, 30 an hour per user with `/vendor/uploads` |
 | GET | `/me/following` | Followed outlets |
 | PUT, DELETE | `/outlets/:id/follow` | Follow, unfollow |
 
@@ -704,32 +733,39 @@ All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code":
 |---|---|---|
 | POST | `/vendor/outlets` | Start an outlet, creating the brand if needed |
 | PATCH | `/vendor/outlets/:id` | Save a step, used for save and resume |
-| POST | `/vendor/uploads` | Get a signed upload link |
+| POST | `/vendor/uploads` | Get a signed upload link, 30 an hour per user with `/me/uploads` |
 | POST | `/vendor/outlets/:id/documents` | Record an uploaded document |
-| POST | `/vendor/payout-accounts` | Add PAN and bank details |
+| GET | `/vendor/payout-accounts?brand_id=` | The brand's payout accounts this user may see, last 4 digits only |
+| POST | `/vendor/payout-accounts` | Add PAN and bank details. Returns `nameWarning` when the holder matches neither the legal name nor the owner |
 | PATCH | `/vendor/payout-accounts/:id` | Change bank details, which holds payouts until re-verified |
 | POST | `/vendor/payout-accounts/:id/agreement` | Sign the agreement |
 | POST | `/vendor/outlets/:id/submit` | Submit for review |
-| GET | `/vendor/outlets/:id/status` | Status and anything to fix |
+| GET | `/vendor/outlets/:id/status` | Status and anything to fix, including the admin's reason for `changes_needed` |
+| PATCH | `/vendor/outlets/:id/settings` | Edit a live outlet's hours, address, area, maps link, pickup instructions, contact phone and photos |
+| POST | `/vendor/outlets/:id/pause` | Holiday closure, with `until` and `reason`. Paid orders stand and no customer is told |
+| POST | `/vendor/outlets/:id/resume` | End a holiday closure early |
 
 ### Vendor daily use
 
 | Method | Route | Purpose |
 |---|---|---|
 | GET | `/vendor/outlets` | Outlets this user can access |
-| GET, POST, PATCH | `/vendor/outlets/:id/listings` | Manage listings |
+| GET, POST | `/vendor/outlets/:id/listings` | List and add listings |
+| PATCH, DELETE | `/vendor/listings/:id` | Edit or archive a listing |
 | POST | `/vendor/listings/:id/copy` | Copy to another outlet |
 | GET | `/vendor/outlets/:id/today` | Drops and tonight's totals |
 | PUT | `/vendor/listings/:id/drops/today` | Set quantity, publish |
 | PATCH | `/vendor/drops/:id` | Pause, resume, change quantity |
 | POST | `/vendor/drops/:id/cancel` | Cancel a drop and refund everyone |
 | GET | `/vendor/outlets/:id/orders?date=` | Tonight's orders |
-| POST | `/vendor/outlets/:id/collect` | Collect by code |
+| POST | `/vendor/outlets/:id/collect` | Collect by code, a no-show too during the 30-minute grace |
+| POST | `/vendor/orders/:id/collect` | Collect one order by ID, as from a name search |
 | POST | `/vendor/orders/:id/no-show` | Mark no-show |
 | POST | `/vendor/orders/:id/cancel` | Cancel one order |
 | GET | `/vendor/earnings?payout_account=` | Payouts and statements |
 | GET | `/vendor/payouts/:id/statement` | Statement as CSV |
-| POST, DELETE | `/vendor/outlets/:id/staff` | Add or remove staff |
+| GET | `/vendor/outlets/:id/staff` | Staff of the outlet, for its owner or a manager |
+| POST, DELETE | `/vendor/outlets/:id/staff` | Add or remove staff. A manager may be given a `payoutAccountId` as a franchisee |
 
 ### Admin
 
@@ -738,12 +774,18 @@ All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code":
 | GET | `/admin/applications` | Review queue |
 | POST | `/admin/documents/:id/review` | Approve or reject a document |
 | POST | `/admin/outlets/:id/decision` | Approve, request changes, suspend |
-| PATCH | `/admin/outlets/:id` | Move brand, set commission |
+| PATCH | `/admin/outlets/:id` | Move brand, set commission, switch the payout account to a verified one of the brand |
 | GET | `/admin/orders`, `/admin/issues` | Support views |
+| GET | `/admin/alerts?action=&from=&to=` | Audit entries that need an admin: failed, stuck and unknown refunds, unmatched or wrong payments, orphaned, failed or empty transfers, payout mismatches, stuck linked accounts |
+| GET | `/admin/users?phone=` | Find a user's ID |
 | POST | `/admin/orders/:id/refund` | Refund, choosing who pays |
+| POST | `/admin/orders/:id/cancel` | Cancel a paid order, with a reason and who pays |
+| POST | `/admin/refunds/:id/retry` | Send a failed refund again on the same terms |
+| POST | `/admin/issues/:id/resolve` | Close an issue with a note and no refund |
 | GET | `/admin/outlets/:id/stats` | Cancellation rate |
 | POST | `/admin/users/:id/phone` | Change a verified user's phone |
 | GET | `/admin/payouts` | Weekly payouts |
+| GET | `/admin/payout-accounts?status=` | Payout accounts, last 4 digits only |
 | POST | `/admin/payouts/:id/approve` | Release a payout |
 | POST | `/admin/payouts/:id/hold` | Hold a draft, with a reason |
 | POST | `/admin/payouts/:id/unhold` | End an admin's hold |
@@ -764,19 +806,20 @@ All jobs run from the one-minute tick. Each must be safe to run twice, and a fai
 
 | Job | When | What it does |
 |---|---|---|
+| Reconcile payments | Every minute | Check Razorpay for payments on holds about to expire. First, so a paid hold is settled before it can expire |
 | Expire holds | Every minute | `held` past `hold_expires_at + 60s` becomes `expired`, stock returns |
-| Reconcile payments | Every minute | Check Razorpay for payments on holds about to expire |
 | Send notifications | Every minute | Send pending messages, fall back from WhatsApp to SMS |
-| Send refunds | Every minute | Retry pending refunds |
+| Send refunds | Every minute | Send pending refunds, at least 15 minutes apart after a refusal, and check sent ones heard nothing of for 15 minutes |
 | Pickup reminders | Every minute | 30 minutes before pickup opens |
-| Mark no-shows | Every 5 minutes | `paid` orders 30 minutes past pickup end |
-| Vendor prompt | Daily, between 5:00 and 5:14 pm IST | "How many tonight?" |
-| Followed outlet alerts | With each first drop | One message per customer, per outlet, per night |
-| Licence check | Daily, between 10:00 and 10:14 am IST | Warn at 30 and 7 days, block new drops on expiry |
+| Create transfers | Every minute | Held Route transfers for sold bags, then settle stale claims and reverse transfers stranded on cancelled orders |
 | Link payout accounts | Every minute | Create linked accounts for verified payout accounts |
-| Create transfers | Every minute | Held Route transfers for sold bags |
-| Build payouts | Monday from 6:00 am IST, once a week | Create draft payouts for the week before |
+| Mark no-shows | Every 5 minutes | `paid` orders 30 minutes past pickup end |
+| Vendor prompt | Daily, between 5:00 and 5:14 pm IST | "How many tonight?", not to outlets whose licence has expired |
+| Licence check | Daily, between 10:00 and 10:14 am IST | Warn at 30 and 7 days, block new drops on expiry |
 | Clean up | Daily | Remove used or expired OTPs and rate limit rows over a day old, expired sessions, and sent messages over 90 days old |
+| Build payouts | Monday from 6:00 am IST, once a week | Create draft payouts for the week before |
+
+Followed outlet alerts are not a job: they are queued with each first drop of the night, one message per customer, per outlet, per night.
 
 The browse and reserve queries check dates directly, so a late job can never sell something it shouldn't. Jobs only tidy up.
 

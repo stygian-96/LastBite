@@ -93,7 +93,7 @@ The messaging adapter posts `{ to, channel, template, variables, text }` with a 
 
 ## Migrations
 
-Migrations are plain SQL files in `db/migrations`, applied once each, in name order, in a transaction each. To add one, create the next numbered file and update `src/db/schema.ts` by hand to match.
+Migrations are plain SQL files in `db/migrations`, applied once each, in name order, in a transaction each. To add one, create the next numbered file and update `src/db/schema.ts` by hand to match. `schema.ts` was generated with `drizzle-kit pull` and is kept in that form, except the `bytea` columns, which drizzle-kit cannot map and are declared by hand at the top.
 
 ```bash
 npm run db:migrate
