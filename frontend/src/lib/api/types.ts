@@ -1,64 +1,53 @@
-// Response shapes for the API in docs/backend-implementation.md section 8.
-// The spec lists routes but not bodies, so these follow its column names.
-// Anything assumed beyond the columns is listed in API-GAPS.md.
+// Response shapes from the backend on main. JSON is camelCase, money is integer paise,
+// dates are ISO strings. Fields marked "fix pass" are promised but not on main yet, and
+// optional fields are ones the frontend wants but no route returns. See API-GAPS.md.
 
-export type CityId = "bengaluru" | "hyderabad";
 export type FoodCategory = "bakery" | "cafe" | "meals" | "desserts";
 export type OutletCategory = "bakery" | "cafe" | "restaurant" | "sweets" | "kitchen";
 export type Diet = "veg" | "egg" | "nonveg" | "mixed";
 export type ListingType = "surprise_bag" | "fixed_box";
 export type OrderStatus = "held" | "expired" | "paid" | "collected" | "no_show" | "cancelled";
+export type OutletStatus = "draft" | "in_review" | "changes_needed" | "live" | "suspended" | "closed";
 
 export type Area = { id: string; name: string };
-export type City = { id: CityId; name: string; areas: Area[] };
-
-export type OutletSummary = {
-  id: string;
-  brand_name: string;
-  brand_slug: string;
-  branch_name: string;
-  slug: string;
-  city: CityId;
-  area_name: string;
-  category: OutletCategory;
-  rating_avg: number | null;
-  rating_count: number;
-};
-
-export type OutletPickupInfo = OutletSummary & {
-  address: string;
-  pincode: string;
-  maps_url: string;
-  pickup_instructions: string;
-  fssai_number: string;
-};
+export type City = { slug: string; name: string; areas: Area[] };
 
 export type Drop = {
   id: string;
-  listing_id: string;
-  outlet: OutletSummary;
-  status: "live" | "paused" | "cancelled";
   name: string;
-  description: string;
   type: ListingType;
-  food_category: FoodCategory;
   diet: Diet;
-  allergens: string[];
-  value_paise: number;
-  price_paise: number;
-  quantity: number;
-  reserved_count: number;
-  photo_urls: string[];
-  pickup_start_at: string;
-  pickup_end_at: string;
-  sales_end_at: string;
+  pricePaise: number;
+  valuePaise: number;
+  remaining: number;
+  pickupStartAt: string;
+  pickupEndAt: string;
+  brandName: string;
+  branchName: string;
+  area: string | null;
+  photoUrl: string | null;
+  foodCategory: FoodCategory;
+  // Fix pass
+  outletId: string;
+  city: string;
+  brandSlug: string;
+  outletSlug: string;
+  salesEndAt: string;
 };
 
-export type DropDetail = Omit<Drop, "outlet"> & { outlet: OutletPickupInfo };
+export type DropDetail = Drop & {
+  description: string;
+  allergens: string[];
+  pickupInstructions: string | null;
+  address: string | null;
+  mapsUrl: string | null;
+  fssaiNumber: string | null;
+  rating: number | null;
+};
 
 export type DropFilters = {
-  city: CityId;
-  area?: string;
+  city: string;
+  area?: string; // area name
   category?: FoodCategory;
   veg?: boolean;
   pickup_by?: string; // "21:00", IST
@@ -66,68 +55,277 @@ export type DropFilters = {
   q?: string;
 };
 
-export type OutletPage = OutletPickupInfo & {
-  opening_hours_today: string | null;
-  following: boolean;
+export type OpeningHours = Partial<Record<"mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun", string[][]>>;
+
+export type OutletPage = {
+  outletId: string; // fix pass
+  brandName: string;
+  brandSlug: string;
+  branchName: string;
+  outletSlug: string;
+  city: string | null;
+  area: string | null;
+  category: OutletCategory;
+  address: string | null;
+  mapsUrl: string | null;
+  pickupInstructions: string | null;
+  openingHours: OpeningHours | null;
+  fssaiNumber: string | null;
+  photoUrls: string[];
+  rating: number | null;
   drops: Drop[];
 };
 
-export type Refund = {
-  id: string;
-  amount_paise: number;
-  status: "pending" | "processed" | "failed";
-  created_at: string;
-  processed_at: string | null;
-};
+export type Refund = { status: "pending" | "processed" | "failed"; amountPaise: number };
 
 export type Order = {
   id: string;
-  number: number;
+  number: string; // "SJ-20481"
   status: OrderStatus;
-  drop_id: string;
-  outlet: OutletPickupInfo;
+  pricePaise: number;
+  valuePaise: number;
   name: string;
-  food_category: FoodCategory;
   type: ListingType;
   diet: Diet;
   allergens: string[];
-  price_paise: number;
-  value_paise: number;
-  pickup_code: string | null;
-  pickup_start_at: string;
-  pickup_end_at: string;
-  hold_expires_at: string;
-  paid_at: string | null;
-  collected_at: string | null;
-  cancelled_at: string | null;
-  cancel_reason: string | null;
-  payment_method: string | null;
-  rating: number | null;
+  brandName: string;
+  branchName: string;
+  address: string | null;
+  mapsUrl: string | null;
+  pickupInstructions: string | null;
+  pickupStartAt: string;
+  pickupEndAt: string;
+  holdExpiresAt: string;
+  pickupCode: string | null;
   refund: Refund | null;
-  created_at: string;
+  // Not returned yet. Screens work without them.
+  foodCategory?: FoodCategory;
+  city?: string;
+  brandSlug?: string;
+  outletSlug?: string;
+  collectedAt?: string | null;
+  rating?: number | null;
 };
 
 export type PayInfo = {
-  razorpay_order_id: string;
-  key_id: string;
-  amount_paise: number;
-  currency: "INR";
-  timeout_seconds: number;
+  razorpayOrderId: string;
+  amountPaise: number;
+  keyId: string;
+  timeoutSeconds: number;
 };
 
-export type Me = {
+export type Profile = {
   id: string;
   phone: string;
   name: string | null;
   email: string | null;
-  is_admin: boolean;
-  whatsapp_opt_in: boolean;
-  marketing_opt_in: boolean;
-  created_at: string;
-  bags_rescued: number;
-  saved_paise: number;
+  whatsappOptIn: boolean;
+  marketingOptIn: boolean;
+  impact: { bagsCollected: number; moneySavedPaise: number };
 };
 
-export type MePatch = Partial<Pick<Me, "name" | "email" | "whatsapp_opt_in" | "marketing_opt_in">>;
+export type ProfilePatch = Partial<Pick<Profile, "name" | "email" | "whatsappOptIn" | "marketingOptIn">>;
+
+export type SignedInUser = { id: string; phone: string; name: string | null; isAdmin: boolean };
+
+export type VerifyResult = {
+  user: SignedInUser;
+  attachedOrderId?: string;
+  existingOrderId?: string;
+};
+
+export type FollowedOutlet = {
+  outletId: string;
+  brandName: string;
+  brandSlug: string;
+  branchName: string;
+  outletSlug: string;
+  category: OutletCategory;
+  status: OutletStatus;
+  city?: string;
+};
 
 export type IssueReason = "bag_not_ready" | "quality" | "allergen" | "code_rejected" | "other";
+
+// ---------- Vendor ----------
+
+export type VendorOutlet = {
+  id: string;
+  brandId: string;
+  payoutAccountId: string | null;
+  areaId: string | null;
+  branchName: string;
+  slug: string;
+  category: OutletCategory;
+  address: string | null;
+  pincode: string | null;
+  mapsUrl: string | null;
+  contactPhone: string | null;
+  pickupInstructions: string | null;
+  openingHours: OpeningHours | null;
+  photoKeys: string[];
+  fssaiNumber: string | null;
+  fssaiExpiresOn: string | null;
+  gstin: string | null;
+  commissionBps: number;
+  status: OutletStatus;
+  onboardingStep: number;
+  pausedUntil: string | null;
+  brandName?: string; // not returned yet
+};
+
+export type OutletPatch = Partial<
+  Pick<
+    VendorOutlet,
+    "branchName" | "category" | "photoKeys"
+  > & {
+    step: number;
+    address: string;
+    pincode: string;
+    areaId: string;
+    mapsUrl: string;
+    contactPhone: string;
+    pickupInstructions: string;
+    openingHours: OpeningHours;
+    fssaiNumber: string;
+    fssaiExpiresOn: string;
+    gstin: string;
+    payoutAccountId: string;
+  }
+>;
+
+export type Fix = { code: string; message: string };
+
+export type OutletStatusView = {
+  status: OutletStatus;
+  steps: { key: "details" | "licence" | "payout" | "agreement" | "listing"; done: boolean }[];
+  fixes: Fix[];
+};
+
+export type DocumentKind = "fssai" | "gst" | "pan" | "bank_proof";
+export type UploadPurpose = "photo" | "logo" | "document";
+
+export type PayoutAccountInput = {
+  legalName: string;
+  pan: string;
+  holderName: string;
+  accountNumber: string;
+  ifsc: string;
+};
+
+export type PayoutAccount = {
+  id: string;
+  brandId: string;
+  legalName: string;
+  panLast4: string;
+  holderName: string;
+  accountLast4: string;
+  ifsc: string;
+  status: "pending" | "verified" | "rejected" | "on_hold";
+};
+
+export type Listing = {
+  id: string;
+  outletId: string;
+  type: ListingType;
+  name: string;
+  description: string;
+  foodCategory: FoodCategory;
+  diet: Diet;
+  allergens: string[];
+  valuePaise: number;
+  pricePaise: number;
+  defaultQuantity: number;
+  pickupStart: string; // "20:30"
+  pickupEnd: string;
+  repeatDays: number[]; // 1 = Monday ... 7 = Sunday
+  photoKey: string | null;
+  archivedAt: string | null;
+};
+
+export type ListingInput = Omit<Listing, "id" | "outletId" | "archivedAt" | "photoKey"> & { photoKey?: string | null };
+
+export type VendorDrop = {
+  id: string;
+  listingId: string;
+  outletId: string;
+  serviceDate: string;
+  quantity: number;
+  reservedCount: number;
+  status: "live" | "paused" | "cancelled";
+  name: string;
+  pricePaise: number;
+  valuePaise: number;
+  pickupStartAt: string;
+  pickupEndAt: string;
+};
+
+export type Today = {
+  serviceDate: string;
+  drops: VendorDrop[];
+  totals: { drops: number; quantity: number; reserved: number; remaining: number };
+};
+
+export type VendorOrder = {
+  id: string;
+  number: string;
+  status: "paid" | "collected" | "no_show";
+  customerLabel: string;
+  dropName: string;
+  pricePaise: number;
+  pickupStartAt: string;
+  pickupEndAt: string;
+  collectedAt: string | null;
+};
+
+export type CancelReason = "ran_out" | "quality" | "closing_early";
+
+export type Payout = {
+  id: string;
+  periodStart: string;
+  periodEnd: string;
+  grossPaise: number;
+  commissionPaise: number;
+  feesPaise: number;
+  taxPaise: number;
+  adjustmentPaise: number;
+  netPaise: number;
+  status: "draft" | "held" | "released" | "paid";
+  paidAt: string | null;
+};
+
+export type Earnings = {
+  payouts: Payout[];
+  thisWeek: {
+    orders: number;
+    grossPaise: number;
+    commissionPaise: number;
+    feesPaise: number;
+    taxPaise: number;
+    adjustmentPaise: number;
+    netPaise: number;
+  };
+};
+
+// ---------- Admin ----------
+
+export type ReviewedDocument = {
+  id: string;
+  outletId: string | null;
+  payoutAccountId: string | null;
+  kind: DocumentKind;
+  status: "pending" | "approved" | "rejected" | "replaced";
+  rejectionReason: string | null;
+  createdAt: string;
+  url: string;
+};
+
+export type Application = {
+  outlet: VendorOutlet & { submittedAt: string | null; createdAt: string };
+  brand: { id: string; name: string };
+  payoutAccount: Omit<PayoutAccount, "brandId"> | null;
+  documents: ReviewedDocument[];
+  warnings: { code: string; message: string; outletIds: string[] }[];
+};
+
+export type OutletDecision = "approve" | "request_changes" | "suspend" | "reinstate" | "close";

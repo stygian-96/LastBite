@@ -2,7 +2,6 @@
 export const brand = {
   name: "Saanjh",
   wordmark: "saanjh",
-  orderPrefix: "SJ",
 };
 
 // Sample rate from the design, not final (spec section 12).

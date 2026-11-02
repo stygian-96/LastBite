@@ -1,27 +1,27 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, errorCode, type Me } from "@/lib/api";
+import { api, errorStatus, type Profile } from "@/lib/api";
 
 type Session = {
-  me: Me | null;
+  me: Profile | null;
   loading: boolean;
   refresh: () => Promise<void>;
-  setMe: (me: Me | null) => void;
+  setMe: (me: Profile | null) => void;
   signOut: () => Promise<void>;
 };
 
 const SessionContext = createContext<Session | null>(null);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
-  const [me, setMe] = useState<Me | null>(null);
+  const [me, setMe] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     try {
-      setMe(await api.getMe());
+      setMe(await api.getProfile());
     } catch (err) {
-      if (errorCode(err) === "unauthorized") setMe(null);
+      if (errorStatus(err) === 401) setMe(null);
     } finally {
       setLoading(false);
     }

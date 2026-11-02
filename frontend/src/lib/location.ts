@@ -1,13 +1,13 @@
 "use client";
 
 import { useCallback, useSyncExternalStore } from "react";
-import type { CityId } from "@/lib/api";
 import { readJson, writeJson } from "@/lib/storage";
 
-export type Place = { city: CityId; areaId: string | null };
+// The API filters by city slug and area name.
+export type Place = { city: string; area: string | null };
 
 const KEY = "lb_place";
-const DEFAULT: Place = { city: "bengaluru", areaId: null };
+const DEFAULT: Place = { city: "bengaluru", area: null };
 
 let cached: Place | null = null;
 const listeners = new Set<() => void>();

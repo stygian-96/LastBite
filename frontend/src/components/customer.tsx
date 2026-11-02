@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { api, type City, type Drop, type Order } from "@/lib/api";
-import { initials, orderNumber, rupees, timeRange } from "@/lib/format";
+import { initials, rupees, timeRange } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 import { usePlace } from "@/lib/location";
 import { useSession } from "@/lib/session";
@@ -20,10 +20,17 @@ export function useCities() {
   return useQuery(() => api.getCities(), []);
 }
 
-export function placeLabel(cities: City[] | undefined, city: string, areaId: string | null) {
-  const found = cities?.find((c) => c.id === city);
-  const area = found?.areas.find((a) => a.id === areaId);
-  return { city: found?.name ?? "", area: area?.name ?? null };
+export function cityName(cities: City[] | undefined, slug: string) {
+  return cities?.find((c) => c.slug === slug)?.name ?? "";
+}
+
+export function outletHref(outlet: { city?: string | null; brandSlug?: string; outletSlug?: string }) {
+  if (!outlet.brandSlug || !outlet.outletSlug) return null;
+  return `/${outlet.city ?? "outlet"}/${outlet.brandSlug}/${outlet.outletSlug}`;
+}
+
+export function bagKind(order: Pick<Order, "foodCategory">) {
+  return order.foodCategory ?? "bakery";
 }
 
 function HomeIcon({ on }: { on: boolean }) {
@@ -154,23 +161,19 @@ export function ActiveOrderStrip() {
   return (
     <Link
       href={`/orders/${order.id}`}
-      aria-label={`Show pickup code ${order.pickup_code}. Pickup ${timeRange(order.pickup_start_at, order.pickup_end_at)} at ${order.outlet.brand_name}`}
+      aria-label={`Show pickup code ${order.pickupCode}. Pickup ${timeRange(order.pickupStartAt, order.pickupEndAt)} at ${order.brandName}`}
       className="sticky bottom-[84px] z-10 mx-3 mb-2 flex min-h-[60px] items-center gap-3 rounded-[18px] bg-dark py-2 pl-2 pr-3.5 text-white no-underline lg:bottom-4 lg:mx-auto lg:w-[400px]"
     >
-      <span className="rounded-xl bg-coral px-2.5 py-2 text-[17px] font-bold tracking-[0.04em] text-on-coral">{order.pickup_code}</span>
+      <span className="rounded-xl bg-coral px-2.5 py-2 text-[17px] font-bold tracking-[0.04em] text-on-coral">{order.pickupCode}</span>
       <span className="flex min-w-0 flex-1 flex-col gap-px">
-        <span className="text-sm font-medium">Pick up {timeRange(order.pickup_start_at, order.pickup_end_at)}</span>
-        <span className="truncate text-xs text-dark-sub">{order.outlet.brand_name} · show code</span>
+        <span className="text-sm font-medium">Pick up {timeRange(order.pickupStartAt, order.pickupEndAt)}</span>
+        <span className="truncate text-xs text-dark-sub">{order.brandName} · show code</span>
       </span>
       <span aria-hidden="true" className="text-xl">
         ›
       </span>
     </Link>
   );
-}
-
-export function bagsLeft(drop: Pick<Drop, "quantity" | "reserved_count">) {
-  return Math.max(0, drop.quantity - drop.reserved_count);
 }
 
 export function leftText(left: number) {
@@ -209,30 +212,30 @@ export function Photo({
 }
 
 export function ListingCard({ drop }: { drop: Drop }) {
-  const left = bagsLeft(drop);
-  const kind = illoFor(drop.food_category, drop.outlet.category);
-  const window = timeRange(drop.pickup_start_at, drop.pickup_end_at);
+  const left = drop.remaining;
+  const kind = illoFor(drop.foodCategory);
+  const window = timeRange(drop.pickupStartAt, drop.pickupEndAt);
   return (
     <Link
       href={`/listing/${drop.id}`}
-      aria-label={`${drop.name}, ${drop.outlet.brand_name}, ${rupees(drop.price_paise)}, pickup ${window}`}
+      aria-label={`${drop.name}, ${drop.brandName}, ${rupees(drop.pricePaise)}, pickup ${window}`}
       className={`flex flex-col gap-1.5 rounded-[18px] bg-white px-3 pb-3 pt-2.5 no-underline shadow-card lg:gap-2 lg:rounded-[20px] lg:p-3 ${left === 0 ? "opacity-55" : ""}`}
     >
       <span className="relative block">
-        <Photo kind={kind} src={drop.photo_urls[0]} alt={drop.name} height="h-[104px] lg:h-[140px]" illo={96} />
+        <Photo kind={kind} src={drop.photoUrl ?? undefined} alt={drop.name} height="h-[104px] lg:h-[140px]" illo={96} />
         <span className="absolute left-1.5 top-1.5">
           <DietBadge diet={drop.diet} />
         </span>
       </span>
       <span className="truncate text-sm font-medium lg:text-base">{drop.name}</span>
       <span className="truncate text-xs text-muted lg:text-[13px]">
-        {drop.outlet.brand_name} · {drop.outlet.area_name}
+        {drop.brandName} · {drop.area ?? drop.branchName}
       </span>
       <span className="tabular text-xs lg:text-[13px]">Pickup {window}</span>
       <span className="flex items-center justify-between">
         <span className="tabular flex items-baseline gap-1.5">
-          <span className="text-lg font-medium lg:text-xl lg:font-bold">{rupees(drop.price_paise)}</span>
-          <s className="text-xs text-faint">{rupees(drop.value_paise)}</s>
+          <span className="text-lg font-medium lg:text-xl lg:font-bold">{rupees(drop.pricePaise)}</span>
+          <s className="text-xs text-faint">{rupees(drop.valuePaise)}</s>
         </span>
         <span className={`tabular text-xs font-medium ${left <= 2 ? "text-danger" : "text-ink"}`}>{leftText(left)}</span>
       </span>
@@ -274,26 +277,26 @@ export function AreaPicker({ onClose }: { onClose: () => void }) {
   const cities = useCities();
   const [place, setPlace] = usePlace();
   const [city, setCity] = useState(place.city);
-  const areas = cities.data?.find((c) => c.id === city)?.areas ?? [];
-  const pick = (areaId: string | null) => {
-    setPlace({ city, areaId });
+  const areas = cities.data?.find((c) => c.slug === city)?.areas ?? [];
+  const pick = (area: string | null) => {
+    setPlace({ city, area });
     onClose();
   };
   const row = "flex min-h-[52px] items-center justify-between border-b border-[#f0f0f0] px-1 text-left text-[15px]";
   return (
     <Sheet title="Where do you want to pick up?" onClose={onClose}>
       {cities.data && (
-        <Tabs value={city} onChange={setCity} options={cities.data.map((c) => ({ id: c.id, label: c.name }))} />
+        <Tabs value={city} onChange={setCity} options={cities.data.map((c) => ({ id: c.slug, label: c.name }))} />
       )}
       <div className="flex flex-col">
         <button type="button" className={row} onClick={() => pick(null)}>
           All areas
-          {place.city === city && !place.areaId && <Tick />}
+          {place.city === city && !place.area && <Tick />}
         </button>
         {areas.map((area) => (
-          <button key={area.id} type="button" className={row} onClick={() => pick(area.id)}>
+          <button key={area.id} type="button" className={row} onClick={() => pick(area.name)}>
             {area.name}
-            {place.city === city && place.areaId === area.id && <Tick />}
+            {place.city === city && place.area === area.name && <Tick />}
           </button>
         ))}
       </div>
@@ -307,8 +310,4 @@ function Tick() {
       <path d="M5 12.5l4.5 4.5L19 7" />
     </svg>
   );
-}
-
-export function orderRef(order: Pick<Order, "number">) {
-  return `#${orderNumber(order.number)}`;
 }

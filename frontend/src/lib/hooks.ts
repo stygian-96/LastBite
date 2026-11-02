@@ -37,12 +37,13 @@ export function useQuery<T>(fn: () => Promise<T>, deps: readonly unknown[], opti
   const depsKey = JSON.stringify(deps);
   useEffect(() => {
     if (!enabled) return;
+    const calls = callId;
     const first = setTimeout(run, 0);
     const poll = pollMs ? setInterval(run, pollMs) : undefined;
     return () => {
       clearTimeout(first);
       if (poll) clearInterval(poll);
-      callId.current++;
+      calls.current++;
     };
   }, [depsKey, enabled, pollMs, run]);
 

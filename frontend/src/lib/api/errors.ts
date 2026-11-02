@@ -1,28 +1,32 @@
-// Backend error shape: { error: { code, message } }.
-export type ErrorCode =
-  | "sold_out"
-  | "hold_expired"
-  | "already_ordered"
-  | "unauthorized"
-  | "invalid_otp"
-  | "rate_limited"
-  | "not_found"
-  | "network"
-  | (string & {});
+// Backend error shape: { error: { code, message, ...details } }.
+export type ErrorDetails = {
+  existingOrderId?: string;
+  collectedAt?: string;
+  fixes?: { code: string; message: string }[];
+};
 
 export class ApiError extends Error {
   constructor(
-    public code: ErrorCode,
+    public code: string,
     message: string,
     public status = 0,
+    public details: ErrorDetails = {},
   ) {
     super(message);
     this.name = "ApiError";
   }
 }
 
-export function errorCode(err: unknown): ErrorCode | null {
+export function errorCode(err: unknown): string | null {
   return err instanceof ApiError ? err.code : null;
+}
+
+export function errorStatus(err: unknown): number | null {
+  return err instanceof ApiError ? err.status : null;
+}
+
+export function errorDetails(err: unknown): ErrorDetails {
+  return err instanceof ApiError ? err.details : {};
 }
 
 export function errorMessage(err: unknown): string {
