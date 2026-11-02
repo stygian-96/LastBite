@@ -1,3 +1,4 @@
+import { devFakeProviders } from '../lib/env.js';
 import { razorpayFromEnv } from './razorpay.js';
 
 export type GatewayPayment = {
@@ -75,7 +76,7 @@ export interface PaymentGateway {
   verifyWebhook(raw: string, signature: string): boolean;
 }
 
-/** Keeps everything in memory. Used by tests. */
+/** Keeps everything in memory. Used by tests, and by local development that asks for it. */
 export class FakeGateway implements PaymentGateway {
   readonly keyId = 'rzp_test_fake';
   readonly orders: { id: string; amountPaise: number; receipt: string }[] = [];
@@ -234,11 +235,11 @@ export class FakeGateway implements PaymentGateway {
 
 let gateway: PaymentGateway | undefined;
 
-/** The real one in production and the fake in tests. The fake accepts any `valid` signature, so nothing else gets it. */
+/** The real one in production. The fake accepts any `valid` signature, so only tests and DEV_FAKE_PROVIDERS get it. */
 export function getGateway(): PaymentGateway {
   if (gateway) return gateway;
   if (process.env.NODE_ENV === 'production') gateway = razorpayFromEnv();
-  else if (process.env.NODE_ENV === 'test') gateway = new FakeGateway();
+  else if (process.env.NODE_ENV === 'test' || devFakeProviders()) gateway = new FakeGateway();
   else throw new Error('No payment gateway outside production and tests');
   return gateway;
 }

@@ -300,12 +300,15 @@ export async function queueFollowerAlert(tx: Tx, drop: NewDrop): Promise<void> {
   const followers = await followersOf(tx, drop.outletId);
   if (followers.length === 0) return;
   const info = await outletInfo(tx, drop.outletId);
-  const [slug] = await tx
-    .select({ brand: brands.slug, outlet: outlets.slug })
+  const [page] = await tx
+    .select({ city: areas.city, brand: brands.slug, outlet: outlets.slug })
     .from(outlets)
     .innerJoin(brands, eq(brands.id, outlets.brandId))
+    .innerJoin(areas, eq(areas.id, outlets.areaId))
     .where(eq(outlets.id, drop.outletId));
-  const link = `${origin()}/${slug!.brand}/${slug!.outlet}`;
+  // Only an outlet with no area, which cannot go live, has no page to link to.
+  if (!page) return;
+  const link = `${origin()}/${page.city}/${page.brand}-${page.outlet}`;
   const vars: Vars = {
     vendor: info.vendor,
     pickupStartAt: iso(drop.pickupStartAt),

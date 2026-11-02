@@ -49,6 +49,23 @@ describe('provider selection', () => {
     expect(m.storage.getStore()).toBeInstanceOf(m.storage.FakeStore);
   });
 
+  test('development with DEV_FAKE_PROVIDERS gets the fake gateway and store, and still the console messenger', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('DEV_FAKE_PROVIDERS', 'true');
+    const m = await load();
+    expect(m.payments.getGateway()).toBeInstanceOf(m.payments.FakeGateway);
+    expect(m.storage.getStore()).toBeInstanceOf(m.storage.FakeStore);
+    expect(m.messaging.getMessenger()).not.toBeInstanceOf(m.messaging.FakeMessenger);
+  });
+
+  test('DEV_FAKE_PROVIDERS means nothing with NODE_ENV unset', async () => {
+    vi.stubEnv('NODE_ENV', '');
+    vi.stubEnv('DEV_FAKE_PROVIDERS', 'true');
+    const m = await load();
+    expect(() => m.payments.getGateway()).toThrow('No payment gateway');
+    expect(() => m.storage.getStore()).toThrow('No file store');
+  });
+
   test.each(['development', ''])('NODE_ENV "%s" never gets a fake', async (nodeEnv) => {
     vi.stubEnv('NODE_ENV', nodeEnv);
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});

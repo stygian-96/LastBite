@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { asc, eq } from 'drizzle-orm';
 import { db, withTx } from '../../src/db/client.js';
-import { documents, drops, follows, listings, memberships, notifications, outlets, users } from '../../src/db/schema.js';
+import { areas, brands, documents, drops, follows, listings, memberships, notifications, outlets, users } from '../../src/db/schema.js';
 import { FakeMessenger, setMessenger, type OutboundMessage } from '../../src/integrations/messaging.js';
 import { FakeGateway, setGateway, type GatewayPayment } from '../../src/integrations/payments.js';
 import { env } from '../../src/lib/env.js';
@@ -509,6 +509,14 @@ describe('followers', () => {
       [`follow:${fan.id}:${outlet.id}:${TODAY}`, `follow:${other.id}:${outlet.id}:${TODAY}`].sort(),
     );
     expect(rows[0]).toMatchObject({ variables: { fromPaise: 10000 } });
+    const [place] = await db
+      .select({ city: areas.city, brand: brands.slug, outlet: outlets.slug })
+      .from(outlets)
+      .innerJoin(areas, eq(areas.id, outlets.areaId))
+      .innerJoin(brands, eq(brands.id, outlets.brandId))
+      .where(eq(outlets.id, outlet.id));
+    const link = `${env().FRONTEND_ORIGIN.replace(/\/$/, '')}/${place!.city}/${place!.brand}-${place!.outlet}`;
+    expect(rows[0]).toMatchObject({ variables: { link } });
 
     // The same listing again changes only its quantity.
     await publishDrop(null, a.id, 8, now);

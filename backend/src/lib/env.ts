@@ -17,6 +17,11 @@ const schema = z.object({
     .optional()
     .transform((v) => v === 'true'),
   CRON_SECRET: z.string().optional(),
+  // Local development with no keys: the fake gateway and store. Counts only with NODE_ENV=development.
+  DEV_FAKE_PROVIDERS: z
+    .string()
+    .optional()
+    .transform((v) => v === 'true'),
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
@@ -54,6 +59,7 @@ const REQUIRED_IN_PRODUCTION = [
 export function parseEnv(source: Record<string, string | undefined>): Env {
   const parsed = schema.parse(source);
   if (source.NODE_ENV === 'production') {
+    if (parsed.DEV_FAKE_PROVIDERS) throw new Error('DEV_FAKE_PROVIDERS must not be set in production');
     const missing = REQUIRED_IN_PRODUCTION.filter((name) => !parsed[name]);
     if (missing.length > 0) throw new Error(`Missing environment variables for production: ${missing.join(', ')}`);
   }
@@ -66,4 +72,9 @@ let cached: Env | undefined;
 export function env(): Env {
   cached ??= parseEnv(process.env);
   return cached;
+}
+
+/** Whether local development has asked for the fakes. Only NODE_ENV=development can. */
+export function devFakeProviders(): boolean {
+  return process.env.NODE_ENV === 'development' && env().DEV_FAKE_PROVIDERS;
 }

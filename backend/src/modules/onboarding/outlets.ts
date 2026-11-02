@@ -10,7 +10,7 @@ import { normalizePhone } from '../auth/otp.js';
 
 export type { Outlet };
 
-const CATEGORIES = ['bakery', 'cafe', 'restaurant', 'sweets', 'kitchen'] as const;
+export const CATEGORIES = ['bakery', 'cafe', 'restaurant', 'sweets', 'kitchen'] as const;
 const LAST_STEP = 5;
 const EDITABLE = ['draft', 'changes_needed'];
 const PHOTO_LIMIT = 8;

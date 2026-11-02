@@ -614,7 +614,7 @@ describe('deleteAccount', () => {
     const other = '+919111111111';
     const code = { codeHash: 'h', expiresAt: NOW.toISOString() };
     await db.insert(otpCodes).values([{ phone: user.phone, ...code }, { phone: other, ...code }]);
-    const message = { template: 'otp', variables: {}, channel: 'sms' };
+    const message = { template: 'otp', variables: { name: 'Asha' }, channel: 'sms' };
     await db.insert(notifications).values([
       { dedupeKey: 'sent', phone: user.phone, status: 'sent', ...message },
       { dedupeKey: `prompt:o1:${user.phone}:2026-11-02`, phone: user.phone, status: 'sent', ...message },
@@ -630,9 +630,10 @@ describe('deleteAccount', () => {
     const rows = await db.select().from(notifications);
     const mine = rows.filter((n) => n.dedupeKey !== 'other');
     expect(mine).toHaveLength(4);
-    for (const n of mine) expect(n.phone).toBe(`deleted:${user.id}`);
-    expect(JSON.stringify(rows)).not.toContain(user.phone);
-    expect(rows.find((n) => n.dedupeKey === 'other')!.phone).toBe(other);
+    for (const n of mine) expect(n).toMatchObject({ phone: `deleted:${user.id}`, variables: {} });
+    expect(JSON.stringify(mine)).not.toContain(user.phone);
+    expect(JSON.stringify(mine)).not.toContain('Asha');
+    expect(rows.find((n) => n.dedupeKey === 'other')).toMatchObject({ phone: other, variables: { name: 'Asha' } });
     expect(rows.some((n) => n.dedupeKey === `prompt:o1:deleted:${user.id}:2026-11-02`)).toBe(true);
   });
 

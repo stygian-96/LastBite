@@ -73,13 +73,17 @@ export async function cancelPendingFor(tx: Tx, phone: string): Promise<void> {
 }
 
 /**
- * Takes a phone off every message kept for it. Some dedupe keys carry the phone too. Call
- * cancelPendingFor first, so none of these is still going out.
+ * Takes a person off every message kept for their phone: the phone, the dedupe keys that carry it,
+ * and the variables, which hold their name. Call cancelPendingFor first, so none is still going out.
  */
 export async function scrubPhone(tx: Tx, phone: string, replacement: string): Promise<void> {
   await tx
     .update(notifications)
-    .set({ phone: replacement, dedupeKey: sql`replace(${notifications.dedupeKey}, ${phone}, ${replacement})` })
+    .set({
+      phone: replacement,
+      variables: {},
+      dedupeKey: sql`replace(${notifications.dedupeKey}, ${phone}, ${replacement})`,
+    })
     .where(eq(notifications.phone, phone));
 }
 

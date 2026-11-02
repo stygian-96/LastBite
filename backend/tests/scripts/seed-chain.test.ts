@@ -61,6 +61,20 @@ describe('seedChain', () => {
     expect(rows[0]!.submittedAt).not.toBeNull();
   });
 
+  test('a category column sets it per row, and an empty cell takes the argument', async () => {
+    const owner = await makeUser();
+    const csv = [`${HEADER},category`, `${line()},bakery`, `${line({ branch: 'Second' })},`].join('\n');
+    await seedChain(csv, owner.phone, NOW, 'cafe');
+    const rows = await db.select().from(outlets);
+    expect(rows.find((r) => r.branchName === 'Indiranagar')!.category).toBe('bakery');
+    expect(rows.find((r) => r.branchName === 'Second')!.category).toBe('cafe');
+  });
+
+  test('a category that does not exist is refused, with its line', async () => {
+    const owner = await makeUser();
+    await expect(seedChain([`${HEADER},category`, `${line()},pizza`].join('\n'), owner.phone, NOW)).rejects.toThrow('line 2');
+  });
+
   test('running the same file again changes nothing', async () => {
     const owner = await makeUser();
     const csv = [HEADER, line()].join('\n');

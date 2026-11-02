@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { pool, withTx, type Tx } from '../src/db/client.js';
 import { areas, brands, memberships, outlets, payoutAccounts, users } from '../src/db/schema.js';
 import { audit } from '../src/lib/audit.js';
-import { firstFree, slugify } from '../src/modules/onboarding/outlets.js';
+import { CATEGORIES, firstFree, slugify } from '../src/modules/onboarding/outlets.js';
 
 const COLUMNS = [
   'brand',
@@ -34,6 +34,7 @@ const rowSchema = z.object({
   fssai_expires_on: z.iso.date(),
   gstin: z.string().trim().toUpperCase().regex(/^[0-9A-Z]{15}$/),
   payout_account_id: z.union([z.literal(''), z.uuid()]),
+  category: z.union([z.literal(''), z.enum(CATEGORIES)]).optional(),
 });
 type Row = z.output<typeof rowSchema>;
 
@@ -100,7 +101,7 @@ async function brandFor(tx: Tx, ownerId: string, name: string): Promise<string> 
 }
 
 /** Adds one outlet, unless the brand already has this branch. Returns whether it did. */
-async function seedRow(tx: Tx, ownerId: string, row: Row, category: string, nowIso: string): Promise<boolean> {
+async function seedRow(tx: Tx, ownerId: string, row: Row, fallbackCategory: string, nowIso: string): Promise<boolean> {
   const [area] = await tx
     .select({ id: areas.id })
     .from(areas)
@@ -128,7 +129,7 @@ async function seedRow(tx: Tx, ownerId: string, row: Row, category: string, nowI
       payoutAccountId: accountId,
       branchName: row.branch,
       slug: firstFree(slugify(row.branch, 'outlet'), siblings.map((s) => s.slug)),
-      category,
+      category: row.category || fallbackCategory,
       address: row.address,
       pincode: row.pincode,
       mapsUrl: row.maps_url,
@@ -145,8 +146,8 @@ async function seedRow(tx: Tx, ownerId: string, row: Row, category: string, nowI
 
 /**
  * Creates a chain's outlets in review, under an owner who has signed up. All or nothing, and safe to
- * run again: a branch the brand already has is left as it is. The file has no category column, so one
- * applies to the whole file.
+ * run again: a branch the brand already has is left as it is. A row with no category takes the one
+ * given here.
  */
 export async function seedChain(
   csv: string,
@@ -182,7 +183,7 @@ export async function seedChain(
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [file, ownerPhone, category] = process.argv.slice(2);
-  if (!file || !ownerPhone) throw new Error('Usage: seed-chain.ts <file.csv> <owner phone, +91...> [category]');
+  if (!file || !ownerPhone) throw new Error('Usage: seed-chain.ts <file.csv> <owner phone, +91...> [default category]');
   try {
     const { created, skipped } = await seedChain(await readFile(file, 'utf8'), ownerPhone, new Date(), category);
     console.log(`Outlets created: ${created}, already there: ${skipped}`);

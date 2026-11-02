@@ -34,6 +34,16 @@ describe('parseEnv', () => {
     );
   });
 
+  test('production refuses DEV_FAKE_PROVIDERS', () => {
+    expect(() => parseEnv({ ...PRODUCTION, DEV_FAKE_PROVIDERS: 'true' })).toThrow('DEV_FAKE_PROVIDERS');
+  });
+
+  test('DEV_FAKE_PROVIDERS is on only for the word true', () => {
+    expect(parseEnv({ ...BASE, DEV_FAKE_PROVIDERS: 'true' }).DEV_FAKE_PROVIDERS).toBe(true);
+    expect(parseEnv({ ...BASE, DEV_FAKE_PROVIDERS: '1' }).DEV_FAKE_PROVIDERS).toBe(false);
+    expect(parseEnv(BASE).DEV_FAKE_PROVIDERS).toBe(false);
+  });
+
   test('outside production they may all be absent', () => {
     expect(parseEnv(BASE).RAZORPAY_KEY_ID).toBeUndefined();
   });

@@ -1,3 +1,4 @@
+import { devFakeProviders } from '../lib/env.js';
 import { s3FromEnv } from './s3.js';
 
 export type Bucket = 'public' | 'private';
@@ -16,7 +17,7 @@ export interface ObjectStore {
 
 export type RecordedUpload = { key: string; contentType: string; bucket: Bucket; sizeBytes: number };
 
-/** Records upload requests and returns made-up links. Used by tests. */
+/** Records upload requests and returns made-up links. Used by tests, and by local development that asks for it. */
 export class FakeStore implements ObjectStore {
   readonly uploads: RecordedUpload[] = [];
 
@@ -36,11 +37,11 @@ export class FakeStore implements ObjectStore {
 
 let store: ObjectStore | undefined;
 
-/** The real one in production and the fake in tests. Nothing else gets a fake. */
+/** The real one in production. Only tests and DEV_FAKE_PROVIDERS get the fake. */
 export function getStore(): ObjectStore {
   if (store) return store;
   if (process.env.NODE_ENV === 'production') store = s3FromEnv();
-  else if (process.env.NODE_ENV === 'test') store = new FakeStore();
+  else if (process.env.NODE_ENV === 'test' || devFakeProviders()) store = new FakeStore();
   else throw new Error('No file store outside production and tests');
   return store;
 }

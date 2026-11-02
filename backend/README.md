@@ -7,7 +7,7 @@ The API for LastBite: a Hono server on Node, with Postgres through Drizzle. All 
 You need Node 24 and Docker.
 
 ```bash
-cp .env.example .env        # then fill in ENCRYPTION_KEY and SESSION_SECRET
+cp .env.example .env        # then fill in ENCRYPTION_KEY, SESSION_SECRET and CRON_SECRET
 docker compose up -d        # Postgres on port 5433, with a dev and a test database
 npm install
 npm run db:migrate
@@ -25,11 +25,27 @@ Scripts do not load `.env` on their own. The npm scripts pass `--env-file=.env`.
 |---|---|---|---|
 | `production` | Razorpay | `MESSAGING_API_URL` provider | S3 |
 | `test` | Fake | Fake | Fake |
+| `development` with `DEV_FAKE_PROVIDERS=true` | Fake | Logged to the console, including OTPs | Fake |
 | anything else, or unset | None: calls fail | Logged to the console, including OTPs | None: calls fail |
 
-Fakes never run outside tests. Sign-in works in local development, as the OTP is in the console. Paying and uploading do not, as there is no gateway or file store.
+Always set `NODE_ENV=production` on a server. `npm start` does not set it. Production refuses to start with `DEV_FAKE_PROVIDERS` on, and the flag means nothing unless `NODE_ENV` is exactly `development`.
 
-Always set `NODE_ENV=production` on a server. `npm start` does not set it.
+### Local development
+
+`.env.example` sets `NODE_ENV=development` and `DEV_FAKE_PROVIDERS=true`, so the whole flow runs with no keys:
+
+- **Sign in:** the OTP is in the server's console.
+- **Pay:** start the payment as usual, which makes a fake Razorpay order. There is no checkout to finish, so finish it with the call below, which fakes a capture and runs it through the same `applyCapture` as the webhook. The order becomes paid and gets its pickup code. It answers `{ settled }`, 409 `payment_not_started` if the payment was not started, and a repeat changes nothing.
+
+```bash
+curl -X POST http://localhost:4000/api/v1/internal/dev/capture/ORDER_ID \
+  -H "x-cron-secret: $CRON_SECRET"
+```
+
+- **Upload:** an upload link comes back, and the key can be saved as usual, but its `fake-storage.test` address takes no file, so nothing is stored and no image shows.
+- **Jobs:** call the tick by hand, as under Cron. The fake gateway lives in memory, so after a server restart it no longer knows earlier refunds or transfers, and jobs asking about them log errors.
+
+The capture route is mounted only in `development` with the flag on. Anywhere else it is a 404.
 
 ## Tests
 
@@ -56,7 +72,8 @@ npx tsc --noEmit && npm run lint           # types and lint
 | `SESSION_SECRET` | Always | At least 16 characters |
 | `PORT` | No, default 4000 | Port to listen on |
 | `TRUST_PROXY` | No, default off | `true` only behind a proxy that sets `x-forwarded-for` |
-| `CRON_SECRET` | Production | Protects the tick route |
+| `DEV_FAKE_PROVIDERS` | No, default off | `true` runs the fakes in local development. Refused in production |
+| `CRON_SECRET` | Production | Protects the tick route, and the local dev capture route |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Production | API keys |
 | `RAZORPAY_WEBHOOK_SECRET` | Production | Checks webhook signatures |
 | `RAZORPAY_LINKED_EMAIL_DOMAIN` | Production | Domain for the unique email each linked account needs |
@@ -118,4 +135,4 @@ To add a chain's branches in one go, sign the owner up first, then:
 npm run db:seed-chain -- chain.csv +919876543210 restaurant
 ```
 
-The arguments are the file, the owner's phone, and the category for the whole file (`restaurant` if left out). The columns are `brand,branch,area,city,address,pincode,maps_url,fssai_number,fssai_expires_on,gstin,payout_account_id`. `payout_account_id` may be empty. Outlets start in review. The file goes in whole or not at all, and running it again skips branches the brand already has.
+The arguments are the file, the owner's phone, and the category for any row without one (`restaurant` if left out). The columns are `brand,branch,area,city,address,pincode,maps_url,fssai_number,fssai_expires_on,gstin,payout_account_id`, plus `category` if you want one per row. `payout_account_id` and `category` may be empty. Outlets start in review. The file goes in whole or not at all, and running it again skips branches the brand already has.
