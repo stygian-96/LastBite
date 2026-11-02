@@ -1,10 +1,11 @@
-import { and, eq, inArray, or } from 'drizzle-orm';
+import { and, eq, inArray, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { withTx, type Tx } from '../../db/client.js';
+import { db, withTx, type Tx } from '../../db/client.js';
 import { orders, payments, payoutAccounts, payouts, refunds } from '../../db/schema.js';
 import { getGateway } from '../../integrations/payments.js';
 import { audit } from '../../lib/audit.js';
-import { ApiError } from '../../lib/errors.js';
+import { ApiError, parseInput } from '../../lib/errors.js';
+import { absorbNegativePayouts, carriedBalance, negativePayouts } from './balance.js';
 import { netOf, sumOrders, type Payout } from './build.js';
 import { refundIsUnsent } from './transfers.js';
 
@@ -12,6 +13,7 @@ const invalidState = () => new ApiError('invalid_state', 409, 'That change is no
 const notFound = (what: string) => new ApiError('not_found', 404, `${what} not found`);
 const incomplete = () => new ApiError('release_incomplete', 502, 'Some transfers were not released. Try again');
 const isId = (id: string) => z.uuid().safeParse(id).success;
+const holdReason = z.string().trim().min(1).max(500);
 
 /** The account is locked first, as buildPayouts and verifyPayoutAccount do, and then the payout. */
 async function lockPayout(tx: Tx, payoutId: string): Promise<Payout> {
@@ -27,7 +29,8 @@ async function lockPayout(tx: Tx, payoutId: string): Promise<Payout> {
 
 /**
  * Transfers still on hold for this payout. A payout carried here while negative counted its orders
- * in its balance, and that balance is in this payout's net, so their transfers go now too.
+ * in its balance, and that balance is in this payout's net, so their transfers go now too. Largest
+ * first by the amount sent, which never changes, so a retry works in the first run's order.
  */
 function heldTransfers(tx: Tx, payout: Payout) {
   return tx
@@ -47,6 +50,9 @@ function heldTransfers(tx: Tx, payout: Payout) {
         or(eq(payouts.id, payout.id), eq(payouts.status, 'released')),
         eq(payments.transferStatus, 'on_hold'),
       ),
+    )
+    .then((rows) =>
+      rows.sort((a, b) => b.transferPaise! - a.transferPaise! || a.paymentId.localeCompare(b.paymentId)),
     );
 }
 
@@ -55,9 +61,10 @@ type Held = Awaited<ReturnType<typeof heldTransfers>>[number];
 const remainingPaise = (row: Held) => row.transferPaise! - row.reversedPaise;
 
 /**
- * Checks the payout can go, brings it into line with any reversal since the build, and lists what
- * to release against the net. A payout left negative cannot be paid: it goes back to held, to carry
- * forward, and returns nothing.
+ * Checks the payout can go, brings it into line with the money as it stands, and lists what to
+ * release against the net. A negative payout still waiting is taken in here, as the balance counts
+ * it. A payout left negative cannot be paid: it goes back to held, to carry forward, and returns
+ * nothing.
  */
 function startApproval(adminId: string, payoutId: string) {
   return withTx(async (tx) => {
@@ -70,6 +77,16 @@ function startApproval(adminId: string, payoutId: string) {
       throw new ApiError('account_on_hold', 409, 'This payout account is on hold until its bank details are verified');
     }
     if (payout.status !== 'draft') throw invalidState();
+
+    const waiting = await tx
+      .select({ id: payouts.id })
+      .from(payouts)
+      .where(and(negativePayouts(payout.payoutAccountId), ne(payouts.id, payoutId)))
+      .for('update');
+    await absorbNegativePayouts(
+      tx,
+      waiting.map((p) => p.id),
+    );
 
     const held = await heldTransfers(tx, payout);
     if (held.length > 0) {
@@ -90,7 +107,7 @@ function startApproval(adminId: string, payoutId: string) {
       if (reversing) throw new ApiError('refund_pending', 409, 'A refund is reversing a transfer on this payout. Try again shortly');
     }
 
-    const netPaise = await removeReversedOrders(tx, adminId, payout);
+    const netPaise = await reconcilePayout(tx, adminId, payout);
     if (netPaise < 0) {
       await tx.update(payouts).set({ status: 'held' }).where(eq(payouts.id, payoutId));
       await audit(tx, { actorId: adminId, action: 'payout.held', entity: 'payout', entityId: payoutId, detail: { netPaise } });
@@ -115,17 +132,15 @@ function recordReversal(row: Held, amountPaise: number): Promise<void> {
  * Whole transfers can only be released, so what they hold beyond the net, which is what the negative
  * adjustment comes to, is reversed first, largest transfer first. Only reversed_paise counts, so a
  * retry finds nothing left to do. A retry after a lost answer plans the same reversal on the same
- * key: the order is fixed, and each transfer is reversed at most once for a payout.
+ * key: the order is fixed, and each transfer is reversed at most once for a payout. The list comes
+ * back in the order it went in.
  */
 async function settleAdjustment(payoutId: string, held: Held[], netPaise: number): Promise<Held[]> {
   let owedPaise = held.reduce((sum, row) => sum + remainingPaise(row), 0) - netPaise;
   if (owedPaise <= 0) return held;
 
-  const largestFirst = [...held].sort(
-    (a, b) => remainingPaise(b) - remainingPaise(a) || a.paymentId.localeCompare(b.paymentId),
-  );
   const settled: Held[] = [];
-  for (const row of largestFirst) {
+  for (const row of held) {
     const amountPaise = Math.min(owedPaise, remainingPaise(row));
     if (amountPaise === 0) {
       settled.push(row);
@@ -150,12 +165,12 @@ async function settleAdjustment(payoutId: string, held: Held[], netPaise: number
  * that cannot happen: unsent, it stops reversing and comes off the next payout as an adjustment.
  * Sent, it is flagged for an admin.
  */
-function markReleased(row: { paymentId: string; orderId: string }, razorpayTransferId: string): Promise<void> {
+function markReleased(payoutId: string, row: { paymentId: string; orderId: string }, razorpayTransferId: string): Promise<void> {
   return withTx(async (tx) => {
     await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, row.orderId)).for('update');
     const [marked] = await tx
       .update(payments)
-      .set({ transferStatus: 'released' })
+      .set({ transferStatus: 'released', releasedPayoutId: payoutId })
       .where(and(eq(payments.id, row.paymentId), eq(payments.transferStatus, 'on_hold')))
       .returning({ id: payments.id });
     if (!marked) return;
@@ -182,10 +197,11 @@ function markReleased(row: { paymentId: string; orderId: string }, razorpayTrans
 }
 
 /**
- * Takes orders whose transfer was reversed since the build off the payout, as the vendor is not
- * getting that money, and brings its totals back into line. Returns the net.
+ * Works the payout out afresh: orders whose transfer was reversed since the build come off it, as
+ * the vendor is not getting that money, and the balance carried in is worked out again, as a
+ * reversal on an earlier payout moves it. Returns the net.
  */
-async function removeReversedOrders(tx: Tx, adminId: string, payout: Payout): Promise<number> {
+async function reconcilePayout(tx: Tx, adminId: string, payout: Payout): Promise<number> {
   const rows = await tx
     .select({
       id: orders.id,
@@ -199,34 +215,54 @@ async function removeReversedOrders(tx: Tx, adminId: string, payout: Payout): Pr
     .innerJoin(payments, eq(payments.orderId, orders.id))
     .where(and(eq(orders.payoutId, payout.id), inArray(payments.transferStatus, ['released', 'on_hold', 'reversed'])));
   const removed = rows.filter((r) => r.transferStatus === 'reversed').map((r) => r.id);
-  if (removed.length === 0) return payout.netPaise;
-
-  await tx.update(orders).set({ payoutId: null }).where(inArray(orders.id, removed));
+  const [own] = await tx
+    .select({ paise: sql<number>`coalesce(sum(${refunds.amountPaise}), 0)::int` })
+    .from(refunds)
+    .where(eq(refunds.adjustedPayoutId, payout.id));
+  const adjustmentPaise = (await carriedBalance(tx, payout.payoutAccountId, payout.id)) - own!.paise;
   const totals = sumOrders(rows.filter((r) => r.transferStatus !== 'reversed'));
-  const netPaise = netOf(totals, payout.adjustmentPaise);
-  await tx.update(payouts).set({ ...totals, netPaise }).where(eq(payouts.id, payout.id));
+  const netPaise = netOf(totals, adjustmentPaise);
+  if (removed.length === 0 && adjustmentPaise === payout.adjustmentPaise) return netPaise;
+
+  if (removed.length > 0) await tx.update(orders).set({ payoutId: null }).where(inArray(orders.id, removed));
+  await tx.update(payouts).set({ ...totals, adjustmentPaise, netPaise }).where(eq(payouts.id, payout.id));
   await audit(tx, {
     actorId: adminId,
-    action: 'payout.orders_removed',
+    action: 'payout.reconciled',
     entity: 'payout',
     entityId: payout.id,
-    detail: { orders: removed, netPaise },
+    detail: { removedOrders: removed, adjustmentPaise, netPaise },
   });
   return netPaise;
 }
 
 /**
- * Ends the approval once every transfer has gone. If removing reversed orders turns the net
- * negative, the payout stays held and carries into the next build, as any negative one does.
+ * Ends the approval once every transfer has gone. If what landed meanwhile turns the net negative,
+ * the payout stays held and carries, as any negative one does. Money moved may then differ from the
+ * net: that is flagged, and the next payout's balance makes it good by itself.
  */
 function finishApproval(adminId: string, payoutId: string, now: Date): Promise<void> {
   return withTx(async (tx) => {
     const payout = await lockPayout(tx, payoutId);
     if (payout.status !== 'draft') return;
-    const netPaise = await removeReversedOrders(tx, adminId, payout);
+    const netPaise = await reconcilePayout(tx, adminId, payout);
     if ((await heldTransfers(tx, payout)).length > 0) throw incomplete();
     const status = netPaise < 0 ? 'held' : 'released';
     await tx.update(payouts).set({ status }).where(eq(payouts.id, payoutId));
+
+    const [moved] = await tx
+      .select({ paise: sql<number>`coalesce(sum(${payments.transferPaise} - ${payments.reversedPaise}), 0)::int` })
+      .from(payments)
+      .where(and(eq(payments.releasedPayoutId, payoutId), eq(payments.transferStatus, 'released')));
+    if (moved!.paise !== netPaise) {
+      await audit(tx, {
+        actorId: adminId,
+        action: 'payout.mismatch',
+        entity: 'payout',
+        entityId: payoutId,
+        detail: { movedPaise: moved!.paise, netPaise, differencePaise: moved!.paise - netPaise },
+      });
+    }
     await audit(tx, {
       actorId: adminId,
       action: 'payout.approve',
@@ -241,7 +277,8 @@ function finishApproval(adminId: string, payoutId: string, now: Date): Promise<v
  * Settles a draft payout's adjustment against its transfers, then releases them, all outside any
  * transaction, so what the vendor receives is the net exactly. A transfer reversed in full has
  * nothing to release. Each is marked as its call returns, and the payout moves only after all have
- * gone, so a failure leaves a draft and a retry picks up the rest.
+ * gone, so a failure leaves a draft and a retry picks up the rest. A transfer a refund reversed in
+ * the meantime is passed over.
  */
 export async function approvePayout(adminId: string, payoutId: string, now: Date): Promise<void> {
   if (!isId(payoutId)) throw notFound('Payout');
@@ -249,15 +286,43 @@ export async function approvePayout(adminId: string, payoutId: string, now: Date
   if (!started) throw new ApiError('payout_negative', 409, 'The transfers cannot cover this payout, so it stays held and carries forward');
 
   for (const row of await settleAdjustment(payoutId, started.held, started.netPaise)) {
+    const [current] = await db
+      .select({ transferStatus: payments.transferStatus })
+      .from(payments)
+      .where(eq(payments.id, row.paymentId));
+    if (current!.transferStatus !== 'on_hold') continue;
     try {
       if (remainingPaise(row) > 0) await getGateway().releaseTransfer(row.razorpayTransferId!);
     } catch (e) {
       console.error(`Could not release the transfer of payment ${row.paymentId}`, e);
       throw incomplete();
     }
-    await markReleased(row, row.razorpayTransferId!);
+    await markReleased(payoutId, row, row.razorpayTransferId!);
   }
   await finishApproval(adminId, payoutId, now);
+}
+
+/** Stops a draft going while an admin looks into it, such as a vendor who has gone dark. */
+export async function holdPayout(adminId: string, payoutId: string, rawReason: string, now: Date): Promise<void> {
+  if (!isId(payoutId)) throw notFound('Payout');
+  const reason = parseInput(holdReason, rawReason);
+  await withTx(async (tx) => {
+    const payout = await lockPayout(tx, payoutId);
+    if (payout.status !== 'draft') throw invalidState();
+    await tx.update(payouts).set({ status: 'held', holdReason: reason }).where(eq(payouts.id, payoutId));
+    await audit(tx, { actorId: adminId, action: 'payout.hold', entity: 'payout', entityId: payoutId, detail: { reason, at: now.toISOString() } });
+  });
+}
+
+/** Ends an admin's hold. A payout held for its account or a negative net is not theirs to end here. */
+export async function unholdPayout(adminId: string, payoutId: string, now: Date): Promise<void> {
+  if (!isId(payoutId)) throw notFound('Payout');
+  await withTx(async (tx) => {
+    const payout = await lockPayout(tx, payoutId);
+    if (payout.status !== 'held' || payout.holdReason === null) throw invalidState();
+    await tx.update(payouts).set({ status: 'draft', holdReason: null }).where(eq(payouts.id, payoutId));
+    await audit(tx, { actorId: adminId, action: 'payout.unhold', entity: 'payout', entityId: payoutId, detail: { at: now.toISOString() } });
+  });
 }
 
 /** Records that the money arrived. A carried negative payout is released too, but no money went. */
@@ -274,7 +339,8 @@ export async function markPayoutPaid(adminId: string, payoutId: string, now: Dat
 
 /**
  * An admin's decision on changed bank details. The linked account is cleared, so the job makes a new
- * one from them, and payouts held for the account can go. A negative one stays held to be carried.
+ * one from them, and payouts held for the account can go. A negative one stays held to be carried,
+ * and one an admin holds stays until they say.
  */
 export async function verifyPayoutAccount(adminId: string, accountId: string, now: Date): Promise<void> {
   if (!isId(accountId)) throw notFound('Payout account');
@@ -287,7 +353,7 @@ export async function verifyPayoutAccount(adminId: string, accountId: string, no
       .set({ status: 'verified', razorpayAccountId: null, linkedClaimedAt: null })
       .where(eq(payoutAccounts.id, accountId));
     const held = await tx.select().from(payouts).where(and(eq(payouts.payoutAccountId, accountId), eq(payouts.status, 'held'))).for('update');
-    const freed = held.filter((p) => p.netPaise >= 0).map((p) => p.id);
+    const freed = held.filter((p) => p.netPaise >= 0 && p.holdReason === null).map((p) => p.id);
     if (freed.length > 0) await tx.update(payouts).set({ status: 'draft' }).where(inArray(payouts.id, freed));
     await audit(tx, {
       actorId: adminId,

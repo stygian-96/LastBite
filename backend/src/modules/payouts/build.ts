@@ -4,6 +4,7 @@ import { orders, payments, payoutAccounts, payouts, refunds } from '../../db/sch
 import { audit } from '../../lib/audit.js';
 import { ApiError } from '../../lib/errors.js';
 import { addDays, isoWeekday } from '../../lib/time.js';
+import { absorbNegativePayouts, carriedBalance, negativePayouts } from './balance.js';
 
 export type Payout = typeof payouts.$inferSelect;
 
@@ -68,16 +69,8 @@ export const adjustableRefunds = (accountId?: string): SQL =>
     or(eq(payments.transferStatus, 'released'), lt(refunds.amountPaise, payments.amountPaise)),
   )!;
 
-const carriedPayouts = (periodStart: string, accountId?: string): SQL =>
-  and(
-    accountId ? eq(payouts.payoutAccountId, accountId) : undefined,
-    eq(payouts.status, 'held'),
-    lt(payouts.netPaise, 0),
-    lt(payouts.periodStart, periodStart),
-  )!;
-
 /** Accounts with anything to go on this period's payout. */
-async function accountsToBuild(periodStart: string, periodEnd: string): Promise<string[]> {
+async function accountsToBuild(periodEnd: string): Promise<string[]> {
   const [withOrders, withRefunds, withBalance] = await Promise.all([
     db
       .selectDistinct({ id: orders.payoutAccountId })
@@ -90,7 +83,7 @@ async function accountsToBuild(periodStart: string, periodEnd: string): Promise<
       .innerJoin(payments, eq(payments.id, refunds.paymentId))
       .innerJoin(orders, eq(orders.id, refunds.orderId))
       .where(adjustableRefunds()),
-    db.selectDistinct({ id: payouts.payoutAccountId }).from(payouts).where(carriedPayouts(periodStart)),
+    db.selectDistinct({ id: payouts.payoutAccountId }).from(payouts).where(negativePayouts()),
   ]);
   return [...new Set([...withOrders, ...withRefunds, ...withBalance].flatMap((r) => (r.id ? [r.id] : [])))];
 }
@@ -129,15 +122,14 @@ async function buildForAccount(tx: Tx, accountId: string, periodStart: string, p
     .where(adjustableRefunds(accountId))
     .for('update', { of: refunds });
   const carried = await tx
-    .select({ id: payouts.id, netPaise: payouts.netPaise })
+    .select({ id: payouts.id })
     .from(payouts)
-    .where(carriedPayouts(periodStart, accountId))
+    .where(negativePayouts(accountId))
     .for('update');
   if (rows.length + adjusted.length + carried.length === 0) return;
 
   const refundedPaise = adjusted.reduce((sum, r) => sum + r.amountPaise, 0);
-  const carriedPaise = carried.reduce((sum, p) => sum + p.netPaise, 0);
-  const adjustmentPaise = carriedPaise - refundedPaise;
+  const adjustmentPaise = (await carriedBalance(tx, accountId)) - refundedPaise;
   const totals = sumOrders(rows);
   const netPaise = netOf(totals, adjustmentPaise);
 
@@ -160,9 +152,7 @@ async function buildForAccount(tx: Tx, accountId: string, periodStart: string, p
   if (adjusted.length > 0) {
     await tx.update(refunds).set({ adjustedPayoutId: payoutId }).where(inArray(refunds.id, ids(adjusted)));
   }
-  if (carried.length > 0) {
-    await tx.update(payouts).set({ status: 'released', paidAt: null }).where(inArray(payouts.id, ids(carried)));
-  }
+  await absorbNegativePayouts(tx, ids(carried));
   await audit(tx, {
     actorId: null,
     action: 'payout.build',
@@ -181,7 +171,7 @@ export async function buildPayouts(periodStart: string, now: Date): Promise<Payo
     throw new ApiError('invalid_request', 400, 'A payout period starts on a Monday');
   }
   const periodEnd = addDays(periodStart, 6);
-  for (const accountId of await accountsToBuild(periodStart, periodEnd)) {
+  for (const accountId of await accountsToBuild(periodEnd)) {
     try {
       await withTx((tx) => buildForAccount(tx, accountId, periodStart, periodEnd, now));
     } catch (e) {

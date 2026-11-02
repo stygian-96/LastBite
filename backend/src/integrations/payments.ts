@@ -30,6 +30,8 @@ export type LinkedAccountInput = {
 
 export type GatewayRefund = { id: string; status: string };
 
+export type GatewayTransfer = { id: string; amountPaise: number; status: 'on_hold' | 'released' | 'reversed' };
+
 /** The gateway definitely said no. Anything else thrown by a refund call leaves the outcome unknown. */
 export class GatewayRefusedError extends Error {
   constructor(message: string) {
@@ -65,6 +67,8 @@ export interface PaymentGateway {
    * GatewayRefusedError if that is more than is left of the transfer.
    */
   reverseTransferPartial(transferId: string, amountPaise: number, idempotencyKey: string): Promise<{ id: string }>;
+  /** The transfers the gateway holds for a payment, each with what is left of it. */
+  listPaymentTransfers(paymentId: string): Promise<GatewayTransfer[]>;
   createLinkedAccount(a: LinkedAccountInput): Promise<{ id: string }>;
   verifyWebhook(raw: string, signature: string): boolean;
 }
@@ -203,6 +207,16 @@ export class FakeGateway implements PaymentGateway {
     const reversal = { id: `rvrsl_fake_${this.transferReversals.length + 1}`, transferId, amountPaise, idempotencyKey };
     this.transferReversals.push(reversal);
     return { id: reversal.id };
+  }
+
+  async listPaymentTransfers(paymentId: string): Promise<GatewayTransfer[]> {
+    return this.transfers
+      .filter((t) => t.paymentId === paymentId)
+      .map((t) => ({
+        id: t.id,
+        amountPaise: t.remainingPaise,
+        status: t.remainingPaise === 0 ? 'reversed' : t.released ? 'released' : 'on_hold',
+      }));
   }
 
   async createLinkedAccount(a: LinkedAccountInput): Promise<{ id: string }> {

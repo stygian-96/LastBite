@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNotNull, isNull, lt, not, notExists, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lt, not, notExists, notInArray, or, sql } from 'drizzle-orm';
 import { db, withTx, type Tx } from '../../db/client.js';
 import { areas, auditLog, memberships, orders, outlets, payments, payoutAccounts, refunds, users } from '../../db/schema.js';
 import { getGateway } from '../../integrations/payments.js';
@@ -330,9 +330,103 @@ async function sendTransfer(row: ClaimedTransfer): Promise<boolean> {
   return saveTransfer(row, id, feePaise, amountPaise);
 }
 
+type StaleClaim = { paymentId: string; orderId: string; razorpayPaymentId: string; claimedAt: string };
+
+/**
+ * Claims payments whose transfer claim ran out and whose bag is no longer the vendor's, as nothing
+ * else will look at them again. An account on hold only delays a transfer, so those keep their claim.
+ */
+function claimStaleTransfers(now: Date): Promise<StaleClaim[]> {
+  const claimedAt = now.toISOString();
+  return withTx(async (tx) => {
+    const rows = await tx
+      .select({ paymentId: payments.id, orderId: orders.id, razorpayPaymentId: payments.razorpayPaymentId })
+      .from(payments)
+      .innerJoin(orders, eq(orders.id, payments.orderId))
+      .where(
+        and(
+          eq(payments.status, 'captured'),
+          eq(payments.transferStatus, 'none'),
+          isNotNull(payments.razorpayPaymentId),
+          lt(payments.transferClaimedAt, staleBefore(now)),
+          or(notInArray(orders.status, TRANSFERABLE_STATUSES), vendorRefundCovers),
+        ),
+      )
+      .orderBy(asc(payments.createdAt))
+      .limit(BATCH_SIZE)
+      .for('update', { of: payments, skipLocked: true });
+    if (rows.length > 0) {
+      await tx
+        .update(payments)
+        .set({ transferClaimedAt: claimedAt })
+        .where(
+          inArray(
+            payments.id,
+            rows.map((r) => r.paymentId),
+          ),
+        );
+    }
+    return rows.map((r) => ({ ...r, razorpayPaymentId: r.razorpayPaymentId!, claimedAt }));
+  });
+}
+
+/** Saves what the sweep found. The refund path never saw this transfer, so an admin is told. */
+function recordOrphan(row: StaleClaim, transfer: { id: string; amountPaise: number }): Promise<void> {
+  return withTx(async (tx) => {
+    await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, row.orderId)).for('update');
+    await tx
+      .update(payments)
+      .set({
+        razorpayTransferId: transfer.id,
+        transferPaise: transfer.amountPaise,
+        reversedPaise: transfer.amountPaise,
+        transferStatus: 'reversed',
+        transferClaimedAt: null,
+      })
+      .where(and(eq(payments.id, row.paymentId), eq(payments.transferStatus, 'none')));
+    await audit(tx, {
+      actorId: null,
+      action: 'transfer.orphaned',
+      entity: 'payment',
+      entityId: row.paymentId,
+      detail: { orderId: row.orderId, razorpayTransferId: transfer.id, reversedPaise: transfer.amountPaise },
+    });
+  });
+}
+
+/**
+ * Settles one stale claim. The run behind it may have died after the gateway took the transfer, so
+ * the gateway says. Anything there is reversed in full, and with nothing there the claim just ends.
+ */
+async function sweepClaim(row: StaleClaim): Promise<void> {
+  const found = await getGateway().listPaymentTransfers(row.razorpayPaymentId);
+  const live = found.filter((t) => t.status !== 'reversed' && t.amountPaise > 0);
+  for (const transfer of live) {
+    await getGateway().reverseTransferPartial(transfer.id, transfer.amountPaise, `orphan-${row.paymentId}-${transfer.id}`);
+    await recordOrphan(row, transfer);
+  }
+  if (live.length > 0) return;
+  await db
+    .update(payments)
+    .set({ transferClaimedAt: null })
+    .where(and(eq(payments.id, row.paymentId), eq(payments.transferClaimedAt, row.claimedAt)));
+}
+
+async function sweepStaleTransfers(now: Date): Promise<void> {
+  for (const row of await claimStaleTransfers(now)) {
+    try {
+      await sweepClaim(row);
+    } catch (e) {
+      // The new claim runs out and the row goes again, and one bad row must not hold up the others.
+      console.error(`Could not sweep the transfer claim on payment ${row.paymentId}`, e);
+    }
+  }
+}
+
 /**
  * Creates held transfers for sold bags, at most 100 a run, with the gateway calls outside any
- * transaction. Returns how many it saved. Safe to run twice.
+ * transaction, then settles claims left behind on bags since cancelled or refunded. Returns how many
+ * it saved. Safe to run twice.
  */
 export async function createTransfers(now: Date): Promise<number> {
   let created = 0;
@@ -344,5 +438,6 @@ export async function createTransfers(now: Date): Promise<number> {
       console.error(`Could not create a transfer for payment ${row.paymentId}`, e);
     }
   }
+  await sweepStaleTransfers(now);
   return created;
 }

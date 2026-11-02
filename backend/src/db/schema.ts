@@ -407,6 +407,7 @@ export const payments = pgTable("payments", {
 	lastCheckedAt: timestamp("last_checked_at", { withTimezone: true, mode: 'string' }),
 	transferClaimedAt: timestamp("transfer_claimed_at", { withTimezone: true, mode: 'string' }),
 	reversedPaise: integer("reversed_paise").default(0).notNull(),
+	releasedPayoutId: uuid("released_payout_id"),
 }, (table) => [
 	index("payments_order_id_idx").using("btree", table.orderId.asc().nullsLast().op("uuid_ops")),
 	index("payments_to_transfer_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((status = 'captured'::text) AND (transfer_status = 'none'::text))`),
@@ -414,6 +415,11 @@ export const payments = pgTable("payments", {
 			columns: [table.orderId],
 			foreignColumns: [orders.id],
 			name: "payments_order_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.releasedPayoutId],
+			foreignColumns: [payouts.id],
+			name: "payments_released_payout_id_fkey"
 		}),
 	unique("payments_razorpay_order_id_key").on(table.razorpayOrderId),
 	unique("payments_razorpay_payment_id_key").on(table.razorpayPaymentId),
@@ -437,6 +443,7 @@ export const payouts = pgTable("payouts", {
 	paidAt: timestamp("paid_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	taxPaise: integer("tax_paise").default(0).notNull(),
+	holdReason: text("hold_reason"),
 }, (table) => [
 	foreignKey({
 			columns: [table.payoutAccountId],

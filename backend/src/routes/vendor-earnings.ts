@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { ApiError } from '../lib/errors.js';
 import { route } from '../lib/http.js';
-import { getEarnings, statementCsv } from '../modules/payouts/statements.js';
+import { downloadStatement, getEarnings } from '../modules/payouts/statements.js';
 
 export const vendorEarnings = new Hono()
   .get(
@@ -15,7 +15,7 @@ export const vendorEarnings = new Hono()
   .get(
     '/payouts/:id/statement',
     route({ auth: 'user' }, async ({ c, user, params }) => {
-      const csv = await statementCsv(user!.id, params.id!);
+      const csv = await downloadStatement(user!.id, params.id!);
       return c.body(csv, 200, {
         'content-type': 'text/csv; charset=utf-8',
         'content-disposition': `attachment; filename="statement-${params.id!}.csv"`,

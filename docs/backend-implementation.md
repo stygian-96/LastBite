@@ -515,6 +515,8 @@ ALTER TABLE payments ADD COLUMN transfer_claimed_at timestamptz;
 ALTER TABLE payout_accounts ADD COLUMN linked_claimed_at timestamptz;
 ALTER TABLE payments ADD COLUMN reversed_paise integer NOT NULL DEFAULT 0 CHECK (reversed_paise >= 0);
 ALTER TABLE orders ADD COLUMN payout_account_id uuid REFERENCES payout_accounts(id);
+ALTER TABLE payments ADD COLUMN released_payout_id uuid REFERENCES payouts(id);
+ALTER TABLE payouts ADD COLUMN hold_reason text;
 ```
 
 - `rate_limits` gives shared counters across serverless instances.
@@ -526,10 +528,12 @@ ALTER TABLE orders ADD COLUMN payout_account_id uuid REFERENCES payout_accounts(
 - `refunds.send_errors` counts sends with an unclear result, which keep their idempotency key.
 - `refunds.failed_razorpay_ids` remembers gateway IDs counted as failed, so a late report of one is not redelivered.
 - `refunds.last_checked_at` lets the refund job ask the gateway about the longest-unchecked sent refund first.
-- `refunds.reverse_transfer` is fixed at creation, so one idempotency key always carries one payload. It is true for a vendor-charged refund of the whole remainder of a payment while the transfer is on hold. A released transfer is deducted from the next payout instead.
+- `refunds.reverse_transfer` is set at creation and can change only while the refund is unsent, so one idempotency key always carries one payload. It is true for a vendor-charged refund of the whole remainder of a payment while the transfer is on hold. A released transfer is deducted from the next payout instead.
 - `payments.transfer_claimed_at` marks a transfer claimed by a run, so two runs cannot both send it. A claim that runs out goes again on the same idempotency key.
 - `payout_accounts.linked_claimed_at` does the same for creating a linked account, which has no idempotency key.
 - `payments.reversed_paise` is how much of a transfer was reversed to settle a payout's negative adjustment, so a retry never reverses twice.
+- `payments.released_payout_id` is the payout whose approval released the transfer, so an approval can tell what it moved, and a retry sees the same balance.
+- `payouts.hold_reason` says why an admin holds a payout. It is null on one held for its account or a negative net.
 - `orders.payout_account_id` is the account that sold the order. Payouts and transfers read it, so a franchise that changes hands leaves its unpaid orders with the old account.
 
 ## 6. State machines
@@ -649,6 +653,8 @@ Sales close Sunday night IST and payouts run on Tuesday, matching the agreement 
 ```text
 Vendor net = order price - commission - payment gateway fee - tax withheld
 Payout net = sum of vendor nets + adjustment from earlier refunds
+Adjustment = this payout's refunds + carried balance
+Carried balance = owed to date - money moved, recomputed from the money rather than earlier nets
 ```
 
 Commission is rounded to the nearest paisa per order. Vendors keep the money on no-shows, as the agreement states.
@@ -737,6 +743,8 @@ All routes are under `/api/v1` and return JSON. Errors use `{ "error": { "code":
 | POST | `/admin/users/:id/phone` | Change a verified user's phone |
 | GET | `/admin/payouts` | Weekly payouts |
 | POST | `/admin/payouts/:id/approve` | Release a payout |
+| POST | `/admin/payouts/:id/hold` | Hold a draft, with a reason |
+| POST | `/admin/payouts/:id/unhold` | End an admin's hold |
 | POST | `/admin/payouts/:id/mark-paid` | Record that the money arrived |
 | POST | `/admin/payout-accounts/:id/verify` | Verify changed bank details |
 
@@ -839,7 +847,7 @@ The browse and reserve queries check dates directly, so a late job can never sel
 | Refund before payout | Held transfer reversed, nothing else to do |
 | Refund after payout | `adjustment_paise` deducted from the next payout |
 | Adjustment bigger than next payout | Balance carries forward. Admin chases it if the outlet closes |
-| Vendor goes dark with pending payouts | Payout stays `held` until admin decides |
+| Vendor goes dark with pending payouts | Admin moves the draft to `held` with a reason. It stays held until admin decides |
 | Payout fails at the bank | Status stays unpaid and admin is alerted |
 
 ### Accounts and data

@@ -4,6 +4,7 @@ import { db } from '../../db/client.js';
 import { orders, outlets, payments, payoutAccounts, payouts, refunds } from '../../db/schema.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { requirePayoutAccount } from '../auth/access.js';
+import { carriedBalance } from './balance.js';
 import { adjustableRefunds, EARNED_STATUSES, netOf, noReversingRefund, sumOrders, type Payout, type Totals } from './build.js';
 import { isBagPayment, vendorRefundCovers } from './transfers.js';
 
@@ -41,7 +42,7 @@ export async function listPayouts(status?: string) {
 
 export type EarningsView = {
   payouts: Payout[];
-  /** Everything earned that no payout has taken yet, so what the next one will hold so far. */
+  /** Everything earned that no payout has taken yet, with any balance owed, so what the next one will hold so far. */
   thisWeek: Totals & { orders: number; adjustmentPaise: number; netPaise: number };
 };
 
@@ -49,7 +50,7 @@ export type EarningsView = {
 export async function getEarnings(userId: string, payoutAccountId: string): Promise<EarningsView> {
   await requirePayoutAccount(userId, payoutAccountId);
 
-  const [rows, open, refunded] = await Promise.all([
+  const [rows, open, refunded, carriedPaise] = await Promise.all([
     db.select().from(payouts).where(eq(payouts.payoutAccountId, payoutAccountId)).orderBy(desc(payouts.periodStart)),
     db
       .select({
@@ -77,10 +78,11 @@ export async function getEarnings(userId: string, payoutAccountId: string): Prom
       .innerJoin(payments, eq(payments.id, refunds.paymentId))
       .innerJoin(orders, eq(orders.id, refunds.orderId))
       .where(adjustableRefunds(payoutAccountId)),
+    carriedBalance(db, payoutAccountId),
   ]);
 
   const totals = sumOrders(open);
-  const adjustmentPaise = -refunded.reduce((sum, r) => sum + r.amountPaise, 0);
+  const adjustmentPaise = carriedPaise - refunded.reduce((sum, r) => sum + r.amountPaise, 0);
   return {
     payouts: rows,
     thisWeek: { orders: open.length, ...totals, adjustmentPaise, netPaise: netOf(totals, adjustmentPaise) },
@@ -109,10 +111,21 @@ function csvText(value: string): string {
 const csvRow = (r: Row) =>
   [csvText(r.order), r.date, csvText(r.outlet), ...[r.gross, r.commission, r.fee, r.tax, r.net].map(rupees)].join(',');
 
+/** A statement for the vendor to download: these exist once a payout has gone (spec 7.6). */
+export async function downloadStatement(userId: string, payoutId: string): Promise<string> {
+  const csv = await statementCsv(userId, payoutId);
+  const [payout] = await db.select({ status: payouts.status }).from(payouts).where(eq(payouts.id, payoutId));
+  if (payout!.status !== 'released' && payout!.status !== 'paid') {
+    throw new ApiError('statement_not_ready', 409, 'The statement is ready once this payout is released');
+  }
+  return csv;
+}
+
 /**
  * One payout's statement. Orders and refunds have a row each, and a balance carried from a negative
  * payout has one too, being whatever of the adjustment no refund explains. The last line adds the
- * rows up, so it can be checked against the payout.
+ * rows up, so it can be checked against the payout. A draft keeps an order reversed since the build
+ * until approval takes it off, so its rows still add up to the draft.
  */
 export async function statementCsv(userId: string, payoutId: string): Promise<string> {
   if (!z.uuid().safeParse(payoutId).success) throw new ApiError('forbidden', 403, 'Not allowed');
@@ -133,7 +146,7 @@ export async function statementCsv(userId: string, payoutId: string): Promise<st
     .from(orders)
     .innerJoin(outlets, eq(outlets.id, orders.outletId))
     .innerJoin(payments, eq(payments.orderId, orders.id))
-    .where(and(eq(orders.payoutId, payoutId), inArray(payments.transferStatus, ['on_hold', 'released'])))
+    .where(and(eq(orders.payoutId, payoutId), inArray(payments.transferStatus, ['on_hold', 'released', 'reversed'])))
     .orderBy(asc(orders.serviceDate), asc(orders.number));
   const deducted = await db
     .select({
