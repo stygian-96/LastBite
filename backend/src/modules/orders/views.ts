@@ -130,14 +130,13 @@ export async function getOrder(viewer: Viewer, orderId: string): Promise<OrderVi
 }
 
 /**
- * The signed-in user's orders, newest first. Active means held or paid with pickup not yet closed;
- * everything else, refunded orders included, is past.
+ * The signed-in user's orders, newest first: all of them, or only the active or the past. Active
+ * means held or paid with pickup not yet closed; everything else, refunded orders included, is past.
  */
-export async function listMyOrders(userId: string, status: 'active' | 'past', now: Date): Promise<OrderView[]> {
+export async function listMyOrders(userId: string, status: 'active' | 'past' | undefined, now: Date): Promise<OrderView[]> {
   const active = and(inArray(orders.status, ['held', 'paid']), gt(drops.pickupEndAt, now.toISOString()));
-  const rows = await selectOrders(and(eq(orders.userId, userId), status === 'active' ? active : not(active!))).orderBy(
-    desc(orders.createdAt),
-  );
+  const wanted = status === undefined ? undefined : status === 'active' ? active : not(active!);
+  const rows = await selectOrders(and(eq(orders.userId, userId), wanted)).orderBy(desc(orders.createdAt));
   return toViews(rows);
 }
 

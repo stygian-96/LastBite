@@ -127,6 +127,7 @@ export const outlets = pgTable("outlets", {
 	pauseReason: text("pause_reason"),
 	submittedAt: timestamp("submitted_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	changesReason: text("changes_reason"),
 }, (table) => [
 	index("outlets_area_id_idx").using("btree", table.areaId.asc().nullsLast().op("uuid_ops")).where(sql`(status = 'live'::text)`),
 	index("outlets_fssai_number_idx").using("btree", table.fssaiNumber.asc().nullsLast().op("text_ops")),

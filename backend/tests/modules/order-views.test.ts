@@ -189,6 +189,5 @@ describe('order routes', () => {
     expect(past.status).toBe(200);
     expect(((await past.json()) as { orders: { id: string }[] }).orders.map((o) => o.id)).toEqual([order.id]);
     expect((await app.request('/api/v1/me/orders?status=bogus', { headers })).status).toBe(400);
-    expect((await app.request('/api/v1/me/orders', { headers })).status).toBe(400);
   });
 });

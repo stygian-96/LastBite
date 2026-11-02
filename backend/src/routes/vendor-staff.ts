@@ -1,9 +1,13 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { route } from '../lib/http.js';
-import { addStaff, removeStaff } from '../modules/auth/access.js';
+import { addStaff, listStaff, removeStaff } from '../modules/auth/access.js';
 
 export const vendorStaff = new Hono()
+  .get(
+    '/outlets/:id/staff',
+    route({ auth: 'user' }, async ({ user, params }) => ({ staff: await listStaff(user!.id, params.id!) })),
+  )
   .post(
     '/outlets/:id/staff',
     route(

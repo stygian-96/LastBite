@@ -78,7 +78,6 @@ export async function staffOf(tx: Tx, list: OutletRef[], roles: ('owner' | 'mana
 
 type OrderContext = {
   orderId: string;
-  number: string;
   code: string | null;
   pricePaise: number;
   phone: string;
@@ -95,7 +94,6 @@ async function orderContext(tx: Tx, orderId: string): Promise<OrderContext | nul
   const [r] = await tx
     .select({
       orderId: orders.id,
-      number: orders.number,
       code: orders.pickupCode,
       pricePaise: orders.pricePaise,
       phone: users.phone,
@@ -113,7 +111,6 @@ async function orderContext(tx: Tx, orderId: string): Promise<OrderContext | nul
   const outlet = await outletInfo(tx, r.outletId);
   return {
     orderId: r.orderId,
-    number: String(r.number),
     code: r.code,
     pricePaise: r.pricePaise,
     phone: r.phone,
@@ -142,7 +139,7 @@ export async function queueOrderConfirmed(tx: Tx, orderId: string): Promise<void
         pickupStartAt: o.startAt,
         pickupEndAt: o.endAt,
         code: o.code ?? '',
-        link: `${origin()}/o/${o.number}`,
+        link: `${origin()}/o/${o.orderId}`,
       },
     },
   ]);

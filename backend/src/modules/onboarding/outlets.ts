@@ -308,6 +308,16 @@ async function loadOutlet(outletId: string): Promise<Outlet> {
   return o;
 }
 
+/**
+ * What an admin asked for, or else a nudge: a rejected file replaced since leaves nothing else to
+ * fix, and changes_needed must never show with no fixes. It does not count against a submission.
+ */
+function requestedChanges(o: Outlet, checks: Check[]): Fix[] {
+  if (o.status !== 'changes_needed') return [];
+  if (o.changesReason) return [{ code: 'changes_requested', message: o.changesReason }];
+  return checks.length > 0 ? [] : [{ code: 'changes_requested', message: 'Check your details, then submit again' }];
+}
+
 /** Where the outlet stands and what is still missing or was rejected. */
 export async function getOutletStatus(
   userId: string,
@@ -319,7 +329,7 @@ export async function getOutletStatus(
   return {
     status: o.status,
     steps: STEPS.map((key) => ({ key, done: !checks.some((c) => c.step === key) })),
-    fixes: checks.map(toFix),
+    fixes: [...requestedChanges(o, checks), ...checks.map(toFix)],
   };
 }
 
@@ -336,7 +346,7 @@ export async function submitOutlet(userId: string, outletId: string, now: Date):
   return withTx(async (tx) => {
     const [row] = await tx
       .update(outlets)
-      .set({ status: 'in_review', submittedAt: now.toISOString() })
+      .set({ status: 'in_review', submittedAt: now.toISOString(), changesReason: null })
       .where(and(eq(outlets.id, outletId), inArray(outlets.status, EDITABLE)))
       .returning();
     if (!row) throw notSubmittable();

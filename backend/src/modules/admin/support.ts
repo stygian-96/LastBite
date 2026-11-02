@@ -293,6 +293,17 @@ export async function retryRefund(adminId: string, refundId: string): Promise<vo
 
 // ---------- Accounts ----------
 
+/** Finds users by their exact number, for the admin routes that take a user ID. */
+export async function findUsers(rawPhone: string | undefined) {
+  if (!rawPhone) throw new ApiError('invalid_request', 400, 'Say which phone number');
+  const phone = normalizePhone(rawPhone);
+  if (!phone) throw new ApiError('invalid_phone', 400, 'Enter a valid mobile number');
+  return db
+    .select({ id: users.id, name: users.name, phone: users.phone, isAdmin: users.isAdmin, createdAt: users.createdAt })
+    .from(users)
+    .where(eq(users.phone, phone));
+}
+
 /**
  * Moves a user and their queued messages to a new number, and ends their sessions, so the old phone
  * is signed out. The audit row keeps only the last 4 digits, as it outlives an account deletion.

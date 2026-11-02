@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, isNull, ne, not } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { orders, outlets, payments, payoutAccounts, payouts, refunds } from '../../db/schema.js';
+import { brands, orders, outlets, payments, payoutAccounts, payouts, refunds } from '../../db/schema.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { requirePayoutAccount } from '../auth/access.js';
 import { carriedBalance } from './balance.js';
@@ -38,6 +38,33 @@ export async function listPayouts(status?: string) {
     .innerJoin(payoutAccounts, eq(payoutAccounts.id, payouts.payoutAccountId))
     .where(wanted ? eq(payouts.status, wanted) : undefined)
     .orderBy(desc(payouts.periodStart), asc(payouts.id))
+    .limit(LIST_LIMIT);
+}
+
+const accountStatusFilter = z.enum(['pending', 'verified', 'rejected', 'on_hold']).optional();
+
+/** The 100 newest payout accounts, for admin review. Encrypted columns never leave the server. */
+export async function listAdminPayoutAccounts(status?: string) {
+  const wanted = parseInput(accountStatusFilter, status);
+  return db
+    .select({
+      id: payoutAccounts.id,
+      brandId: payoutAccounts.brandId,
+      brandName: brands.name,
+      legalName: payoutAccounts.legalName,
+      panLast4: payoutAccounts.panLast4,
+      holderName: payoutAccounts.holderName,
+      accountLast4: payoutAccounts.accountLast4,
+      ifsc: payoutAccounts.ifsc,
+      status: payoutAccounts.status,
+      linkedAccountStep: payoutAccounts.linkedAccountStep,
+      linkedAccountFailures: payoutAccounts.linkedAccountFailures,
+      createdAt: payoutAccounts.createdAt,
+    })
+    .from(payoutAccounts)
+    .innerJoin(brands, eq(brands.id, payoutAccounts.brandId))
+    .where(wanted ? eq(payoutAccounts.status, wanted) : undefined)
+    .orderBy(desc(payoutAccounts.createdAt), asc(payoutAccounts.id))
     .limit(LIST_LIMIT);
 }
 

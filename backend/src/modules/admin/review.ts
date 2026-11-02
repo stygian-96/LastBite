@@ -293,6 +293,9 @@ export async function decideOutlet(
     const [o] = await tx.select().from(outlets).where(eq(outlets.id, outletId)).for('update');
     if (!o) throw notFound('Outlet');
     if (!move.from.includes(o.status)) throw invalidState();
+    if (input.decision === 'request_changes' && !input.reason) {
+      throw new ApiError('invalid_request', 400, 'Say what needs to change');
+    }
 
     let verified = false;
     if (input.decision === 'approve') {
@@ -314,7 +317,8 @@ export async function decideOutlet(
       }
     }
 
-    await tx.update(outlets).set({ status: move.to }).where(eq(outlets.id, outletId));
+    const asked = input.decision === 'request_changes' ? { changesReason: input.reason } : {};
+    await tx.update(outlets).set({ status: move.to, ...asked }).where(eq(outlets.id, outletId));
     if (input.decision === 'approve') await queueApplicationNotice(tx, outletId, 'application_approved', 'live');
     if (input.decision === 'request_changes') {
       await queueApplicationNotice(tx, outletId, 'changes_needed', now.toISOString(), input.reason);

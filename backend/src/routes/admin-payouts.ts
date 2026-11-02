@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { route } from '../lib/http.js';
 import { approvePayout, holdPayout, markPayoutPaid, unholdPayout, verifyPayoutAccount } from '../modules/payouts/approve.js';
-import { listPayouts } from '../modules/payouts/statements.js';
+import { listAdminPayoutAccounts, listPayouts } from '../modules/payouts/statements.js';
 
 export const adminPayouts = new Hono()
   .get(
@@ -36,6 +36,10 @@ export const adminPayouts = new Hono()
       await markPayoutPaid(user!.id, params.id!, now);
       return { ok: true };
     }),
+  )
+  .get(
+    '/payout-accounts',
+    route({ auth: 'admin' }, async ({ c }) => ({ payoutAccounts: await listAdminPayoutAccounts(c.req.query('status')) })),
   )
   .post(
     '/payout-accounts/:id/verify',

@@ -1,11 +1,12 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getStore } from '../integrations/storage.js';
+import { ApiError } from '../lib/errors.js';
 import { route } from '../lib/http.js';
 import { uploadFile, uploadKey } from '../lib/uploads.js';
 import { addDocument } from '../modules/onboarding/documents.js';
 import { getOutletStatus, saveOutletStep, startOutlet, submitOutlet } from '../modules/onboarding/outlets.js';
-import { createPayoutAccount, signAgreement, updatePayoutAccount, type PayoutAccount } from '../modules/onboarding/payout-accounts.js';
+import { createPayoutAccount, listPayoutAccounts, signAgreement, updatePayoutAccount, type PayoutAccount } from '../modules/onboarding/payout-accounts.js';
 
 const FOLDERS = { photo: 'photos', logo: 'logos', document: 'documents' } as const;
 
@@ -73,6 +74,14 @@ export const vendorOnboarding = new Hono()
       },
       async ({ user, params, body }) => ({ document: await addDocument(user!.id, { outletId: params.id!, ...body }) }),
     ),
+  )
+  .get(
+    '/payout-accounts',
+    route({ auth: 'user' }, async ({ c, user }) => {
+      const brandId = c.req.query('brand_id');
+      if (!brandId) throw new ApiError('invalid_request', 400, 'Say which brand');
+      return { payoutAccounts: (await listPayoutAccounts(user!.id, brandId)).map(publicPayoutAccount) };
+    }),
   )
   .post(
     '/payout-accounts',

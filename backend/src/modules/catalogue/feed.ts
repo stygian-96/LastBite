@@ -19,8 +19,13 @@ export type DropCard = {
   remaining: number;
   pickupStartAt: string;
   pickupEndAt: string;
+  salesEndAt: string;
+  outletId: string;
   brandName: string;
+  brandSlug: string;
   branchName: string;
+  outletSlug: string;
+  city: string | null;
   area: string | null;
   /** Null when the listing has no photo, so the frontend shows its illustration. */
   photoUrl: string | null;
@@ -39,6 +44,7 @@ export type DropDetail = DropCard & {
 };
 
 export type OutletPage = {
+  outletId: string;
   brandName: string;
   brandSlug: string;
   branchName: string;
@@ -100,8 +106,13 @@ const cardColumns = {
   reservedCount: drops.reservedCount,
   pickupStartAt: drops.pickupStartAt,
   pickupEndAt: drops.pickupEndAt,
+  salesEndAt: drops.salesEndAt,
+  outletId: outlets.id,
   brandName: brands.name,
+  brandSlug: brands.slug,
   branchName: outlets.branchName,
+  outletSlug: outlets.slug,
+  city: areas.city,
   area: areas.name,
   photoKey: drops.photoKey,
   foodCategory: drops.foodCategory,
@@ -118,8 +129,13 @@ type CardRow = {
   reservedCount: number;
   pickupStartAt: string;
   pickupEndAt: string;
+  salesEndAt: string;
+  outletId: string;
   brandName: string;
+  brandSlug: string;
   branchName: string;
+  outletSlug: string;
+  city: string | null;
   area: string | null;
   photoKey: string | null;
   foodCategory: string;
@@ -136,8 +152,13 @@ function toCard(r: CardRow): DropCard {
     remaining: Math.max(0, r.quantity - r.reservedCount),
     pickupStartAt: iso(r.pickupStartAt),
     pickupEndAt: iso(r.pickupEndAt),
+    salesEndAt: iso(r.salesEndAt),
+    outletId: r.outletId,
     brandName: r.brandName,
+    brandSlug: r.brandSlug,
     branchName: r.branchName,
+    outletSlug: r.outletSlug,
+    city: r.city,
     area: r.area,
     photoUrl: photo(r.photoKey),
     foodCategory: r.foodCategory,
@@ -226,7 +247,6 @@ export async function getDrop(id: string, now: Date): Promise<DropDetail> {
   const [row] = await db
     .select({
       ...cardColumns,
-      outletId: outlets.id,
       description: drops.description,
       allergens: drops.allergens,
       pickupInstructions: outlets.pickupInstructions,
@@ -296,6 +316,7 @@ export async function getOutletPage(brandSlug: string, outletSlug: string, now: 
         .orderBy(...feedOrder);
 
   return {
+    outletId: o.id,
     brandName: o.brandName,
     brandSlug: o.brandSlug,
     branchName: o.branchName,

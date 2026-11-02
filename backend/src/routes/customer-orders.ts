@@ -67,7 +67,9 @@ export const customerOrders = new Hono()
     '/me/orders',
     route({ auth: 'user' }, async ({ c, user, now }) => {
       const status = c.req.query('status');
-      if (status !== 'active' && status !== 'past') throw new ApiError('invalid_request', 400, 'Invalid value for status');
+      if (status !== undefined && status !== 'active' && status !== 'past') {
+        throw new ApiError('invalid_request', 400, 'Invalid value for status');
+      }
       return { orders: await listMyOrders(user!.id, status, now) };
     }),
   );

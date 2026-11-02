@@ -1,4 +1,4 @@
-import { and, eq, isNull, ne, or } from 'drizzle-orm';
+import { and, asc, eq, isNull, ne, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx } from '../../db/client.js';
 import { memberships, outlets, payoutAccounts, users } from '../../db/schema.js';
@@ -79,6 +79,29 @@ export async function requirePayoutAccount(userId: string, payoutAccountId: stri
   if (other) throw forbidden();
 }
 
+/**
+ * The brand's payout accounts this user may read, by the rule above: those their membership names,
+ * and for a brand owner those nobody else's names. Anyone with no live part in the brand is refused.
+ */
+export async function readablePayoutAccounts(userId: string, brandId: string): Promise<Set<string>> {
+  if (!z.uuid().safeParse(brandId).success) throw forbidden();
+  const members = await db
+    .select({ userId: memberships.userId, role: memberships.role, outletId: memberships.outletId, accountId: memberships.payoutAccountId })
+    .from(memberships)
+    .where(and(eq(memberships.brandId, brandId), isNull(memberships.removedAt)));
+  const mine = members.filter((m) => m.userId === userId);
+  if (mine.length === 0) throw forbidden();
+
+  const named = (rows: typeof members) => rows.flatMap((m) => (m.accountId ? [m.accountId] : []));
+  const readable = new Set(named(mine));
+  if (!mine.some((m) => m.role === 'owner' && m.outletId === null)) return readable;
+
+  const others = new Set(named(members.filter((m) => m.userId !== userId)));
+  const accounts = await db.select({ id: payoutAccounts.id }).from(payoutAccounts).where(eq(payoutAccounts.brandId, brandId));
+  for (const { id } of accounts) if (!others.has(id)) readable.add(id);
+  return readable;
+}
+
 /** Every outlet the user has a live membership for, brand-wide memberships included. */
 export async function listAccessibleOutlets(userId: string): Promise<Outlet[]> {
   const rows = await db
@@ -93,6 +116,31 @@ export async function listAccessibleOutlets(userId: string): Promise<Outlet[]> {
     )
     .where(and(eq(memberships.userId, userId), isNull(memberships.removedAt)));
   return [...new Map(rows.map((r) => [r.outlet.id, r.outlet])).values()];
+}
+
+/** Everyone who can work at this outlet, brand-wide members included, for its owner or a manager. */
+export async function listStaff(userId: string, outletId: string) {
+  const { brandId } = await requireOutlet(userId, outletId, ['owner', 'manager']);
+  return db
+    .select({
+      membershipId: memberships.id,
+      userId: users.id,
+      name: users.name,
+      phone: users.phone,
+      role: memberships.role,
+      outletId: memberships.outletId,
+    })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(
+      and(
+        eq(memberships.brandId, brandId),
+        isNull(memberships.removedAt),
+        isNull(users.deletedAt),
+        or(isNull(memberships.outletId), eq(memberships.outletId, outletId)),
+      ),
+    )
+    .orderBy(asc(memberships.createdAt), asc(memberships.id));
 }
 
 /** Owner-only. Finds the user by phone or creates them, then adds an outlet membership. */

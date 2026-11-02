@@ -1,12 +1,12 @@
 import { isIP } from 'node:net';
-import { eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { withTx } from '../../db/client.js';
+import { db, withTx } from '../../db/client.js';
 import { agreements, payoutAccounts } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { encrypt } from '../../lib/crypto.js';
 import { parseInput } from '../../lib/errors.js';
-import { requireBrandOwner, requirePayoutAccount } from '../auth/access.js';
+import { readablePayoutAccounts, requireBrandOwner, requirePayoutAccount } from '../auth/access.js';
 
 export type PayoutAccount = typeof payoutAccounts.$inferSelect;
 
@@ -20,6 +20,17 @@ const payoutInput = z.object({
   ifsc: upper.regex(/^[A-Z]{4}0[A-Z0-9]{6}$/),
 });
 export type PayoutAccountInput = z.input<typeof payoutInput>;
+
+/** The brand's accounts this user may read. */
+export async function listPayoutAccounts(userId: string, brandId: string): Promise<PayoutAccount[]> {
+  const readable = await readablePayoutAccounts(userId, brandId);
+  if (readable.size === 0) return [];
+  return db
+    .select()
+    .from(payoutAccounts)
+    .where(and(eq(payoutAccounts.brandId, brandId), inArray(payoutAccounts.id, [...readable])))
+    .orderBy(asc(payoutAccounts.createdAt), asc(payoutAccounts.id));
+}
 
 /** Brand-owner only. PAN and account number are stored encrypted, with the last 4 in clear for display. */
 export async function createPayoutAccount(

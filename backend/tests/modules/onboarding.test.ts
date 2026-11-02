@@ -376,6 +376,21 @@ describe('submitting', () => {
     expect(row).toMatchObject({ status: 'draft', submittedAt: null });
   });
 
+  test('changes_needed never shows with no fixes, even when nothing is missing', async () => {
+    const { owner, outlet } = await readyOutlet();
+    await db.update(outlets).set({ status: 'changes_needed' }).where(eq(outlets.id, outlet.id));
+    expect(codes(await getOutletStatus(owner.id, outlet.id))).toEqual(['changes_requested']);
+  });
+
+  test('a reason for changes does not block a resubmission, and goes with it', async () => {
+    const { owner, outlet } = await readyOutlet();
+    await db.update(outlets).set({ status: 'changes_needed', changesReason: 'Fix the hours' }).where(eq(outlets.id, outlet.id));
+
+    const submitted = await submitOutlet(owner.id, outlet.id, T0);
+
+    expect(submitted).toMatchObject({ status: 'in_review', changesReason: null });
+  });
+
   test('the 422 body carries the fixes in the error envelope', async () => {
     const owner = await makeUser();
     const outlet = await startOutlet(owner.id, { brandName: 'Cafe One', branchName: 'Main', category: 'cafe' });
