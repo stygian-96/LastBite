@@ -1340,3 +1340,72 @@ describe('POST /admin/refunds/:id/retry', () => {
     expect((await retry('00000000-0000-4000-8000-000000000000', admin.id)).status).toBe(404);
   });
 });
+
+describe('the money trail', () => {
+  test('a capture is audited', async () => {
+    const { order, payment, gp } = await paidOrder();
+    expect(await auditRows('payment.captured')).toMatchObject([
+      {
+        actorId: null,
+        entity: 'payment',
+        entityId: payment.id,
+        detail: { orderId: order.id, razorpayPaymentId: gp.id, amountPaise: 10000 },
+      },
+    ]);
+  });
+
+  test('a duplicate capture is audited, with the refund it starts', async () => {
+    const { order, gp } = await paidOrder();
+    await applyCapture(capturedPayment(gp.orderId), now);
+
+    const [refund] = await refundsFor(order.id);
+    expect(await auditRows('payment.captured')).toHaveLength(2);
+    expect(await auditRows('refund.create')).toMatchObject([
+      {
+        actorId: null,
+        entity: 'refund',
+        entityId: refund!.id,
+        detail: { orderId: order.id, paymentId: refund!.paymentId, amountPaise: 10000, reason: 'duplicate_payment', chargedTo: 'platform' },
+      },
+    ]);
+  });
+
+  test('a late capture starts an audited refund', async () => {
+    const { order, gp, drop } = await heldOrder();
+    await expireHolds(later);
+    await db.update(drops).set({ status: 'cancelled' }).where(eq(drops.id, drop.id));
+    await applyCapture(gp, later);
+    const [refund] = await refundsFor(order.id);
+    expect(await auditRows('refund.create')).toMatchObject([{ entityId: refund!.id, detail: { reason: 'late_payment' } }]);
+  });
+
+  test('a refund sent and then processed is audited at each step, once', async () => {
+    const { refund, sentId } = await sentRefund();
+    expect(await auditRows('refund.sent')).toMatchObject([
+      { actorId: null, entity: 'refund', entityId: refund.id, detail: { razorpayRefundId: sentId, amountPaise: 10000, attempts: 0 } },
+    ]);
+    expect(await auditRows('refund.processed')).toHaveLength(0);
+
+    await deliver(refundEvent('refund.processed', sentId));
+    await deliver(refundEvent('refund.processed', sentId));
+
+    expect(await auditRows('refund.processed')).toMatchObject([
+      { actorId: null, entity: 'refund', entityId: refund.id, detail: { razorpayRefundId: sentId, amountPaise: 10000 } },
+    ]);
+  });
+
+  test('a refund the gateway processes at once is audited as both', async () => {
+    const { refund } = await cancelledOrder();
+    gateway.refundStatus = 'processed';
+    await processRefunds(now);
+    expect(await auditRows('refund.sent')).toMatchObject([{ entityId: refund.id }]);
+    expect(await auditRows('refund.processed')).toMatchObject([{ entityId: refund.id }]);
+  });
+
+  test('a refund the sweep finds processed is audited', async () => {
+    const { refund, sentId } = await sentRefund();
+    gateway.setRefundStatus(sentId, 'processed');
+    await processRefunds(seconds(now, SWEEP_SECONDS + 60));
+    expect(await auditRows('refund.processed')).toMatchObject([{ entityId: refund.id }]);
+  });
+});

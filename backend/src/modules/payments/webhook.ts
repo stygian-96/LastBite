@@ -11,12 +11,14 @@ import { applyCaptureInTx } from './capture.js';
 
 const PAYMENT_EVENTS = new Set(['payment.captured', 'payment.failed']);
 const REFUND_EVENTS = new Set(['refund.processed', 'refund.failed']);
+/** Razorpay's documented name for a failed transfer. Not yet seen in test mode, so confirm it there. */
+const TRANSFER_FAILED_EVENTS = new Set(['transfer.failed']);
 
 const entity = z.object({ entity: z.object({ id: z.string().min(1) }) });
 const refundEntity = z.object({ entity: z.object({ id: z.string().min(1), payment_id: z.string().nullish() }) });
 const eventSchema = z.object({
   event: z.string().min(1),
-  payload: z.object({ payment: entity.optional(), refund: refundEntity.optional() }).optional(),
+  payload: z.object({ payment: entity.optional(), refund: refundEntity.optional(), transfer: entity.optional() }).optional(),
 });
 type Event = z.infer<typeof eventSchema>;
 
@@ -28,7 +30,9 @@ function subjectId(e: Event): string | undefined {
     ? e.payload?.payment
     : REFUND_EVENTS.has(e.event)
       ? e.payload?.refund
-      : undefined;
+      : TRANSFER_FAILED_EVENTS.has(e.event)
+        ? e.payload?.transfer
+        : undefined;
   return subject?.entity.id;
 }
 
@@ -41,7 +45,8 @@ function parseEvent(raw: string): { event: Event; payload: unknown } {
   }
   const parsed = eventSchema.safeParse(payload);
   if (!parsed.success) throw badEvent();
-  const handled = PAYMENT_EVENTS.has(parsed.data.event) || REFUND_EVENTS.has(parsed.data.event);
+  const { event } = parsed.data;
+  const handled = PAYMENT_EVENTS.has(event) || REFUND_EVENTS.has(event) || TRANSFER_FAILED_EVENTS.has(event);
   if (handled && !subjectId(parsed.data)) throw badEvent();
   return { event: parsed.data, payload };
 }
@@ -114,6 +119,7 @@ async function applyRefund(
       status: refunds.status,
       paymentId: refunds.paymentId,
       reverseTransfer: refunds.reverseTransfer,
+      amountPaise: refunds.amountPaise,
     })
     .from(refunds)
     .where(eq(refunds.razorpayRefundId, razorpayRefundId))
@@ -132,6 +138,30 @@ async function applyRefund(
     throw new Error(`No refund has ID ${razorpayRefundId} yet`);
   }
   await flagUnknownRefund(tx, razorpayRefundId, razorpayPaymentId);
+}
+
+/**
+ * Tells an admin a transfer failed, once however often it is reported. The status stays as it is for
+ * them to look into. A transfer we hold no row for is flagged as well, with a new ID for the same
+ * reason as an unknown refund.
+ */
+async function flagFailedTransfer(tx: Tx, razorpayTransferId: string): Promise<void> {
+  const [flagged] = await tx
+    .select({ id: auditLog.id })
+    .from(auditLog)
+    .where(and(eq(auditLog.action, 'transfer.failed'), sql`${auditLog.detail}->>'razorpayTransferId' = ${razorpayTransferId}`));
+  if (flagged) return;
+  const [payment] = await tx
+    .select({ id: payments.id, orderId: payments.orderId, transferStatus: payments.transferStatus })
+    .from(payments)
+    .where(eq(payments.razorpayTransferId, razorpayTransferId));
+  await audit(tx, {
+    actorId: null,
+    action: 'transfer.failed',
+    entity: 'payment',
+    entityId: payment?.id ?? randomUUID(),
+    detail: { razorpayTransferId, orderId: payment?.orderId ?? null, transferStatus: payment?.transferStatus ?? null },
+  });
 }
 
 /**
@@ -163,6 +193,7 @@ export async function handleWebhook(raw: string, signature: string, eventId: str
     if (!fresh) return;
 
     if (gp) await applyPayment(tx, event.event, gp, now);
+    else if (subject && TRANSFER_FAILED_EVENTS.has(event.event)) await flagFailedTransfer(tx, subject);
     else if (subject) await applyRefund(tx, event.event, subject, event.payload?.refund?.entity.payment_id, now);
   });
 }

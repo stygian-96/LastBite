@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { route } from '../lib/http.js';
-import { adminRefund, changeUserPhone, getOutletStats, listAdminOrders, listIssues, retryRefund } from '../modules/admin/support.js';
+import { adminRefund, changeUserPhone, getOutletStats, listAdminOrders, listAlerts, listIssues, retryRefund } from '../modules/admin/support.js';
 
 export const adminSupport = new Hono()
   .get(
@@ -10,6 +10,13 @@ export const adminSupport = new Hono()
       const q = c.req.query();
       const filters = { status: q.status, outletId: q.outlet_id, date: q.date, phone: q.phone, number: q.number };
       return { orders: await listAdminOrders(filters) };
+    }),
+  )
+  .get(
+    '/alerts',
+    route({ auth: 'admin' }, async ({ c }) => {
+      const { action, from, to } = c.req.query();
+      return { alerts: await listAlerts({ action, from, to }) };
     }),
   )
   .get(

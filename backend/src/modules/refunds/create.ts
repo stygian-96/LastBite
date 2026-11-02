@@ -98,6 +98,17 @@ export async function countRefundFailure(
   });
 }
 
+/** Audits a refund reaching processed, the moment the money has left. */
+export async function auditProcessed(tx: Tx, refundId: string, razorpayRefundId: string, amountPaise: number): Promise<void> {
+  await audit(tx, {
+    actorId: null,
+    action: 'refund.processed',
+    entity: 'refund',
+    entityId: refundId,
+    detail: { razorpayRefundId, amountPaise },
+  });
+}
+
 /**
  * Applies the final word on a refund the gateway has an ID for, from a webhook or the sweep. The
  * caller has locked the row. Only pending rows count a failure, so a repeated report counts once.
@@ -106,12 +117,13 @@ export async function countRefundFailure(
  */
 export async function settleRefund(
   tx: Tx,
-  refund: { id: string; attempts: number; status: string; paymentId: string; reverseTransfer: boolean },
+  refund: { id: string; attempts: number; status: string; paymentId: string; reverseTransfer: boolean; amountPaise: number },
   razorpayRefundId: string,
   result: 'processed' | 'failed',
   at: Date,
 ): Promise<void> {
   if (result === 'processed') {
+    if (refund.status !== 'processed') await auditProcessed(tx, refund.id, razorpayRefundId, refund.amountPaise);
     await tx.update(refunds).set({ status: 'processed' }).where(eq(refunds.id, refund.id));
     await queueRefundIssued(tx, refund.id);
     return;

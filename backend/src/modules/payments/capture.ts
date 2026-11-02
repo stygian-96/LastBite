@@ -18,7 +18,8 @@ export const EXTRA_PAYMENT_SEPARATOR = ':';
 /**
  * Stores a captured payment. It takes the Razorpay order's own row, unless an earlier payment has
  * that: then it gets a row of its own, since refunds are unique per payment row and reason, and a
- * second payment refunded against the first row would be lost as a conflict.
+ * second payment refunded against the first row would be lost as a conflict. Every capture is money
+ * received, so each is audited.
  */
 async function recordCapture(tx: Tx, orderId: string, gp: GatewayPayment): Promise<string> {
   const details = { razorpayPaymentId: gp.id, status: 'captured', feePaise: gp.feePaise, method: gp.method };
@@ -27,13 +28,20 @@ async function recordCapture(tx: Tx, orderId: string, gp: GatewayPayment): Promi
     .set(details)
     .where(and(eq(payments.razorpayOrderId, gp.orderId), ne(payments.status, 'captured')))
     .returning({ id: payments.id });
-  if (claimed) return claimed.id;
-
-  const [extra] = await tx
-    .insert(payments)
-    .values({ orderId, razorpayOrderId: `${gp.orderId}${EXTRA_PAYMENT_SEPARATOR}${gp.id}`, amountPaise: gp.amountPaise, ...details })
-    .returning({ id: payments.id });
-  return extra!.id;
+  const [row] = claimed
+    ? [claimed]
+    : await tx
+        .insert(payments)
+        .values({ orderId, razorpayOrderId: `${gp.orderId}${EXTRA_PAYMENT_SEPARATOR}${gp.id}`, amountPaise: gp.amountPaise, ...details })
+        .returning({ id: payments.id });
+  await audit(tx, {
+    actorId: null,
+    action: 'payment.captured',
+    entity: 'payment',
+    entityId: row!.id,
+    detail: { orderId, razorpayPaymentId: gp.id, amountPaise: gp.amountPaise },
+  });
+  return row!.id;
 }
 
 /** Marks the order paid, with a pickup code. Each try has a savepoint, so a clash keeps the transaction. */
@@ -91,7 +99,9 @@ async function refundCapture(
   reason: 'late_payment' | 'duplicate_payment',
 ): Promise<void> {
   const paymentId = await recordCapture(tx, order.id, gp);
-  await createRefund(tx, { orderId: order.id, paymentId, amountPaise: gp.amountPaise, reason, chargedTo: 'platform' });
+  const terms = { orderId: order.id, paymentId, amountPaise: gp.amountPaise, reason, chargedTo: 'platform' } as const;
+  const refundId = await createRefund(tx, terms);
+  if (refundId) await audit(tx, { actorId: null, action: 'refund.create', entity: 'refund', entityId: refundId, detail: terms });
   if (reason === 'late_payment') await queueLatePaymentRefunded(tx, order.id, paymentId, gp.amountPaise);
 }
 

@@ -1062,3 +1062,47 @@ describe('errors', () => {
     });
   });
 });
+
+describe('transfer failure events', () => {
+  const transferEvent = (type: string, id: string) =>
+    JSON.stringify({ event: type, payload: { transfer: { entity: { id } } } });
+
+  async function transferred() {
+    const { order, payment, gp } = await heldOrder();
+    await applyCapture(gp, now);
+    await db.update(payments).set({ razorpayTransferId: 'trf_1', transferStatus: 'on_hold' }).where(eq(payments.id, payment.id));
+    return { order, payment };
+  }
+
+  test('a known transfer is audited against its payment, once', async () => {
+    const { order, payment } = await transferred();
+    await deliver(transferEvent('transfer.failed', 'trf_1'));
+    await deliver(transferEvent('transfer.failed', 'trf_1'));
+    expect(await auditRows('transfer.failed')).toMatchObject([
+      {
+        actorId: null,
+        entity: 'payment',
+        entityId: payment.id,
+        detail: { razorpayTransferId: 'trf_1', orderId: order.id, transferStatus: 'on_hold' },
+      },
+    ]);
+    expect((await paymentRow(payment.id)).transferStatus).toBe('on_hold');
+  });
+
+  test('an unknown transfer is flagged too, not refused', async () => {
+    await deliver(transferEvent('transfer.failed', 'trf_unknown'));
+    expect(await auditRows('transfer.failed')).toMatchObject([
+      { entity: 'payment', detail: { razorpayTransferId: 'trf_unknown', orderId: null } },
+    ]);
+  });
+
+  test('an event with no transfer in it is unreadable', async () => {
+    const res = await failure(deliver(JSON.stringify({ event: 'transfer.failed', payload: {} })));
+    expect(res).toMatchObject({ code: 'invalid_event', status: 400 });
+  });
+
+  test('other transfer events are recorded and otherwise ignored', async () => {
+    await deliver(transferEvent('transfer.processed', 'trf_1'));
+    expect(await auditRows('transfer.failed')).toHaveLength(0);
+  });
+});

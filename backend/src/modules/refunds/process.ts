@@ -4,7 +4,7 @@ import { payments, refunds } from '../../db/schema.js';
 import { getGateway, GatewayRefusedError, type GatewayRefund } from '../../integrations/payments.js';
 import { audit } from '../../lib/audit.js';
 import { queueRefundIssued } from '../notifications/events.js';
-import { countRefundFailure, settleRefund } from './create.js';
+import { auditProcessed, countRefundFailure, settleRefund } from './create.js';
 
 /** The most gateway calls in one run, sends and checks together. */
 const BATCH_SIZE = 100;
@@ -103,8 +103,19 @@ function recordSent(row: Claimed, sent: GatewayRefund, at: Date): Promise<void> 
       })
       .where(stillSending(row))
       .returning({ id: refunds.id });
-    if (saved && sent.status === 'processed') await queueRefundIssued(tx, row.id);
-    if (saved && row.reverseTransfer) {
+    if (!saved) return;
+    await audit(tx, {
+      actorId: null,
+      action: 'refund.sent',
+      entity: 'refund',
+      entityId: row.id,
+      detail: { razorpayRefundId: sent.id, amountPaise: row.amountPaise, attempts: row.attempts, reverseTransfer: row.reverseTransfer },
+    });
+    if (sent.status === 'processed') {
+      await auditProcessed(tx, row.id, sent.id, row.amountPaise);
+      await queueRefundIssued(tx, row.id);
+    }
+    if (row.reverseTransfer) {
       await tx
         .update(payments)
         .set({ transferStatus: 'reversed' })
@@ -223,6 +234,7 @@ async function checkRefund(check: Check, now: Date): Promise<void> {
         status: refunds.status,
         paymentId: refunds.paymentId,
         reverseTransfer: refunds.reverseTransfer,
+        amountPaise: refunds.amountPaise,
       })
       .from(refunds)
       .where(

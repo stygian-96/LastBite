@@ -327,6 +327,13 @@ function saveTransfer(row: ClaimedTransfer, razorpayTransferId: string, feePaise
       .where(and(eq(payments.id, row.paymentId), eq(payments.transferStatus, 'none')))
       .returning({ id: payments.id });
     if (!saved) return false;
+    await audit(tx, {
+      actorId: null,
+      action: 'transfer.created',
+      entity: 'payment',
+      entityId: row.paymentId,
+      detail: { orderId: row.orderId, razorpayTransferId, amountPaise: transferPaise },
+    });
 
     const [covered] = await tx
       .select({ id: payments.id })

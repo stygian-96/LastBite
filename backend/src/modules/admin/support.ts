@@ -1,7 +1,7 @@
-import { and, asc, desc, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
-import { brands, issues, orders, outlets, payments, refunds, sessions, users } from '../../db/schema.js';
+import { auditLog, brands, issues, orders, outlets, payments, refunds, sessions, users } from '../../db/schema.js';
 import { getStore } from '../../integrations/storage.js';
 import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
@@ -12,6 +12,20 @@ import { bagPayment, unrefundedPaise } from '../refunds/cancel.js';
 import { createRefund, reopenFailedRefund, type NewRefund } from '../refunds/create.js';
 
 const ORDER_LIMIT = 100;
+const ALERT_LIMIT = 100;
+/** The audit actions an admin has to do something about. */
+const ALERT_ACTIONS = [
+  'refund.failed',
+  'refund.stuck',
+  'refund.unknown',
+  'payment.amount_mismatch',
+  'payment.unmatched',
+  'transfer.orphaned',
+  'transfer.no_net',
+  'transfer.failed',
+  'payout.mismatch',
+  'linked_account.stuck',
+] as const;
 const STATS_WINDOW_MS = 30 * 86_400_000;
 
 const uuid = z.uuid();
@@ -76,6 +90,37 @@ export async function listAdminOrders(raw: OrderFilters) {
     .orderBy(desc(orders.createdAt), desc(orders.id))
     .limit(ORDER_LIMIT);
   return rows.map((r) => ({ ...r, number: `SJ-${r.number.toString()}` }));
+}
+
+const alertFilters = z.object({
+  action: z.enum(ALERT_ACTIONS).optional(),
+  from: z.iso.datetime({ offset: true }).optional(),
+  to: z.iso.datetime({ offset: true }).optional(),
+});
+
+/** What needs an admin's eye, the 100 newest that match, read straight from the audit log. */
+export async function listAlerts(raw: { action?: string; from?: string; to?: string }) {
+  const { action, from, to } = parseInput(alertFilters, raw);
+  const rows = await db
+    .select({
+      id: auditLog.id,
+      action: auditLog.action,
+      entity: auditLog.entity,
+      entityId: auditLog.entityId,
+      detail: auditLog.detail,
+      createdAt: auditLog.createdAt,
+    })
+    .from(auditLog)
+    .where(
+      and(
+        action ? eq(auditLog.action, action) : inArray(auditLog.action, [...ALERT_ACTIONS]),
+        from ? gte(auditLog.createdAt, from) : undefined,
+        to ? lte(auditLog.createdAt, to) : undefined,
+      ),
+    )
+    .orderBy(desc(auditLog.id))
+    .limit(ALERT_LIMIT);
+  return rows.map((r) => ({ ...r, id: r.id.toString() }));
 }
 
 const issueStatus = z.enum(['open', 'resolved']);

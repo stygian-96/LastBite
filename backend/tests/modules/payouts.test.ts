@@ -1078,7 +1078,7 @@ describe('settling an adjustment', () => {
     expect(gateway.transferReversals[0]).toMatchObject({
       transferId: (await paymentFor(large.order.id)).razorpayTransferId,
       amountPaise: 1234,
-      idempotencyKey: `reversal-${payout.id}-${large.payment.id}`,
+      idempotencyKey: `reversal-${payout.id}-${large.payment.id}-0`,
     });
     expect((await paymentFor(large.order.id)).reversedPaise).toBe(1234);
     expect((await paymentFor(small.order.id)).reversedPaise).toBe(0);
@@ -2483,5 +2483,57 @@ describe('transfers stranded on cancelled orders', () => {
     await createTransfers(new Date(now.getTime() + 6 * MINUTES));
     expect(reverse).toHaveBeenCalledTimes(2);
     expect((await paymentFor(order.id)).transferStatus).toBe('reversed');
+  });
+});
+
+describe('the money trail through payouts', () => {
+  test('a new transfer is audited', async () => {
+    const { outlet } = await linkedOutlet();
+    const { order } = await sale(outlet.id);
+    await createTransfers(now);
+    const payment = await paymentFor(order.id);
+    expect(await auditsFor('transfer.created')).toMatchObject([
+      {
+        actorId: null,
+        entity: 'payment',
+        entityId: payment.id,
+        detail: { orderId: order.id, razorpayTransferId: payment.razorpayTransferId, amountPaise: 11620 },
+      },
+    ]);
+  });
+
+  test('an approval audits each partial reversal and each release', async () => {
+    const { outlet } = await linkedOutlet();
+    const first = await sale(outlet.id);
+    const second = await sale(outlet.id);
+    await addRefund(first.order, first.payment, 12000);
+    const adminUser = await admin();
+    const payout = await built();
+
+    await approvePayout(adminUser.id, payout.id, now);
+
+    const reversals = await auditsFor('transfer.partial_reversal');
+    expect(reversals.map((a) => (a.detail as { amountPaise: number }).amountPaise).sort((x, y) => y - x)).toEqual([11620, 380]);
+    expect(reversals[0]).toMatchObject({ actorId: adminUser.id, entity: 'payment', detail: { payoutId: payout.id } });
+
+    const releases = await auditsFor('transfer.released');
+    // One transfer was reversed in full, so only the other moved any money.
+    expect(releases).toMatchObject([{ actorId: adminUser.id, detail: { payoutId: payout.id, amountPaise: 11240 } }]);
+    expect([first.payment.id, second.payment.id]).toContain(releases[0]!.entityId);
+  });
+
+  test('the reversal key changes with what has been reversed, so a changed plan cannot reuse one', async () => {
+    const { outlet } = await linkedOutlet();
+    const { payment } = await sale(outlet.id);
+    const large = await sale(outlet.id, { pricePaise: 29900 });
+    await addRefund(large.order, large.payment, 1000);
+    const payout = await built();
+    await db.update(payments).set({ reversedPaise: 500 }).where(eq(payments.id, large.payment.id));
+    const reverse = vi.spyOn(gateway, 'reverseTransferPartial');
+
+    await approvePayout((await admin()).id, payout.id, now);
+
+    expect(reverse.mock.calls[0]![2]).toBe(`reversal-${payout.id}-${large.payment.id}-500`);
+    expect(payment.id).not.toBe(large.payment.id);
   });
 });
