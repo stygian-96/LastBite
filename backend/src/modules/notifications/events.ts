@@ -308,7 +308,7 @@ export async function queueFollowerAlert(tx: Tx, drop: NewDrop): Promise<void> {
     .where(eq(outlets.id, drop.outletId));
   // Only an outlet with no area, which cannot go live, has no page to link to.
   if (!page) return;
-  const link = `${origin()}/${page.city}/${page.brand}-${page.outlet}`;
+  const link = `${origin()}/${page.city}/${page.brand}/${page.outlet}`;
   const vars: Vars = {
     vendor: info.vendor,
     pickupStartAt: iso(drop.pickupStartAt),

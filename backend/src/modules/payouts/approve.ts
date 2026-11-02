@@ -7,7 +7,7 @@ import { audit } from '../../lib/audit.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { absorbNegativePayouts, carriedBalance, negativePayouts } from './balance.js';
 import { netOf, sumOrders, type Payout } from './build.js';
-import { refundIsUnsent } from './transfers.js';
+import { MAX_LINK_FAILURES, refundIsUnsent } from './transfers.js';
 
 const invalidState = () => new ApiError('invalid_state', 409, 'That change is not allowed from the current status');
 const notFound = (what: string) => new ApiError('not_found', 404, `${what} not found`);
@@ -464,20 +464,47 @@ export async function markPayoutPaid(adminId: string, payoutId: string, now: Dat
   });
 }
 
+/** An admin clears a linked account the job gave up on. It resumes where it stopped, on the same email. */
+async function retryLinkedAccount(tx: Tx, adminId: string, accountId: string, failures: number, now: Date): Promise<void> {
+  await tx
+    .update(payoutAccounts)
+    .set({ linkedAccountFailures: 0, linkedClaimedAt: null })
+    .where(eq(payoutAccounts.id, accountId));
+  await audit(tx, {
+    actorId: adminId,
+    action: 'payout_account.link_retry',
+    entity: 'payout_account',
+    entityId: accountId,
+    detail: { failures, at: now.toISOString() },
+  });
+}
+
 /**
  * An admin's decision on changed bank details. The linked account is cleared, so the job makes a new
- * one from them, and payouts held for the account can go. A negative one stays held to be carried,
- * and one an admin holds stays until they say.
+ * one from them on a new email, and payouts held for the account can go. A negative one stays held to
+ * be carried, and one an admin holds stays until they say. On a verified account the job gave up
+ * linking, with no bank change, this only sets it going again.
  */
 export async function verifyPayoutAccount(adminId: string, accountId: string, now: Date): Promise<void> {
   if (!isId(accountId)) throw notFound('Payout account');
   await withTx(async (tx) => {
     const [account] = await tx.select().from(payoutAccounts).where(eq(payoutAccounts.id, accountId)).for('update');
     if (!account) throw notFound('Payout account');
+    if (account.status === 'verified' && account.linkedAccountFailures >= MAX_LINK_FAILURES) {
+      return retryLinkedAccount(tx, adminId, accountId, account.linkedAccountFailures, now);
+    }
     if (account.status !== 'on_hold') throw invalidState();
     await tx
       .update(payoutAccounts)
-      .set({ status: 'verified', razorpayAccountId: null, linkedClaimedAt: null })
+      .set({
+        status: 'verified',
+        razorpayAccountId: null,
+        linkedProductId: null,
+        linkedAccountStep: 'none',
+        linkedAccountFailures: 0,
+        linkedAccountGeneration: account.linkedAccountGeneration + 1,
+        linkedClaimedAt: null,
+      })
       .where(eq(payoutAccounts.id, accountId));
     const held = await tx.select().from(payouts).where(and(eq(payouts.payoutAccountId, accountId), eq(payouts.status, 'held'))).for('update');
     const freed = held.filter((p) => p.netPaise >= 0 && p.holdReason === null).map((p) => p.id);

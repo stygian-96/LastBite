@@ -26,9 +26,10 @@ Scripts do not load `.env` on their own. The npm scripts pass `--env-file=.env`.
 | `production` | Razorpay | `MESSAGING_API_URL` provider | S3 |
 | `test` | Fake | Fake | Fake |
 | `development` with `DEV_FAKE_PROVIDERS=true` | Fake | Logged to the console, including OTPs | Fake |
-| anything else, or unset | None: calls fail | Logged to the console, including OTPs | None: calls fail |
+| `development` | None: calls fail | Logged to the console, including OTPs | None: calls fail |
+| anything else, or unset | None: calls fail | None: calls fail | None: calls fail |
 
-Always set `NODE_ENV=production` on a server. `npm start` does not set it. Production refuses to start with `DEV_FAKE_PROVIDERS` on, and the flag means nothing unless `NODE_ENV` is exactly `development`.
+`npm start` sets `NODE_ENV=production`. If you start the server another way, set it yourself. `npm run dev` takes `NODE_ENV=development` from `.env`, so an older `.env` needs that line added, or sign-in has no way to send a code. Production refuses to start with `DEV_FAKE_PROVIDERS` on, and the flag means nothing unless `NODE_ENV` is exactly `development`.
 
 ### Local development
 
@@ -63,7 +64,7 @@ npx tsc --noEmit && npm run lint           # types and lint
 
 | Variable | Needed | Purpose |
 |---|---|---|
-| `DATABASE_URL` | Always | Postgres |
+| `DATABASE_URL` | Always | Postgres. Must not go through a transaction pooler such as PgBouncer in transaction mode: the tick holds a session lock on one connection. Connect directly, or use session mode |
 | `TEST_DATABASE_URL` | Tests | Postgres for tests, never the dev database |
 | `FRONTEND_ORIGIN` | Always | The one origin allowed by CORS, and the base of links in messages |
 | `BRAND_NAME` | No, default `LastBite` | The product name in messages |
@@ -114,11 +115,16 @@ curl -X POST https://api.example.com/api/v1/internal/jobs/tick \
 
 | Runs | Jobs |
 |---|---|
-| Every minute | `expireHolds`, `reconcilePayments`, `sendPending`, `processRefunds`, `queuePickupReminders`, `createTransfers`, `syncLinkedAccounts` |
+| Every minute | `reconcilePayments`, `expireHolds`, `sendPending`, `processRefunds`, `queuePickupReminders`, `createTransfers`, `syncLinkedAccounts` |
 | Every 5 minutes | `autoMarkNoShows` |
 | Once a day, 17:00 to 17:14 IST | `queueDailyPrompts` |
-| Once a day | `checkLicences`, `cleanup` |
+| Once a day, 10:00 to 10:14 IST | `checkLicences` |
+| Once a day | `cleanup` |
 | Once a week, from Monday 06:00 IST | `buildPayouts` for the week before |
+
+### A stuck linked account
+
+Making a linked account is several calls, and each finished step is saved, so a retry carries on from there on the same Razorpay account. After 5 failed tries the job stops and writes `linked_account.stuck` to the audit log. Fix the cause, then call `POST /api/v1/admin/payout-accounts/:id/verify`, which clears the count and sets it going again. A bank change that is re-verified starts a new linked account, on a new email.
 
 ## Webhooks
 

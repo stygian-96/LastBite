@@ -17,7 +17,8 @@ export const TICK_LOCK = 727002;
 const DAY_MS = 86_400_000;
 const FIVE_MINUTES_MS = 5 * 60_000;
 const PROMPT_FROM_MINUTE = 17 * 60;
-const PROMPT_TO_MINUTE = PROMPT_FROM_MINUTE + 15;
+const LICENCE_FROM_MINUTE = 10 * 60;
+const WINDOW_MINUTES = 15;
 // Late enough that Sunday's pickups running past midnight are over and marked.
 const PAYOUT_BUILD_TIME = '06:00:00';
 const NOTIFICATION_KEEP_DAYS = 90;
@@ -64,10 +65,13 @@ const everyFiveMinutes: Due = (lastRun, now) =>
 
 const daily: Due = (lastRun, now) => !lastRun || serviceDate(lastRun) < serviceDate(now);
 
-const dailyPromptWindow: Due = (lastRun, now) => {
-  const minute = istMinuteOfDay(now);
-  return minute >= PROMPT_FROM_MINUTE && minute < PROMPT_TO_MINUTE && daily(lastRun, now);
-};
+/** Once a day, in the 15 minutes from this time of day (IST), so a late tick does nothing. */
+const dailyFrom =
+  (fromMinute: number): Due =>
+  (lastRun, now) => {
+    const minute = istMinuteOfDay(now);
+    return minute >= fromMinute && minute < fromMinute + WINDOW_MINUTES && daily(lastRun, now);
+  };
 
 /** The IST date of the Monday of the week an instant falls in. */
 function mondayOf(now: Date): string {
@@ -84,16 +88,17 @@ const weeklyFromMondayMorning: Due = (lastRun, now) => {
 type Job = { name: string; due: Due; run: (now: Date) => Promise<number> };
 
 const JOBS: Job[] = [
-  { name: 'expireHolds', due: everyMinute, run: expireHolds },
+  // First, so a hold whose payment came through is settled before it can expire.
   { name: 'reconcilePayments', due: everyMinute, run: reconcilePayments },
+  { name: 'expireHolds', due: everyMinute, run: expireHolds },
   { name: 'sendPending', due: everyMinute, run: sendPending },
   { name: 'processRefunds', due: everyMinute, run: processRefunds },
   { name: 'queuePickupReminders', due: everyMinute, run: queuePickupReminders },
   { name: 'createTransfers', due: everyMinute, run: createTransfers },
   { name: 'syncLinkedAccounts', due: everyMinute, run: syncLinkedAccounts },
   { name: 'autoMarkNoShows', due: everyFiveMinutes, run: autoMarkNoShows },
-  { name: 'queueDailyPrompts', due: dailyPromptWindow, run: queueDailyPrompts },
-  { name: 'checkLicences', due: daily, run: checkLicences },
+  { name: 'queueDailyPrompts', due: dailyFrom(PROMPT_FROM_MINUTE), run: queueDailyPrompts },
+  { name: 'checkLicences', due: dailyFrom(LICENCE_FROM_MINUTE), run: checkLicences },
   { name: 'cleanup', due: daily, run: cleanup },
   {
     name: 'buildPayouts',
@@ -127,20 +132,27 @@ async function runDueJobs(now: Date): Promise<TickResult> {
 
 /**
  * One run of everything due. Only one tick runs at a time, across every process: the lock belongs to
- * a database session, so this one connection holds it from start to finish. A job that fails is left
- * unstamped, for the next tick, and does not stop the rest.
+ * a database session, so this one connection holds it from start to finish, which a transaction
+ * pooler would not allow. A job that fails is left unstamped, for the next tick, and does not stop
+ * the rest. The connection is closed at the end, which frees the lock even if the unlock failed.
  */
 export async function runTick(now: Date): Promise<TickResult> {
   const client = await pool.connect();
+  // A connection lost mid-tick emits this, and with no listener it would take the process down.
+  const onError = (e: Error) => console.error('The tick lost its database connection', e);
+  client.on('error', onError);
   try {
     const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [TICK_LOCK]);
     if (!rows[0]?.locked) return { skipped: true, ran: {}, failed: [] };
     try {
       return await runDueJobs(now);
     } finally {
-      await client.query('SELECT pg_advisory_unlock($1)', [TICK_LOCK]);
+      await client
+        .query('SELECT pg_advisory_unlock($1)', [TICK_LOCK])
+        .catch((e: unknown) => console.error('Could not release the tick lock', e));
     }
   } finally {
-    client.release();
+    client.removeListener('error', onError);
+    client.release(true);
   }
 }

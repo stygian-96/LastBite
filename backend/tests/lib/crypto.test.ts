@@ -1,5 +1,22 @@
 import { describe, expect, test } from 'vitest';
-import { decrypt, encrypt, hashToken, signAnonId, verifyAnonId } from '../../src/lib/crypto.js';
+import { decrypt, encrypt, hashToken, signAnonId, verifyAnonId, verifyHexHmac } from '../../src/lib/crypto.js';
+
+describe('verifyHexHmac', () => {
+  const raw = '{"event":"payment.captured"}';
+  // HMAC-SHA256 of raw under 'webhook-secret', worked out outside this code.
+  const signature = '0e95258623492dd0dae77245c958c256d46b4a30b338084b7e996fc25653c79c';
+
+  test('matches a known HMAC of the raw body', () => {
+    expect(verifyHexHmac('webhook-secret', raw, signature)).toBe(true);
+  });
+
+  test('refuses another secret, another body, a wrong length and an empty signature', () => {
+    expect(verifyHexHmac('other', raw, signature)).toBe(false);
+    expect(verifyHexHmac('webhook-secret', `${raw} `, signature)).toBe(false);
+    expect(verifyHexHmac('webhook-secret', raw, 'abc')).toBe(false);
+    expect(verifyHexHmac('webhook-secret', raw, '')).toBe(false);
+  });
+});
 
 describe('crypto', () => {
   test('decrypt reverses encrypt, and ciphertext differs each time', () => {

@@ -66,8 +66,14 @@ describe('provider selection', () => {
     expect(() => m.storage.getStore()).toThrow('No file store');
   });
 
-  test.each(['development', ''])('NODE_ENV "%s" never gets a fake', async (nodeEnv) => {
-    vi.stubEnv('NODE_ENV', nodeEnv);
+  test('with NODE_ENV unset there is no messenger either, so nothing logs an OTP on a misconfigured server', async () => {
+    vi.stubEnv('NODE_ENV', '');
+    const m = await load();
+    expect(() => m.messaging.getMessenger()).toThrow('No message provider');
+  });
+
+  test('development with no flag never gets a fake', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const m = await load();
     expect(() => m.payments.getGateway()).toThrow('No payment gateway');

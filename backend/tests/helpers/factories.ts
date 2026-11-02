@@ -44,6 +44,8 @@ export async function makePayoutAccount(o: Overrides<typeof payoutAccounts> = {}
         accountLast4: '6789',
         ifsc: 'HDFC0000001',
         status: 'verified',
+        // An account with a linked ID is taken to be finished, unless a test says it is part way.
+        linkedAccountStep: o.razorpayAccountId ? 'done' : 'none',
         ...o,
       })
       .returning(),

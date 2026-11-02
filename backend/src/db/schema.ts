@@ -87,6 +87,10 @@ export const payoutAccounts = pgTable("payout_accounts", {
 	status: text().default('pending').notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	linkedClaimedAt: timestamp("linked_claimed_at", { withTimezone: true, mode: 'string' }),
+	linkedAccountStep: text("linked_account_step").default('none').notNull(),
+	linkedProductId: text("linked_product_id"),
+	linkedAccountFailures: integer("linked_account_failures").default(0).notNull(),
+	linkedAccountGeneration: integer("linked_account_generation").default(0).notNull(),
 }, (table) => [
 	foreignKey({
 			columns: [table.brandId],
@@ -95,6 +99,7 @@ export const payoutAccounts = pgTable("payout_accounts", {
 		}),
 	unique("payout_accounts_razorpay_account_id_key").on(table.razorpayAccountId),
 	check("payout_accounts_status_check", sql`status = ANY (ARRAY['pending'::text, 'verified'::text, 'rejected'::text, 'on_hold'::text])`),
+	check("payout_accounts_linked_account_step_check", sql`linked_account_step = ANY (ARRAY['none'::text, 'account'::text, 'stakeholder'::text, 'product'::text, 'done'::text])`),
 ]);
 
 export const outlets = pgTable("outlets", {

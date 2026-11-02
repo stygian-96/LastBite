@@ -515,7 +515,7 @@ describe('followers', () => {
       .innerJoin(areas, eq(areas.id, outlets.areaId))
       .innerJoin(brands, eq(brands.id, outlets.brandId))
       .where(eq(outlets.id, outlet.id));
-    const link = `${env().FRONTEND_ORIGIN.replace(/\/$/, '')}/${place!.city}/${place!.brand}-${place!.outlet}`;
+    const link = `${env().FRONTEND_ORIGIN.replace(/\/$/, '')}/${place!.city}/${place!.brand}/${place!.outlet}`;
     expect(rows[0]).toMatchObject({ variables: { link } });
 
     // The same listing again changes only its quantity.

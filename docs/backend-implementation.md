@@ -124,7 +124,7 @@ A franchisee is a manager scoped to their outlets and can see earnings only for 
 
 - Browse shows outlets and drops, never a merged brand.
 - Each card shows the brand and the area, such as "Butterfold · Indiranagar".
-- Outlet pages have their own link: `/{city}/{brand-slug}-{outlet-slug}`.
+- Outlet pages have their own link: `/{city}/{brandSlug}/{outletSlug}`.
 - Follow applies to one outlet, because people care about the branch near them.
 - Ratings apply to one outlet, because a bad branch should not damage the others.
 
@@ -772,7 +772,7 @@ All jobs run from the one-minute tick. Each must be safe to run twice, and a fai
 | Mark no-shows | Every 5 minutes | `paid` orders 30 minutes past pickup end |
 | Vendor prompt | Daily, between 5:00 and 5:14 pm IST | "How many tonight?" |
 | Followed outlet alerts | With each first drop | One message per customer, per outlet, per night |
-| Licence check | Daily | Warn at 30 and 7 days, block new drops on expiry |
+| Licence check | Daily, between 10:00 and 10:14 am IST | Warn at 30 and 7 days, block new drops on expiry |
 | Link payout accounts | Every minute | Create linked accounts for verified payout accounts |
 | Create transfers | Every minute | Held Route transfers for sold bags |
 | Build payouts | Monday from 6:00 am IST, once a week | Create draft payouts for the week before |

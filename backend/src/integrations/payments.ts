@@ -14,8 +14,9 @@ export type GatewayPayment = {
 /**
  * What Razorpay Route needs for a linked account, from the data held here: POST /v2/accounts takes
  * the business and contact details, and the bank details go on its route product configuration.
- * Razorpay requires an email, and refuses one already used by a linked account. Nothing here says
- * the business type or category, so the adapter fixes those.
+ * Razorpay requires an email, and refuses one already used by a linked account, so the adapter makes
+ * its own from emailGeneration, which a bank change moves on. Nothing here says the business type or
+ * category, so the adapter fixes those.
  */
 export type LinkedAccountInput = {
   /** Razorpay's reference_id, 3 to 20 characters. */
@@ -24,12 +25,17 @@ export type LinkedAccountInput = {
   contactName: string;
   phone: string;
   email: string | null;
+  emailGeneration: number;
   pan: string;
   holderName: string;
   accountNumber: string;
   ifsc: string;
   address: { street: string | null; city: string | null; postalCode: string | null };
 };
+
+/** How far a linked account has got. Each step names the last one finished. */
+export type LinkStep = 'none' | 'account' | 'stakeholder' | 'product';
+export type LinkProgress = { step: LinkStep; accountId: string | null; productId: string | null };
 
 export type GatewayRefund = { id: string; status: string };
 
@@ -72,7 +78,15 @@ export interface PaymentGateway {
   reverseTransferPartial(transferId: string, amountPaise: number, idempotencyKey: string): Promise<{ id: string }>;
   /** The transfers the gateway holds for a payment, each with what is left of it. */
   listPaymentTransfers(paymentId: string): Promise<GatewayTransfer[]>;
-  createLinkedAccount(a: LinkedAccountInput): Promise<{ id: string }>;
+  /**
+   * Carries on from progress, calling save after each step, which may throw to stop it. There is no
+   * idempotency key here: saving each step is what stops a retry making a second account.
+   */
+  createLinkedAccount(
+    a: LinkedAccountInput,
+    progress: LinkProgress,
+    save: (p: LinkProgress) => Promise<void>,
+  ): Promise<{ id: string }>;
   verifyWebhook(raw: string, signature: string): boolean;
 }
 
@@ -110,6 +124,13 @@ export class FakeGateway implements PaymentGateway {
   }[] = [];
   readonly transferReversals: { id: string; transferId: string; amountPaise: number; idempotencyKey: string }[] = [];
   readonly linkedAccounts: (LinkedAccountInput & { id: string })[] = [];
+  /** Calls to createLinkedAccount, and each step made at the gateway. */
+  linkAttempts = 0;
+  readonly linkStepsMade: Exclude<LinkStep, 'none'>[] = [];
+  /** The step that fails, until this is cleared. */
+  failLinkStep: Exclude<LinkStep, 'none'> | null = null;
+  /** Runs before a step is made. */
+  beforeLinkStep: ((step: Exclude<LinkStep, 'none'>) => Promise<void>) | null = null;
 
   /** Adds a payment, or replaces the one with this ID. */
   addPayment(p: GatewayPayment): GatewayPayment {
@@ -222,10 +243,38 @@ export class FakeGateway implements PaymentGateway {
       }));
   }
 
-  async createLinkedAccount(a: LinkedAccountInput): Promise<{ id: string }> {
-    const account = { id: `acc_fake_${this.linkedAccounts.length + 1}`, ...a };
-    this.linkedAccounts.push(account);
-    return { id: account.id };
+  async createLinkedAccount(
+    a: LinkedAccountInput,
+    progress: LinkProgress,
+    save: (p: LinkProgress) => Promise<void>,
+  ): Promise<{ id: string }> {
+    this.linkAttempts++;
+    let { step, accountId, productId } = progress;
+    const make = async (next: Exclude<LinkStep, 'none'>) => {
+      await this.beforeLinkStep?.(next);
+      if (this.failLinkStep === next) throw new Error(`Fake link step ${next} failed`);
+      this.linkStepsMade.push(next);
+    };
+
+    if (step === 'none') {
+      await make('account');
+      accountId = `acc_fake_${this.linkedAccounts.length + 1}`;
+      this.linkedAccounts.push({ id: accountId, ...a });
+      step = 'account';
+      await save({ step, accountId, productId });
+    }
+    if (step === 'account') {
+      await make('stakeholder');
+      step = 'stakeholder';
+      await save({ step, accountId, productId });
+    }
+    if (step === 'stakeholder') {
+      await make('product');
+      productId = `acc_prd_fake_${accountId!}`;
+      step = 'product';
+      await save({ step, accountId, productId });
+    }
+    return { id: accountId! };
   }
 
   verifyWebhook(_raw: string, signature: string): boolean {

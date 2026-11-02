@@ -1,7 +1,7 @@
-import { and, asc, eq, inArray, isNotNull, isNull, lt, not, notExists, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, not, notExists, notInArray, or, sql } from 'drizzle-orm';
 import { db, withTx, type Tx } from '../../db/client.js';
 import { areas, auditLog, memberships, orders, outlets, payments, payoutAccounts, refunds, users } from '../../db/schema.js';
-import { getGateway } from '../../integrations/payments.js';
+import { getGateway, type LinkProgress, type LinkStep } from '../../integrations/payments.js';
 import { audit } from '../../lib/audit.js';
 import { decrypt } from '../../lib/crypto.js';
 import { vendorNetPaise } from '../../lib/money.js';
@@ -51,7 +51,13 @@ export const refundIsUnsent = (r: { razorpayRefundId: string | null; sendingAt: 
 
 type ClaimedAccount = typeof payoutAccounts.$inferSelect & { linkedClaimedAt: string };
 
-/** Claims verified accounts with no linked account, in a transaction of its own. */
+/** Failed tries before the job leaves an account for an admin. */
+export const MAX_LINK_FAILURES = 5;
+
+/** A bank change took the claim while the steps were running. */
+class LinkClaimLost extends Error {}
+
+/** Claims verified accounts with their linked account unfinished, in a transaction of its own. */
 function claimLinkedAccounts(now: Date): Promise<ClaimedAccount[]> {
   const claimedAt = now.toISOString();
   return withTx(async (tx) => {
@@ -61,7 +67,8 @@ function claimLinkedAccounts(now: Date): Promise<ClaimedAccount[]> {
       .where(
         and(
           eq(payoutAccounts.status, 'verified'),
-          isNull(payoutAccounts.razorpayAccountId),
+          ne(payoutAccounts.linkedAccountStep, 'done'),
+          lt(payoutAccounts.linkedAccountFailures, MAX_LINK_FAILURES),
           or(isNull(payoutAccounts.linkedClaimedAt), lt(payoutAccounts.linkedClaimedAt, staleBefore(now))),
         ),
       )
@@ -116,36 +123,55 @@ async function accountAddress(accountId: string) {
   return outlet ?? { street: null, city: null, postalCode: null };
 }
 
+/** The row, while it is still this run's: a bank change drops the claim, so old details stop here. */
+const stillLinking = (account: ClaimedAccount) =>
+  and(
+    eq(payoutAccounts.id, account.id),
+    eq(payoutAccounts.status, 'verified'),
+    ne(payoutAccounts.linkedAccountStep, 'done'),
+    eq(payoutAccounts.linkedClaimedAt, account.linkedClaimedAt),
+  );
+
+/** Saves a finished step straight away, so a crash after it loses nothing. Stops the run if the claim has gone. */
+async function saveLinkStep(account: ClaimedAccount, progress: LinkProgress): Promise<void> {
+  const saved = await db
+    .update(payoutAccounts)
+    .set({ linkedAccountStep: progress.step, razorpayAccountId: progress.accountId, linkedProductId: progress.productId })
+    .where(stillLinking(account))
+    .returning({ id: payoutAccounts.id });
+  if (saved.length === 0) throw new LinkClaimLost();
+}
+
 /**
- * Creates one linked account. The bank details are decrypted here and nowhere else. The save goes
- * only on our own claim: a bank change drops the claim, so an ID for the old details is not kept.
+ * Makes or finishes one linked account. The bank details are decrypted here and nowhere else. Only
+ * the last save marks it done, which is what lets transfers go to it.
  */
 async function linkAccount(account: ClaimedAccount): Promise<boolean> {
   const contact = await accountContact(account);
-  const { id } = await getGateway().createLinkedAccount({
+  const progress: LinkProgress = {
+    step: account.linkedAccountStep as LinkStep,
+    accountId: account.razorpayAccountId,
+    productId: account.linkedProductId,
+  };
+  const input = {
     referenceId: account.id.replaceAll('-', '').slice(0, REFERENCE_LENGTH),
     legalName: account.legalName,
     contactName: contact.name ?? account.holderName,
     phone: contact.phone,
     email: contact.email,
+    emailGeneration: account.linkedAccountGeneration,
     pan: decrypt(account.panEncrypted),
     holderName: account.holderName,
     accountNumber: decrypt(account.accountEncrypted),
     ifsc: account.ifsc,
     address: await accountAddress(account.id),
-  });
+  };
+  const { id } = await getGateway().createLinkedAccount(input, progress, (p) => saveLinkStep(account, p));
   return withTx(async (tx) => {
     const [saved] = await tx
       .update(payoutAccounts)
-      .set({ razorpayAccountId: id, linkedClaimedAt: null })
-      .where(
-        and(
-          eq(payoutAccounts.id, account.id),
-          eq(payoutAccounts.status, 'verified'),
-          isNull(payoutAccounts.razorpayAccountId),
-          eq(payoutAccounts.linkedClaimedAt, account.linkedClaimedAt),
-        ),
-      )
+      .set({ razorpayAccountId: id, linkedAccountStep: 'done', linkedClaimedAt: null })
+      .where(stillLinking(account))
       .returning({ id: payoutAccounts.id });
     if (!saved) return false;
     await audit(tx, {
@@ -159,15 +185,36 @@ async function linkAccount(account: ClaimedAccount): Promise<boolean> {
   });
 }
 
-/** Gives verified payout accounts a linked account. Returns how many it saved. */
+/** Counts a failed try, and tells an admin once when that is the last. The claim stays, to space out the tries. */
+function recordLinkFailure(account: ClaimedAccount): Promise<void> {
+  return withTx(async (tx) => {
+    const [row] = await tx
+      .update(payoutAccounts)
+      .set({ linkedAccountFailures: sql`${payoutAccounts.linkedAccountFailures} + 1` })
+      .where(stillLinking(account))
+      .returning({ failures: payoutAccounts.linkedAccountFailures, step: payoutAccounts.linkedAccountStep });
+    if (row?.failures !== MAX_LINK_FAILURES) return;
+    await audit(tx, {
+      actorId: null,
+      action: 'linked_account.stuck',
+      entity: 'payout_account',
+      entityId: account.id,
+      detail: { failures: row.failures, step: row.step },
+    });
+  });
+}
+
+/** Gives verified payout accounts a finished linked account. Returns how many it finished. */
 export async function syncLinkedAccounts(now: Date): Promise<number> {
   let linked = 0;
   for (const account of await claimLinkedAccounts(now)) {
     try {
       if (await linkAccount(account)) linked++;
     } catch (e) {
+      if (e instanceof LinkClaimLost) continue;
       // The claim runs out and the account goes again, and one bad row must not hold up the others.
       console.error(`Could not link payout account ${account.id}`, e);
+      await recordLinkFailure(account).catch((err: unknown) => console.error(`Could not record the failure on ${account.id}`, err));
     }
   }
   return linked;
@@ -214,7 +261,7 @@ function claimTransfers(now: Date): Promise<ClaimedTransfer[]> {
           isNotNull(payments.razorpayPaymentId),
           inArray(orders.status, TRANSFERABLE_STATUSES),
           eq(payoutAccounts.status, 'verified'),
-          isNotNull(payoutAccounts.razorpayAccountId),
+          eq(payoutAccounts.linkedAccountStep, 'done'),
           not(vendorRefundCovers),
           or(isNull(payments.transferClaimedAt), lt(payments.transferClaimedAt, staleBefore(now))),
         ),

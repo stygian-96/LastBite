@@ -165,19 +165,25 @@ async function buildForAccount(tx: Tx, accountId: string, periodStart: string, p
 /**
  * Builds the payouts for a Monday to Sunday week by service date, one per payout account. An account
  * that has its payout already keeps it as it is, and returns it. Later arrivals roll into next week.
+ * An account that fails does not stop the others, and the run then throws, so it goes again.
  */
 export async function buildPayouts(periodStart: string, now: Date): Promise<Payout[]> {
   if (!isDate.test(periodStart) || Number.isNaN(Date.parse(periodStart)) || isoWeekday(periodStart) !== 1) {
     throw new ApiError('invalid_request', 400, 'A payout period starts on a Monday');
   }
   const periodEnd = addDays(periodStart, 6);
-  for (const accountId of await accountsToBuild(periodEnd)) {
+  const accounts = await accountsToBuild(periodEnd);
+  const failures: unknown[] = [];
+  for (const accountId of accounts) {
     try {
       await withTx((tx) => buildForAccount(tx, accountId, periodStart, periodEnd, now));
     } catch (e) {
-      // Another run finishes this account, and one bad account must not hold up the others.
       console.error(`Could not build a payout for account ${accountId}`, e);
+      failures.push(e);
     }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `Could not build payouts for ${failures.length} of ${accounts.length} accounts`);
   }
   return db.select().from(payouts).where(eq(payouts.periodStart, periodStart)).orderBy(asc(payouts.createdAt), asc(payouts.id));
 }

@@ -27,6 +27,14 @@ export function decrypt(data: Buffer): string {
   return Buffer.concat([decipher.update(body), decipher.final()]).toString('utf8');
 }
 
+/** Checks a hex HMAC-SHA256 of a webhook's raw body, in constant time. An empty signature never passes. */
+export function verifyHexHmac(secret: string, raw: string, signature: string): boolean {
+  if (!signature) return false;
+  const expected = Buffer.from(createHmac('sha256', secret).update(raw).digest('hex'));
+  const given = Buffer.from(signature);
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
 export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }

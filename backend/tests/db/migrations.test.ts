@@ -8,6 +8,32 @@ beforeEach(resetDb);
 
 const orderAt = async (outletId: string) => makeOrder({ dropId: (await makeDrop({ outletId })).id });
 
+describe('0014_linked_account_steps backfill', () => {
+  test('accounts already linked read as done, and the rest start from none', async () => {
+    const linked = await makePayoutAccount({ razorpayAccountId: 'acc_existing' });
+    const unlinked = await makePayoutAccount();
+
+    const migration = await readFile(new URL('../../db/migrations/0014_linked_account_steps.sql', import.meta.url), 'utf8');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `ALTER TABLE payout_accounts
+           DROP COLUMN linked_account_step, DROP COLUMN linked_product_id,
+           DROP COLUMN linked_account_failures, DROP COLUMN linked_account_generation`,
+      );
+      await client.query(migration);
+      const { rows } = await client.query<{ id: string; linked_account_step: string }>('SELECT id, linked_account_step FROM payout_accounts');
+      const step = new Map(rows.map((r) => [r.id, r.linked_account_step]));
+      expect(step.get(linked.id)).toBe('done');
+      expect(step.get(unlinked.id)).toBe('none');
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+});
+
 describe('0010_payout_snapshot backfill', () => {
   // DDL is transactional, so the file runs for real on these rows and the rollback puts the schema back.
   test('existing orders take the account of their outlet, and orders of an outlet with none stay null', async () => {

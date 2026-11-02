@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi, type MockInstance } from 'vitest';
 import { eq } from 'drizzle-orm';
 import pg from 'pg';
-import { db } from '../../src/db/client.js';
+import { db, pool } from '../../src/db/client.js';
 import { jobRuns, notifications, otpCodes, payments, payouts, rateLimits, sessions } from '../../src/db/schema.js';
 import { FakeGateway, setGateway } from '../../src/integrations/payments.js';
 import { FakeMessenger, setMessenger } from '../../src/integrations/messaging.js';
@@ -15,6 +15,7 @@ const control = vi.hoisted(() => ({
   failing: false,
   gate: undefined as Promise<void> | undefined,
   entered: () => {},
+  breakOneBuild: false,
 }));
 
 // One job made to fail or wait, so these tests need no seam in the runner.
@@ -31,9 +32,24 @@ vi.mock('../../src/modules/orders/expire.ts', async (importOriginal) => {
   };
 });
 
+// The first account of a build fails, as one bad account would.
+vi.mock('../../src/modules/payouts/build.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/modules/payouts/build.js')>();
+  return {
+    ...actual,
+    buildPayouts: async (periodStart: string, now: Date) => {
+      if (control.breakOneBuild) {
+        control.breakOneBuild = false;
+        vi.spyOn(db, 'transaction').mockRejectedValueOnce(new Error('account broke'));
+      }
+      return actual.buildPayouts(periodStart, now);
+    },
+  };
+});
+
 const EVERY_MINUTE = [
-  'expireHolds',
   'reconcilePayments',
+  'expireHolds',
   'sendPending',
   'processRefunds',
   'queuePickupReminders',
@@ -52,6 +68,7 @@ beforeEach(async () => {
   control.failing = false;
   control.gate = undefined;
   control.entered = () => {};
+  control.breakOneBuild = false;
   setGateway(new FakeGateway());
   setMessenger(new FakeMessenger());
 });
@@ -122,12 +139,25 @@ describe('runTick', () => {
     expect(await ran(ist('2026-11-05T17:14:59'))).toContain('queueDailyPrompts');
   });
 
+  test('licences are checked once between 10:00 and 10:14 IST', async () => {
+    expect(await ran(ist('2026-11-03T09:59:00'))).not.toContain('checkLicences');
+    expect(await ran(ist('2026-11-03T10:00:30'))).toContain('checkLicences');
+    expect(await ran(ist('2026-11-03T10:01:30'))).not.toContain('checkLicences');
+    expect(await ran(ist('2026-11-04T10:15:00'))).not.toContain('checkLicences');
+    expect(await ran(ist('2026-11-05T10:14:59'))).toContain('checkLicences');
+  });
+
+  test('payments are reconciled before holds expire, so a paid hold is not expired first', async () => {
+    const order = Object.keys((await runTick(TUESDAY_10AM_IST)).ran);
+    expect(order.indexOf('reconcilePayments')).toBeLessThan(order.indexOf('expireHolds'));
+  });
+
   test('one failing job does not stop the rest', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     control.failing = true;
     const result = await runTick(TUESDAY_10AM_IST);
     expect(result.failed).toEqual([{ job: 'expireHolds', error: 'expire broke' }]);
-    expect(Object.keys(result.ran)).toEqual([...EVERY_MINUTE.slice(1), 'autoMarkNoShows', 'checkLicences', 'cleanup', 'buildPayouts']);
+    expect(Object.keys(result.ran)).toEqual([...EVERY_MINUTE.filter((j) => j !== 'expireHolds'), 'autoMarkNoShows', 'checkLicences', 'cleanup', 'buildPayouts']);
     expect(logged).toHaveBeenCalled();
     expect(await db.select().from(jobRuns).where(eq(jobRuns.name, 'expireHolds'))).toEqual([]);
   });
@@ -171,13 +201,13 @@ describe('runTick', () => {
   });
 
   async function orderLastWeek() {
-    const account = await makePayoutAccount({ razorpayAccountId: 'acc_test' });
+    const account = await makePayoutAccount({ razorpayAccountId: `acc_test_${crypto.randomUUID()}` });
     const outlet = await makeLiveOutlet({ brandId: account.brandId, payoutAccountId: account.id });
     const drop = await makeDrop({ outletId: outlet.id, serviceDate: '2026-11-03' });
     const order = await makePaidOrder({ dropId: drop.id, status: 'collected', pickupCode: null });
     await db
       .update(payments)
-      .set({ feePaise: 300, transferStatus: 'on_hold', razorpayTransferId: 'trf_test', transferPaise: 7700 })
+      .set({ feePaise: 300, transferStatus: 'on_hold', razorpayTransferId: `trf_${order.id}`, transferPaise: 7700 })
       .where(eq(payments.orderId, order.id));
   }
 
@@ -200,6 +230,24 @@ describe('runTick', () => {
     expect(await db.select().from(payouts)).toHaveLength(1);
   });
 
+  test('one account failing leaves the build unstamped, and the next tick builds it', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await orderLastWeek();
+    await orderLastWeek();
+    await ran(ist('2026-11-02T06:00:00'));
+
+    control.breakOneBuild = true;
+    const first = await runTick(ist('2026-11-09T06:00:20'));
+    expect(first.failed.map((f) => f.job)).toEqual(['buildPayouts']);
+    expect(first.failed[0]!.error).toContain('1 of 2');
+    expect(await db.select().from(payouts)).toHaveLength(1);
+    expect(logged).toHaveBeenCalled();
+
+    expect(await ran(ist('2026-11-09T06:01:20'))).toContain('buildPayouts');
+    expect(await db.select().from(payouts)).toHaveLength(2);
+    expect(await ran(ist('2026-11-09T06:02:20'))).not.toContain('buildPayouts');
+  });
+
   test('a Monday missed altogether is caught up, still for the week before', async () => {
     await orderLastWeek();
     await ran(ist('2026-11-02T06:00:00'));
@@ -207,6 +255,28 @@ describe('runTick', () => {
 
     expect(await ran(ist('2026-11-10T11:00:00'))).toContain('buildPayouts');
     expect((await db.select().from(payouts))[0]!.periodStart).toBe('2026-11-02');
+  });
+});
+
+describe('database connections', () => {
+  test('the pool and the tick client listen for errors, and the client is not reused after the lock', async () => {
+    expect(pool.listenerCount('error')).toBeGreaterThan(0);
+    const connect = pool.connect.bind(pool) as () => Promise<pg.PoolClient>;
+    const spies: { on?: MockInstance; off?: MockInstance; release?: MockInstance } = {};
+    vi.spyOn(pool, 'connect').mockImplementationOnce(async () => {
+      const client = await connect();
+      spies.on = vi.spyOn(client, 'on');
+      spies.off = vi.spyOn(client, 'removeListener');
+      spies.release = vi.spyOn(client, 'release');
+      return client;
+    });
+
+    await runTick(TUESDAY_10AM_IST);
+
+    const listener = spies.on!.mock.calls.find(([event]) => event === 'error')?.[1];
+    expect(listener).toBeInstanceOf(Function);
+    expect(spies.off).toHaveBeenCalledWith('error', listener);
+    expect(spies.release).toHaveBeenCalledWith(true);
   });
 });
 

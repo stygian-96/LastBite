@@ -43,7 +43,10 @@ class ConsoleMessenger implements MessageSender {
 
 function defaultMessenger(): MessageSender {
   if (process.env.NODE_ENV === 'production') return whatsAppSmsFromEnv();
-  return process.env.NODE_ENV === 'test' ? new FakeMessenger() : new ConsoleMessenger();
+  if (process.env.NODE_ENV === 'test') return new FakeMessenger();
+  // Only by name: a server left with NODE_ENV unset must not log OTPs.
+  if (process.env.NODE_ENV === 'development') return new ConsoleMessenger();
+  throw new Error('No message provider: NODE_ENV is not set');
 }
 
 let messenger: MessageSender | undefined;

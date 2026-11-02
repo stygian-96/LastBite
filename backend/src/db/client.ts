@@ -5,6 +5,9 @@ import * as schema from './schema.js';
 
 export const pool = new pg.Pool({ connectionString: env().DATABASE_URL, max: 20 });
 
+// An idle connection that drops emits this, and with no listener it would take the process down.
+pool.on('error', (e) => console.error('An idle database connection failed', e));
+
 export const db = drizzle(pool, { schema });
 
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];

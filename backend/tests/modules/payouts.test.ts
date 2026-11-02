@@ -445,14 +445,115 @@ describe('syncLinkedAccounts', () => {
     const account = await makePayoutAccount(encrypted());
     const owner = await ownerOf(account.brandId);
     const real = gateway.createLinkedAccount.bind(gateway);
-    vi.spyOn(gateway, 'createLinkedAccount').mockImplementation(async (a) => {
-      const created = await real(a);
+    vi.spyOn(gateway, 'createLinkedAccount').mockImplementation(async (...args) => {
+      const created = await real(...args);
       await updatePayoutAccount(owner.id, account.id, bankChange, now);
       return created;
     });
 
     expect(await syncLinkedAccounts(now)).toBe(0);
-    expect((await accountRow(account.id)).razorpayAccountId).toBeNull();
+    expect((await accountRow(account.id)).linkedAccountStep).not.toBe('done');
+    expect((await accountRow(account.id)).linkedAccountFailures).toBe(0);
+  });
+
+  test('a bank change part way stops the steps, with no failure counted', async () => {
+    const account = await makePayoutAccount(encrypted());
+    const owner = await ownerOf(account.brandId);
+    gateway.beforeLinkStep = async (step) => {
+      if (step === 'stakeholder') await updatePayoutAccount(owner.id, account.id, bankChange, now);
+    };
+
+    expect(await syncLinkedAccounts(now)).toBe(0);
+    expect(await accountRow(account.id)).toMatchObject({ linkedAccountStep: 'account', linkedAccountFailures: 0 });
+    expect(gateway.linkStepsMade).toEqual(['account', 'stakeholder']);
+  });
+
+  test('a failure part way keeps the account ID, and the retry resumes on the same account', async () => {
+    const account = await makePayoutAccount(encrypted());
+    await ownerOf(account.brandId);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    gateway.failLinkStep = 'product';
+
+    expect(await syncLinkedAccounts(now)).toBe(0);
+    const partial = await accountRow(account.id);
+    expect(partial).toMatchObject({ linkedAccountStep: 'stakeholder', linkedAccountFailures: 1 });
+    expect(partial.razorpayAccountId).toBe(gateway.linkedAccounts[0]!.id);
+
+    gateway.failLinkStep = null;
+    expect(await syncLinkedAccounts(new Date(now.getTime() + 6 * MINUTES))).toBe(1);
+    expect(gateway.linkedAccounts).toHaveLength(1);
+    expect(gateway.linkStepsMade.filter((s) => s === 'account')).toHaveLength(1);
+    expect(await accountRow(account.id)).toMatchObject({ linkedAccountStep: 'done', razorpayAccountId: partial.razorpayAccountId, linkedProductId: expect.any(String) });
+  });
+
+  test('no transfer goes to an account part way through linking', async () => {
+    const { account, outlet } = await linkedOutlet();
+    await sale(outlet.id);
+    await db.update(payoutAccounts).set({ linkedAccountStep: 'stakeholder' }).where(eq(payoutAccounts.id, account.id));
+    await createTransfers(now);
+    expect(gateway.transfers).toEqual([]);
+  });
+
+  describe('giving up', () => {
+    const after = (attempt: number) => new Date(now.getTime() + attempt * 6 * MINUTES);
+
+    async function stuckAccount() {
+      const account = await makePayoutAccount(encrypted());
+      await ownerOf(account.brandId);
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      gateway.failLinkStep = 'stakeholder';
+      for (let i = 0; i < 7; i++) await syncLinkedAccounts(after(i));
+      return account;
+    }
+
+    test('stops at 5 failures, on one account at Razorpay, and audits it once', async () => {
+      const account = await stuckAccount();
+      expect(gateway.linkedAccounts).toHaveLength(1);
+      expect(gateway.linkAttempts).toBe(5);
+      expect((await accountRow(account.id)).linkedAccountFailures).toBe(5);
+      const audits = await auditsFor('linked_account.stuck');
+      expect(audits).toHaveLength(1);
+      expect(audits[0]).toMatchObject({ entityId: account.id });
+    });
+
+    test('verify resets a stuck account, which resumes where it was, on the same email', async () => {
+      const account = await stuckAccount();
+      const before = await accountRow(account.id);
+      const adminUser = await admin();
+
+      await verifyPayoutAccount(adminUser.id, account.id, now);
+
+      expect(await accountRow(account.id)).toMatchObject({
+        status: 'verified',
+        linkedAccountFailures: 0,
+        linkedAccountStep: before.linkedAccountStep,
+        razorpayAccountId: before.razorpayAccountId,
+        linkedAccountGeneration: before.linkedAccountGeneration,
+      });
+      expect(await auditsFor('payout_account.link_retry')).toHaveLength(1);
+
+      gateway.failLinkStep = null;
+      expect(await syncLinkedAccounts(after(8))).toBe(1);
+      expect(gateway.linkedAccounts).toHaveLength(1);
+    });
+
+    test('a bank re-verify starts again on a new email, and clears the failures', async () => {
+      const account = await stuckAccount();
+      const owner = (await db.select().from(memberships).where(eq(memberships.brandId, account.brandId)))[0]!;
+      await updatePayoutAccount(owner.userId, account.id, bankChange, now);
+      await verifyPayoutAccount((await admin()).id, account.id, now);
+
+      expect(await accountRow(account.id)).toMatchObject({
+        linkedAccountStep: 'none',
+        razorpayAccountId: null,
+        linkedProductId: null,
+        linkedAccountFailures: 0,
+        linkedAccountGeneration: 1,
+      });
+      gateway.failLinkStep = null;
+      expect(await syncLinkedAccounts(after(8))).toBe(1);
+      expect(gateway.linkedAccounts.map((a) => a.emailGeneration)).toEqual([0, 1]);
+    });
   });
 
   test('a failure leaves the account for a later run, and does not stop the others', async () => {
@@ -472,6 +573,21 @@ describe('syncLinkedAccounts', () => {
 });
 
 describe('buildPayouts', () => {
+  test('one account failing does not stop the others, and the run then fails, naming how many', async () => {
+    const first = await linkedOutlet();
+    const second = await linkedOutlet();
+    await sale(first.outlet.id);
+    await sale(second.outlet.id);
+    await createTransfers(now);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(db, 'transaction').mockRejectedValueOnce(new Error('account broke'));
+
+    await expect(buildPayouts(WEEK, now)).rejects.toThrow('1 of 2');
+    expect(await db.select().from(payouts)).toHaveLength(1);
+
+    expect(await buildPayouts(WEEK, now)).toHaveLength(2);
+  });
+
   test('payout groups collected and no-show orders by payout account, Monday to Sunday service_date', async () => {
     const { account, outlet } = await linkedOutlet();
     const monday = await sale(outlet.id, { serviceDate: '2026-11-02' });
@@ -2155,7 +2271,7 @@ describe('holding a payout', () => {
     expect((await payoutRow(payout.id)).status).toBe('held');
 
     await syncLinkedAccounts(now).catch(() => 0);
-    await db.update(payoutAccounts).set({ razorpayAccountId: `acc_${++seq}` }).where(eq(payoutAccounts.id, account.id));
+    await db.update(payoutAccounts).set({ razorpayAccountId: `acc_${++seq}`, linkedAccountStep: 'done' }).where(eq(payoutAccounts.id, account.id));
     await sale(outlet!.id, { serviceDate: '2026-11-10' });
     const next = await built(NEXT_WEEK);
     expect(next).toMatchObject({ adjustmentPaise: 0, netPaise: 11620 });

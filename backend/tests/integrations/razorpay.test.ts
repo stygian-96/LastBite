@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { GatewayRefusedError, type LinkedAccountInput } from '../../src/integrations/payments.js';
+import { GatewayRefusedError, type LinkedAccountInput, type LinkProgress } from '../../src/integrations/payments.js';
 import { RazorpayGateway, type RazorpayClient } from '../../src/integrations/razorpay.js';
 
 const CONFIG = {
@@ -45,6 +45,9 @@ type Stub = { [K in keyof RazorpayClient]?: Partial<RazorpayClient[K]> };
 /** A stand-in for the SDK, with only the methods a test gives it. Nothing here reaches the network. */
 const gateway = (c: Stub = {}) => new RazorpayGateway(CONFIG, c as RazorpayClient);
 
+/** The empty list a retry-safe call reads before it sends anything. */
+const nothingYet = () => json(200, { entity: 'collection', count: 0, items: [] });
+
 const REFUND = { paymentId: 'pay_1', amountPaise: 5000, reverseTransfer: true, idempotencyKey: 'refund-1-0' };
 
 afterEach(() => {
@@ -74,12 +77,12 @@ describe('setup', () => {
 
 describe('error mapping', () => {
   test('a 400 business refusal becomes GatewayRefusedError', async () => {
-    stubFetch(json(400, refused));
+    stubFetch(nothingYet(), json(400, refused));
     await expect(gateway().refund(REFUND)).rejects.toBeInstanceOf(GatewayRefusedError);
   });
 
   test('a 422 business refusal becomes GatewayRefusedError', async () => {
-    stubFetch(json(422, refused));
+    stubFetch(nothingYet(), json(422, refused));
     await expect(gateway().refund(REFUND)).rejects.toBeInstanceOf(GatewayRefusedError);
   });
 
@@ -91,28 +94,30 @@ describe('error mapping', () => {
     ['a 404', () => json(404, { error: { code: 'BAD_REQUEST_ERROR', description: 'The requested URL was not found' } })],
     ['a 409, still in progress', () => json(409, { error: { code: 'BAD_REQUEST_ERROR', description: 'Request in progress' } })],
     ['a 429', () => json(429, { error: { code: 'BAD_REQUEST_ERROR', description: 'Too many requests' } })],
+    ['a 400 about the idempotency key', () => json(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'Different request body sent for the same Idempotency Header' } })],
+    ['a 400 saying it is in progress', () => json(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'Refund is in progress' } })],
     ['a 400 about the API key', () => json(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'The api key provided is invalid' } })],
     ['a 400 that is not a business error', () => json(400, { error: { code: 'SERVER_ERROR', description: 'Odd' } })],
     ['a 400 with no JSON', () => new Response('Bad Request', { status: 400 })],
   ])('%s stays a plain error', async (_name, answer) => {
-    stubFetch(answer());
+    stubFetch(nothingYet(), answer());
     const failure = await gateway().refund(REFUND).catch((e: unknown) => e);
     expect(failure).toBeInstanceOf(Error);
     expect(failure).not.toBeInstanceOf(GatewayRefusedError);
   });
 
   test('a network failure stays a plain error', async () => {
-    stubFetch(new TypeError('fetch failed'));
+    stubFetch(nothingYet(), new TypeError('fetch failed'));
     const failure = await gateway().refund(REFUND).catch((e: unknown) => e);
     expect(failure).toBeInstanceOf(TypeError);
   });
 
   test('every direct request carries a timeout under 30 seconds', async () => {
     const spy = vi.spyOn(AbortSignal, 'timeout');
-    stubFetch(json(200, { id: 'rfnd_1', status: 'pending' }));
+    stubFetch(nothingYet(), json(200, { id: 'rfnd_1', status: 'pending' }));
     await gateway().refund(REFUND);
-    expect(spy).toHaveBeenCalledOnce();
-    expect(spy.mock.calls[0]![0]).toBeLessThan(30_000);
+    expect(spy).toHaveBeenCalledTimes(2);
+    for (const [ms] of spy.mock.calls) expect(ms).toBeLessThan(30_000);
     spy.mockRestore();
   });
 
@@ -191,26 +196,58 @@ describe('payments', () => {
 
 describe('refund', () => {
   test('posts with the idempotency header, and reverses only when asked', async () => {
-    const sent = stubFetch(json(200, { id: 'rfnd_1', status: 'pending' }), json(200, { id: 'rfnd_2', status: 'processed' }));
+    const sent = stubFetch(
+      nothingYet(),
+      json(200, { id: 'rfnd_1', status: 'pending' }),
+      nothingYet(),
+      json(200, { id: 'rfnd_2', status: 'processed' }),
+    );
     const g = gateway();
     expect(await g.refund(REFUND)).toEqual({ id: 'rfnd_1', status: 'pending' });
     await g.refund({ ...REFUND, reverseTransfer: false, idempotencyKey: 'refund-2-0' });
 
-    expect(sent[0]!.url).toBe('https://api.razorpay.com/v1/payments/pay_1/refund');
-    expect(sent[0]!.init.method).toBe('POST');
-    expect(header(sent[0]!, 'authorization')).toBe(`Basic ${Buffer.from('rzp_test_key:key-secret').toString('base64')}`);
-    expect(sentBody(sent[0]!)).toEqual({ amount: 5000, reverse_all: true });
-    expect(sentBody(sent[1]!)).toEqual({ amount: 5000 });
+    expect(sent[1]!.url).toBe('https://api.razorpay.com/v1/payments/pay_1/refund');
+    expect(sent[1]!.init.method).toBe('POST');
+    expect(header(sent[1]!, 'authorization')).toBe(`Basic ${Buffer.from('rzp_test_key:key-secret').toString('base64')}`);
+    expect(sentBody(sent[1]!)).toEqual({ amount: 5000, reverse_all: true, notes: { idempotency_key: REFUND.idempotencyKey } });
+    expect(sentBody(sent[3]!)).toEqual({ amount: 5000, notes: { idempotency_key: 'refund-2-0' } });
+  });
+
+  test('a key already on the payment gets that refund back, with nothing sent', async () => {
+    const seen = { id: 'rfnd_old', status: 'pending', notes: { idempotency_key: REFUND.idempotencyKey } };
+    const other = { id: 'rfnd_other', status: 'processed', notes: { idempotency_key: 'another' } };
+    const sent = stubFetch(json(200, { items: [other, seen] }));
+    expect(await gateway().refund(REFUND)).toEqual({ id: 'rfnd_old', status: 'pending' });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.init.method).toBe('GET');
+    expect(sent[0]!.url).toContain('/v1/payments/pay_1/refunds');
+  });
+
+  test('a refund with empty notes, as Razorpay writes them, is not a match', async () => {
+    const sent = stubFetch(json(200, { items: [{ id: 'rfnd_old', status: 'pending', notes: [] }] }), json(200, { id: 'rfnd_1', status: 'pending' }));
+    expect((await gateway().refund(REFUND)).id).toBe('rfnd_1');
+    expect(sent).toHaveLength(2);
+  });
+
+  test.each([
+    ['a 500', () => json(500, {})],
+    ['a 400', () => json(400, refused)],
+  ])('a list of refunds answering %s sends nothing, and is no refusal', async (_name, answer) => {
+    const sent = stubFetch(answer());
+    const failure = await gateway().refund(REFUND).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(GatewayRefusedError);
+    expect(sent).toHaveLength(1);
   });
 
   test('the same key sends the same header, shaped as Razorpay allows, and a long key fits', async () => {
     const long = `${'a'.repeat(36)}-3`;
-    const sent = stubFetch(...[1, 2, 3].map(() => json(200, { id: 'rfnd_1', status: 'pending' })));
+    const sent = stubFetch(...[1, 2, 3].flatMap(() => [nothingYet(), json(200, { id: 'rfnd_1', status: 'pending' })]));
     const g = gateway();
     await g.refund({ ...REFUND, idempotencyKey: long });
     await g.refund({ ...REFUND, idempotencyKey: long });
     await g.refund({ ...REFUND, idempotencyKey: `${long}x` });
-    const keys = sent.map((s) => header(s, 'x-refund-idempotency')!);
+    const keys = sent.filter((s) => s.init.method === 'POST').map((s) => header(s, 'x-refund-idempotency')!);
     expect(keys[0]).toBe(keys[1]);
     expect(keys[2]).not.toBe(keys[0]);
     expect(keys[0]).toMatch(/^[a-f0-9]{10,36}$/);
@@ -336,12 +373,15 @@ describe('transfers', () => {
 });
 
 describe('createLinkedAccount', () => {
+  const START: LinkProgress = { step: 'none', accountId: null, productId: null };
+  const save = async () => {};
   const input: LinkedAccountInput = {
     referenceId: 'abcdef0123456789abcd',
     legalName: 'Sweet Crumbs LLP',
     contactName: 'Asha Rao',
     phone: '+919876543210',
     email: 'asha@example.com',
+    emailGeneration: 0,
     pan: 'AAJFB4821K',
     holderName: 'Sweet Crumbs',
     accountNumber: '123456789012',
@@ -362,7 +402,7 @@ describe('createLinkedAccount', () => {
 
   test('makes the account, then its stakeholder, then configures Route with the bank details', async () => {
     const c = stubAccounts();
-    expect(await gateway(c).createLinkedAccount(input)).toEqual({ id: 'acc_1' });
+    expect(await gateway(c).createLinkedAccount(input, START, save)).toEqual({ id: 'acc_1' });
 
     const account = c.accounts.create.mock.calls[0]![0];
     expect(account).toMatchObject({
@@ -389,19 +429,55 @@ describe('createLinkedAccount', () => {
     });
   });
 
-  test('every account gets its own email, so a bank change can make a new one', async () => {
+  test('the email is stable for one set of bank details, and changes with the generation', async () => {
     const c = stubAccounts();
     const g = gateway(c);
-    await g.createLinkedAccount(input);
-    await g.createLinkedAccount(input);
-    const [first, second] = c.accounts.create.mock.calls.map(([p]) => p.email as string);
-    expect(first).toMatch(new RegExp(`^linked\\+${input.referenceId}\\.[0-9a-f]+@payouts\\.example\\.com$`));
-    expect(second).not.toBe(first);
+    await g.createLinkedAccount(input, START, save);
+    await g.createLinkedAccount(input, START, save);
+    await g.createLinkedAccount({ ...input, emailGeneration: 1 }, START, save);
+    const [first, second, third] = c.accounts.create.mock.calls.map(([p]) => p.email as string);
+    expect(first).toBe(`linked+${input.referenceId}.0@payouts.example.com`);
+    expect(second).toBe(first);
+    expect(third).toBe(`linked+${input.referenceId}.1@payouts.example.com`);
+  });
+
+  test('saves after each step, before going on to the next', async () => {
+    const c = stubAccounts();
+    const saved: LinkProgress[] = [];
+    await gateway(c).createLinkedAccount(input, START, async (p) => {
+      saved.push(p);
+    });
+    expect(saved).toEqual([
+      { step: 'account', accountId: 'acc_1', productId: null },
+      { step: 'stakeholder', accountId: 'acc_1', productId: null },
+      { step: 'product', accountId: 'acc_1', productId: 'acc_prd_1' },
+    ]);
+  });
+
+  test('a failed save stops the steps after it', async () => {
+    const c = stubAccounts();
+    await expect(
+      gateway(c).createLinkedAccount(input, START, async () => {
+        throw new Error('lost the claim');
+      }),
+    ).rejects.toThrow('lost the claim');
+    expect(c.stakeholders.create).not.toHaveBeenCalled();
+  });
+
+  test.each(['account', 'stakeholder', 'product'] as const)('resuming after %s makes only the steps left', async (step) => {
+    const c = stubAccounts();
+    const id = await gateway(c).createLinkedAccount(input, { step, accountId: 'acc_kept', productId: 'acc_prd_kept' }, save);
+    expect(id).toEqual({ id: 'acc_kept' });
+    expect(c.accounts.create).not.toHaveBeenCalled();
+    expect(c.stakeholders.create).toHaveBeenCalledTimes(step === 'account' ? 1 : 0);
+    expect(c.products.requestProductConfiguration).toHaveBeenCalledTimes(step === 'product' ? 0 : 1);
+    const productId = step === 'product' ? 'acc_prd_kept' : 'acc_prd_1';
+    expect(c.products.edit).toHaveBeenCalledWith('acc_kept', productId, expect.anything());
   });
 
   test('an individual PAN is the proprietor, so it goes on the stakeholder', async () => {
     const c = stubAccounts();
-    await gateway(c).createLinkedAccount({ ...input, pan: 'ABCPK1234L' });
+    await gateway(c).createLinkedAccount({ ...input, pan: 'ABCPK1234L' }, START, save);
     const account = c.accounts.create.mock.calls[0]![0];
     expect(account.business_type).toBe('proprietorship');
     expect(account.legal_info).toBeUndefined();
@@ -414,21 +490,21 @@ describe('createLinkedAccount', () => {
     ['AAAHR1234C', 'other'],
   ])('PAN %s reads as %s', async (pan, businessType) => {
     const c = stubAccounts();
-    await gateway(c).createLinkedAccount({ ...input, pan });
+    await gateway(c).createLinkedAccount({ ...input, pan }, START, save);
     expect(c.accounts.create.mock.calls[0]![0].business_type).toBe(businessType);
   });
 
   test('an address it cannot complete sends nothing', async () => {
     const c = stubAccounts();
     await expect(
-      gateway(c).createLinkedAccount({ ...input, address: { street: null, city: null, postalCode: null } }),
+      gateway(c).createLinkedAccount({ ...input, address: { street: null, city: null, postalCode: null } }, START, save),
     ).rejects.toThrow('address');
     expect(c.accounts.create).not.toHaveBeenCalled();
   });
 
   test('a city it has no state for sends nothing', async () => {
     const c = stubAccounts();
-    await expect(gateway(c).createLinkedAccount({ ...input, address: { ...input.address, city: 'pune' } })).rejects.toThrow('pune');
+    await expect(gateway(c).createLinkedAccount({ ...input, address: { ...input.address, city: 'pune' } }, START, save)).rejects.toThrow('pune');
     expect(c.accounts.create).not.toHaveBeenCalled();
   });
 });

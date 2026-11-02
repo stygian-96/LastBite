@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { verifyHexHmac } from '../lib/crypto.js';
 import { env } from '../lib/env.js';
 import type { MessageSender, OutboundMessage } from './messaging.js';
 
@@ -33,10 +33,7 @@ export class WhatsAppSmsSender implements MessageSender {
 
   /** The signature is a hex HMAC-SHA256 of the raw body. */
   verifyWebhook(raw: string, signature: string): boolean {
-    if (!signature) return false;
-    const expected = Buffer.from(createHmac('sha256', this.config.webhookSecret).update(raw).digest('hex'));
-    const given = Buffer.from(signature);
-    return given.length === expected.length && timingSafeEqual(given, expected);
+    return verifyHexHmac(this.config.webhookSecret, raw, signature);
   }
 }
 

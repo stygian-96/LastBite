@@ -1,5 +1,6 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import Razorpay from 'razorpay';
+import { verifyHexHmac } from '../lib/crypto.js';
 import { env } from '../lib/env.js';
 import {
   GatewayRefusedError,
@@ -7,6 +8,7 @@ import {
   type GatewayRefund,
   type GatewayTransfer,
   type LinkedAccountInput,
+  type LinkProgress,
   type PaymentGateway,
 } from './payments.js';
 
@@ -27,6 +29,7 @@ type RawTransfer = {
   notes?: Record<string, string> | unknown[];
 };
 type Keyed = { id: string; notes?: Record<string, string> | unknown[] };
+type RawRefund = Keyed & { status: string };
 type Collection<T> = { items: T[] };
 
 /** The parts of the SDK used here. It has no timeouts and drops custom headers, so calls that need a key use fetch. */
@@ -54,6 +57,9 @@ export type RazorpayClient = {
 
 type ApiErrorBody = { code?: unknown; description?: unknown };
 
+/** About the request itself, not the money: Razorpay said no to how it was asked, or has not finished. */
+const NOT_A_REFUSAL = /api key|authentication|idempotency|in progress/i;
+
 /**
  * Only a definite business refusal counts: Razorpay read the request and said no. A status such as
  * 401, 404 or 409 (still in progress) says nothing about the money, and neither does a bad API key,
@@ -62,7 +68,7 @@ type ApiErrorBody = { code?: unknown; description?: unknown };
 function errorFrom(label: string, status: number, error: ApiErrorBody | undefined): Error {
   const description = typeof error?.description === 'string' ? error.description : '';
   const refusal =
-    (status === 400 || status === 422) && error?.code === 'BAD_REQUEST_ERROR' && !/api key|authentication/i.test(description);
+    (status === 400 || status === 422) && error?.code === 'BAD_REQUEST_ERROR' && !NOT_A_REFUSAL.test(description);
   const message = `Razorpay ${label} answered ${status}: ${description || 'no description'}`;
   return refusal ? new GatewayRefusedError(message) : new Error(message);
 }
@@ -200,11 +206,32 @@ export class RazorpayGateway implements PaymentGateway {
     return items.map(toPayment);
   }
 
+  /**
+   * The refund already made with this key, if any. A refusal here is only about the listing, and
+   * whether a refund went is unknown, so it must not read as a refusal of the refund.
+   */
+  private async refundWithKey(paymentId: string, key: string): Promise<RawRefund | undefined> {
+    try {
+      const { items } = await this.request<Collection<RawRefund>>('GET', `/v1/payments/${paymentId}/refunds?count=100`);
+      return items?.find((r) => hasKey(r, key));
+    } catch (e) {
+      throw e instanceof GatewayRefusedError ? new Error(e.message, { cause: e }) : e;
+    }
+  }
+
+  /**
+   * The header is what the docs give, and the key also goes in the notes, read back before sending,
+   * as a lost answer must not refund twice if the header turns out not to hold. If the earlier
+   * refunds cannot be read, nothing is sent.
+   */
   async refund(a: { paymentId: string; amountPaise: number; reverseTransfer: boolean; idempotencyKey: string }): Promise<GatewayRefund> {
+    const made = await this.refundWithKey(a.paymentId, a.idempotencyKey);
+    if (made) return { id: made.id, status: made.status };
+
     const { id, status } = await this.request<GatewayRefund>(
       'POST',
       `/v1/payments/${a.paymentId}/refund`,
-      { amount: a.amountPaise, ...(a.reverseTransfer ? { reverse_all: true } : {}) },
+      { amount: a.amountPaise, notes: { idempotency_key: a.idempotencyKey }, ...(a.reverseTransfer ? { reverse_all: true } : {}) },
       { 'X-Refund-Idempotency': headerKey(a.idempotencyKey) },
     );
     return { id, status };
@@ -273,37 +300,61 @@ export class RazorpayGateway implements PaymentGateway {
   }
 
   /**
-   * The account, its stakeholder, then Route with the bank details. A bank change makes a new account,
-   * and Razorpay refuses an email it has seen, so each gets a fresh address of ours whatever the
-   * vendor's is. A failure part way leaves a dead account there, and the retry starts a new one.
+   * The account, its stakeholder, then Route with the bank details, saving after each, so a retry
+   * picks up where this stopped rather than making another account with the vendor's details.
+   * Razorpay refuses an email it has seen, so the address is one of ours, whatever the vendor's is,
+   * and stays the same until a bank change makes a new account.
    */
-  async createLinkedAccount(a: LinkedAccountInput): Promise<{ id: string }> {
-    const registered = registeredAddress(a);
-    const email = `linked+${a.referenceId}.${randomBytes(4).toString('hex')}@${this.config.linkedEmailDomain}`;
+  async createLinkedAccount(
+    a: LinkedAccountInput,
+    progress: LinkProgress,
+    save: (p: LinkProgress) => Promise<void>,
+  ): Promise<{ id: string }> {
+    const email = `linked+${a.referenceId}.${a.emailGeneration}@${this.config.linkedEmailDomain}`;
     const panHolder = a.pan.charAt(3).toUpperCase();
     const proprietor = panHolder === INDIVIDUAL_PAN;
+    let { step, accountId, productId } = progress;
 
-    const { id } = await this.sdk('create linked account', (c) =>
-      c.accounts.create({
-        email,
-        phone: a.phone.replace(/^\+91/, ''),
-        type: 'route',
-        legal_business_name: a.legalName,
-        business_type: BUSINESS_TYPES[panHolder] ?? 'other',
-        contact_name: a.contactName,
-        profile: { category: 'food', subcategory: 'restaurant', addresses: { registered } },
-        // Razorpay takes only a business PAN here. A proprietor's is their own, on the stakeholder.
-        ...(proprietor ? {} : { legal_info: { pan: a.pan } }),
-      }),
-    );
-    await this.sdk('create stakeholder', (c) =>
-      c.stakeholders.create(id, { name: a.contactName, email, ...(proprietor ? { kyc: { pan: a.pan } } : {}) }),
-    );
-    const product = await this.sdk('request route', (c) =>
-      c.products.requestProductConfiguration(id, { product_name: 'route', tnc_accepted: true }),
-    );
+    if (step === 'none') {
+      const registered = registeredAddress(a);
+      const created = await this.sdk('create linked account', (c) =>
+        c.accounts.create({
+          email,
+          phone: a.phone.replace(/^\+91/, ''),
+          type: 'route',
+          legal_business_name: a.legalName,
+          business_type: BUSINESS_TYPES[panHolder] ?? 'other',
+          contact_name: a.contactName,
+          profile: { category: 'food', subcategory: 'restaurant', addresses: { registered } },
+          // Razorpay takes only a business PAN here. A proprietor's is their own, on the stakeholder.
+          ...(proprietor ? {} : { legal_info: { pan: a.pan } }),
+        }),
+      );
+      accountId = created.id;
+      step = 'account';
+      await save({ step, accountId, productId });
+    }
+    const id = accountId!;
+
+    if (step === 'account') {
+      await this.sdk('create stakeholder', (c) =>
+        c.stakeholders.create(id, { name: a.contactName, email, ...(proprietor ? { kyc: { pan: a.pan } } : {}) }),
+      );
+      step = 'stakeholder';
+      await save({ step, accountId, productId });
+    }
+
+    if (step === 'stakeholder') {
+      const product = await this.sdk('request route', (c) =>
+        c.products.requestProductConfiguration(id, { product_name: 'route', tnc_accepted: true }),
+      );
+      productId = product.id;
+      step = 'product';
+      await save({ step, accountId, productId });
+    }
+
     await this.sdk('configure route', (c) =>
-      c.products.edit(id, product.id, {
+      c.products.edit(id, productId!, {
         settlements: { account_number: a.accountNumber, ifsc_code: a.ifsc, beneficiary_name: a.holderName },
         tnc_accepted: true,
       }),
@@ -311,12 +362,8 @@ export class RazorpayGateway implements PaymentGateway {
     return { id };
   }
 
-  /** The signature is a hex HMAC-SHA256 of the raw body, compared in constant time. */
   verifyWebhook(raw: string, signature: string): boolean {
-    if (!signature) return false;
-    const expected = Buffer.from(createHmac('sha256', this.config.webhookSecret).update(raw).digest('hex'));
-    const given = Buffer.from(signature);
-    return given.length === expected.length && timingSafeEqual(given, expected);
+    return verifyHexHmac(this.config.webhookSecret, raw, signature);
   }
 }
 
