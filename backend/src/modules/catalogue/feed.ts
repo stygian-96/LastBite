@@ -5,6 +5,7 @@ import { areas, brands, drops, orders, outlets } from '../../db/schema.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { getStore } from '../../integrations/storage.js';
 import { INT4_MAX } from '../../lib/money.js';
+import { toIso as iso } from '../../lib/time.js';
 import { hhmm } from './listings.js';
 
 export type CityView = { slug: string; name: string; areas: { id: string; name: string }[] };
@@ -87,7 +88,6 @@ const filtersSchema = z.strictObject({
   q: z.string().refine((v) => !v.includes('\0')).optional(),
 });
 
-const iso = (t: string) => new Date(t).toISOString();
 const photo = (key: string | null) => (key ? getStore().publicUrl(key) : null);
 const notFound = (what: string) => new ApiError('not_found', 404, `${what} not found`);
 const titleCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);

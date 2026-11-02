@@ -41,3 +41,24 @@ export function addDays(date: string, n: number): string {
 export function isoWeekday(date: string): number {
   return new Date(`${date}T00:00:00Z`).getUTCDay() || 7;
 }
+
+/** An instant as ISO 8601 in UTC, which every browser parses. Postgres text such as "2026-11-02 05:54:25+00" is not. */
+export function toIso(at: string): string {
+  return new Date(at).toISOString();
+}
+
+/** How Postgres writes a timestamptz as text, the form drizzle hands back in string mode. */
+const PG_TIMESTAMPTZ = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?[+-]\d{2}(:\d{2})?$/;
+
+/**
+ * A copy of a response body with every Postgres timestamp in it turned to ISO 8601, at any depth.
+ * route() runs every response through this, so no module can send one by mistake.
+ */
+export function isoTimestamps<T>(value: T): T {
+  if (typeof value === 'string') return (PG_TIMESTAMPTZ.test(value) ? toIso(value) : value) as T;
+  if (Array.isArray(value)) return value.map(isoTimestamps) as T;
+  if (value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, isoTimestamps(v)])) as T;
+  }
+  return value;
+}

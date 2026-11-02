@@ -6,6 +6,7 @@ import { getCookie } from 'hono/cookie';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { ApiError } from './errors.js';
 import { env } from './env.js';
+import { isoTimestamps } from './time.js';
 import { getSessionUser, type SessionUser } from '../modules/auth/session.js';
 
 export type { SessionUser };
@@ -104,6 +105,6 @@ export function route<B = undefined>(
       now,
     });
     if (result instanceof Response) return result;
-    return c.json(result ?? null);
+    return c.json(isoTimestamps(result ?? null));
   };
 }

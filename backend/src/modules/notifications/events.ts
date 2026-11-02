@@ -1,4 +1,5 @@
 import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { toIso as iso } from '../../lib/time.js';
 import type { Tx } from '../../db/client.js';
 import { areas, brands, drops, follows, memberships, orders, outlets, payments, refunds, users } from '../../db/schema.js';
 import { env } from '../../lib/env.js';
@@ -9,7 +10,6 @@ import type { TemplateName, Vars } from './templates.js';
 // that made the change, reads what the copy needs, and queues rows under a dedupe key.
 
 export const origin = () => env().FRONTEND_ORIGIN.replace(/\/$/, '');
-const iso = (at: string) => new Date(at).toISOString();
 export const firstName = (name: string | null) => name?.trim().split(/\s+/)[0] || 'there';
 const SHORT_ADDRESS = 40;
 

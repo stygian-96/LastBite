@@ -2,6 +2,7 @@ import { and, desc, eq, gt, inArray, isNull, not, or, type SQL } from 'drizzle-o
 import { db } from '../../db/client.js';
 import { brands, drops, orders, outlets, refunds } from '../../db/schema.js';
 import { ApiError } from '../../lib/errors.js';
+import { toIso } from '../../lib/time.js';
 
 export type RefundSummary = { status: string; amountPaise: number };
 
@@ -96,9 +97,9 @@ function toView(row: Row, refund: RefundSummary | null): OrderView {
     address: row.address,
     mapsUrl: row.mapsUrl,
     pickupInstructions: row.pickupInstructions,
-    pickupStartAt: row.pickupStartAt,
-    pickupEndAt: row.pickupEndAt,
-    holdExpiresAt: row.holdExpiresAt,
+    pickupStartAt: toIso(row.pickupStartAt),
+    pickupEndAt: toIso(row.pickupEndAt),
+    holdExpiresAt: toIso(row.holdExpiresAt),
     pickupCode: row.status === 'paid' || row.status === 'collected' ? row.pickupCode : null,
     refund,
   };
