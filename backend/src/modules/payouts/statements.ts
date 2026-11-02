@@ -30,6 +30,7 @@ export async function listPayouts(status?: string) {
       adjustmentPaise: payouts.adjustmentPaise,
       netPaise: payouts.netPaise,
       status: payouts.status,
+      approvingAt: payouts.approvingAt,
       paidAt: payouts.paidAt,
       createdAt: payouts.createdAt,
     })

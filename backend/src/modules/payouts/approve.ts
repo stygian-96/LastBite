@@ -2,7 +2,7 @@ import { and, eq, inArray, isNotNull, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
 import { orders, payments, payoutAccounts, payouts, refunds } from '../../db/schema.js';
-import { getGateway } from '../../integrations/payments.js';
+import { getGateway, type GatewayTransfer } from '../../integrations/payments.js';
 import { audit } from '../../lib/audit.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { absorbNegativePayouts, carriedBalance, negativePayouts } from './balance.js';
@@ -14,8 +14,12 @@ const notFound = (what: string) => new ApiError('not_found', 404, `${what} not f
 const incomplete = () => new ApiError('release_incomplete', 502, 'Some transfers were not released. Try again');
 const isId = (id: string) => z.uuid().safeParse(id).success;
 const holdReason = z.string().trim().min(1).max(500);
-const approvalInProgress = () =>
-  new ApiError('approval_in_progress', 409, 'An approval on this account has to finish first. Retry the payout it stopped on');
+const approvalInProgress = (payoutId: string) =>
+  new ApiError('approval_in_progress', 409, 'An approval on this account has to finish first. Retry the payout it stopped on', {
+    payoutId,
+  });
+const gatewayUnavailable = () =>
+  new ApiError('gateway_unavailable', 409, 'Could not check this payout with the gateway. Try again shortly');
 
 /**
  * The account is locked first, as buildPayouts and verifyPayoutAccount do, and then the payout. A
@@ -65,6 +69,94 @@ type Held = Awaited<ReturnType<typeof heldTransfers>>[number];
 
 const remainingPaise = (row: Held) => row.transferPaise! - row.reversedPaise;
 
+/** Every transfer this payout's approval may have touched, on hold or released by it. */
+function transfersInScope(payout: Payout) {
+  return db
+    .select({
+      paymentId: payments.id,
+      orderId: orders.id,
+      razorpayPaymentId: payments.razorpayPaymentId,
+      razorpayTransferId: payments.razorpayTransferId,
+      transferPaise: payments.transferPaise,
+      reversedPaise: payments.reversedPaise,
+      transferStatus: payments.transferStatus,
+    })
+    .from(payments)
+    .innerJoin(orders, eq(orders.id, payments.orderId))
+    .innerJoin(payouts, eq(payouts.id, orders.payoutId))
+    .where(
+      and(
+        eq(payouts.payoutAccountId, payout.payoutAccountId),
+        or(eq(payouts.id, payout.id), eq(payouts.status, 'released')),
+        or(eq(payments.transferStatus, 'on_hold'), eq(payments.releasedPayoutId, payout.id)),
+      ),
+    );
+}
+
+type InScope = Awaited<ReturnType<typeof transfersInScope>>[number];
+
+/**
+ * Brings one payment in line with what the gateway says, under the order lock. Only a row unchanged
+ * since it was read is touched, as an overlapping retry of this payout may have recorded it. A
+ * transfer the gateway calls reversed has nothing left, whatever our status: a refund's reversal is
+ * for the refund path to record.
+ */
+function correctFromGateway(payoutId: string, adminId: string, row: InScope, found: GatewayTransfer): Promise<void> {
+  const reversedPaise = row.transferPaise! - found.amountPaise;
+  const transferStatus = found.status === 'reversed' ? row.transferStatus : found.status;
+  if (reversedPaise === row.reversedPaise && transferStatus === row.transferStatus) return Promise.resolve();
+  return withTx(async (tx) => {
+    await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, row.orderId)).for('update');
+    const [saved] = await tx
+      .update(payments)
+      .set({ reversedPaise, transferStatus, releasedPayoutId: transferStatus === 'released' ? payoutId : null })
+      .where(
+        and(
+          eq(payments.id, row.paymentId),
+          eq(payments.reversedPaise, row.reversedPaise),
+          eq(payments.transferStatus, row.transferStatus),
+        ),
+      )
+      .returning({ id: payments.id });
+    if (!saved) return;
+    if (transferStatus === 'released' && row.transferStatus !== 'released') await stopReversal(tx, row, row.razorpayTransferId!);
+    await audit(tx, {
+      actorId: adminId,
+      action: 'payout.reconciled_gateway',
+      entity: 'payout',
+      entityId: payoutId,
+      detail: {
+        paymentId: row.paymentId,
+        orderId: row.orderId,
+        razorpayTransferId: row.razorpayTransferId,
+        reversedPaise: { from: row.reversedPaise, to: reversedPaise },
+        transferStatus: { from: row.transferStatus, to: transferStatus },
+      },
+    });
+  });
+}
+
+/**
+ * The start of every retry. A failed try may have lost an answer the gateway acted on, so what is
+ * recorded cannot be trusted, and everything after this reasons from it. It runs before the retry
+ * touches anything: if a transfer cannot be read the mark stays, for another try.
+ */
+async function reconcileWithGateway(adminId: string, payoutId: string): Promise<void> {
+  const [payout] = await db.select().from(payouts).where(eq(payouts.id, payoutId));
+  if (!payout?.approvingAt) return;
+  for (const row of await transfersInScope(payout)) {
+    let found: GatewayTransfer | undefined;
+    try {
+      const listed = await getGateway().listPaymentTransfers(row.razorpayPaymentId!);
+      found = listed.find((t) => t.id === row.razorpayTransferId);
+    } catch (e) {
+      console.error(`Could not read the transfers of payment ${row.paymentId}`, e);
+    }
+    if (!found) throw gatewayUnavailable();
+    await correctFromGateway(payoutId, adminId, row, found);
+  }
+}
+
 /**
  * Checks the payout can go, brings it into line with the money as it stands, and lists what to
  * release against the net. A negative payout still waiting is taken in here, as the balance counts
@@ -73,7 +165,8 @@ const remainingPaise = (row: Held) => row.transferPaise! - row.reversedPaise;
  *
  * One approval at a time per account, or two would each reverse the same excess. It is marked here
  * and stays marked through a failure, with no timeout: an admin retries that payout, and until it
- * finishes no other on the account can start.
+ * finishes no other on the account can start. A retry has reconciled with the gateway by now, which
+ * is what makes it safe for the negative exit to clear the mark.
  */
 function startApproval(adminId: string, payoutId: string, now: Date) {
   return withTx(async (tx) => {
@@ -92,7 +185,7 @@ function startApproval(adminId: string, payoutId: string, now: Date) {
       .where(
         and(eq(payouts.payoutAccountId, payout.payoutAccountId), ne(payouts.id, payoutId), isNotNull(payouts.approvingAt)),
       );
-    if (other) throw approvalInProgress();
+    if (other) throw approvalInProgress(other.id);
 
     const waiting = await tx
       .select({ id: payouts.id })
@@ -128,7 +221,7 @@ function startApproval(adminId: string, payoutId: string, now: Date) {
       await tx.update(payouts).set({ status: 'held', approvingAt: null }).where(eq(payouts.id, payoutId));
       await audit(tx, { actorId: adminId, action: 'payout.held', entity: 'payout', entityId: payoutId, detail: { netPaise } });
       // A retry that lands here may have moved money on its first try.
-      if (payout.approvingAt) await flagMismatch(tx, adminId, payoutId, netPaise);
+      if (payout.approvingAt) await flagMismatch(tx, adminId, payoutId, netPaise, { unlessNothingMoved: true });
       return undefined;
     }
     if (!payout.approvingAt) {
@@ -181,11 +274,32 @@ async function settleAdjustment(payoutId: string, held: Held[], netPaise: number
 }
 
 /**
- * Marks one transfer released under the order lock, which is what a refund holds when it reads the
- * transfer's status. A refund that read on_hold during the release call planned a reversal, and now
- * that cannot happen: unsent, it stops reversing and comes off the next payout as an adjustment.
- * Sent, it is flagged for an admin.
+ * A refund that read on_hold during a release call planned a reversal, and now that cannot happen:
+ * unsent, it stops reversing and comes off the next payout as an adjustment. Sent, it is flagged for
+ * an admin. The caller holds the order.
  */
+async function stopReversal(tx: Tx, row: { paymentId: string; orderId: string }, razorpayTransferId: string): Promise<void> {
+  const [refund] = await tx
+    .select()
+    .from(refunds)
+    .where(and(eq(refunds.paymentId, row.paymentId), eq(refunds.reverseTransfer, true), eq(refunds.status, 'pending')))
+    .limit(1)
+    .for('update');
+  if (!refund) return;
+  if (refundIsUnsent(refund)) {
+    await tx.update(refunds).set({ reverseTransfer: false }).where(eq(refunds.id, refund.id));
+    return;
+  }
+  await audit(tx, {
+    actorId: null,
+    action: 'transfer.reversal_after_release',
+    entity: 'payment',
+    entityId: row.paymentId,
+    detail: { orderId: row.orderId, razorpayTransferId, refundId: refund.id },
+  });
+}
+
+/** Marks one transfer released under the order lock, which is what a refund holds when it reads the status. */
 function markReleased(payoutId: string, row: { paymentId: string; orderId: string }, razorpayTransferId: string): Promise<void> {
   return withTx(async (tx) => {
     await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, row.orderId)).for('update');
@@ -194,26 +308,7 @@ function markReleased(payoutId: string, row: { paymentId: string; orderId: strin
       .set({ transferStatus: 'released', releasedPayoutId: payoutId })
       .where(and(eq(payments.id, row.paymentId), eq(payments.transferStatus, 'on_hold')))
       .returning({ id: payments.id });
-    if (!marked) return;
-
-    const [refund] = await tx
-      .select()
-      .from(refunds)
-      .where(and(eq(refunds.paymentId, row.paymentId), eq(refunds.reverseTransfer, true), eq(refunds.status, 'pending')))
-      .limit(1)
-      .for('update');
-    if (!refund) return;
-    if (refundIsUnsent(refund)) {
-      await tx.update(refunds).set({ reverseTransfer: false }).where(eq(refunds.id, refund.id));
-      return;
-    }
-    await audit(tx, {
-      actorId: null,
-      action: 'transfer.reversal_after_release',
-      entity: 'payment',
-      entityId: row.paymentId,
-      detail: { orderId: row.orderId, razorpayTransferId, refundId: refund.id },
-    });
+    if (marked) await stopReversal(tx, row, razorpayTransferId);
   });
 }
 
@@ -258,12 +353,18 @@ async function reconcilePayout(tx: Tx, adminId: string, payout: Payout): Promise
 }
 
 /** Flags money moved by an approval that differs from the net. The next balance makes it good by itself. */
-async function flagMismatch(tx: Tx, adminId: string, payoutId: string, netPaise: number): Promise<void> {
+async function flagMismatch(
+  tx: Tx,
+  adminId: string,
+  payoutId: string,
+  netPaise: number,
+  { unlessNothingMoved = false } = {},
+): Promise<void> {
   const [moved] = await tx
     .select({ paise: sql<number>`coalesce(sum(${payments.transferPaise} - ${payments.reversedPaise}), 0)::int` })
     .from(payments)
     .where(and(eq(payments.releasedPayoutId, payoutId), eq(payments.transferStatus, 'released')));
-  if (moved!.paise === netPaise) return;
+  if (moved!.paise === netPaise || (unlessNothingMoved && moved!.paise === 0)) return;
   await audit(tx, {
     actorId: adminId,
     action: 'payout.mismatch',
@@ -306,6 +407,7 @@ function finishApproval(adminId: string, payoutId: string, now: Date): Promise<v
  */
 export async function approvePayout(adminId: string, payoutId: string, now: Date): Promise<void> {
   if (!isId(payoutId)) throw notFound('Payout');
+  await reconcileWithGateway(adminId, payoutId);
   const started = await startApproval(adminId, payoutId, now);
   if (!started) throw new ApiError('payout_negative', 409, 'The transfers cannot cover this payout, so it stays held and carries forward');
 
@@ -332,7 +434,7 @@ export async function holdPayout(adminId: string, payoutId: string, rawReason: s
   const reason = parseInput(holdReason, rawReason);
   await withTx(async (tx) => {
     const payout = await lockPayout(tx, payoutId);
-    if (payout.approvingAt) throw approvalInProgress();
+    if (payout.approvingAt) throw approvalInProgress(payout.id);
     if (payout.status !== 'draft') throw invalidState();
     await tx.update(payouts).set({ status: 'held', holdReason: reason }).where(eq(payouts.id, payoutId));
     await audit(tx, { actorId: adminId, action: 'payout.hold', entity: 'payout', entityId: payoutId, detail: { reason, at: now.toISOString() } });

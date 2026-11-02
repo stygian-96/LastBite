@@ -1730,11 +1730,154 @@ describe('money moved equals money owed', () => {
     expect(await failure(approvePayout(adminId, w3.id, now))).toMatchObject({ code: 'payout_negative' });
 
     expect(await payoutRow(w3.id)).toMatchObject({ status: 'held', approvingAt: null, netPaise: -3280 });
+    expect(await auditsFor('payout.mismatch')).toEqual([]);
     await approvePayout(adminId, w4.id, now);
     expect((await payoutRow(w4.id)).netPaise).toBe(8340);
     // O1, the third week's other order and O4, less the 14900 refund.
     expect(released()).toBe(3 * 11620 - 14900);
     expect(await carriedBalance(db, outlet.payoutAccountId!)).toBe(0);
+  });
+
+  /** Week 3 whose reversal of 2420 on the second transfer was accepted, with its answer lost. */
+  async function lostReversal() {
+    const { outlet, adminId, o2 } = await negativeSecondWeek();
+    const x = await sale(outlet.id, { pricePaise: 16000, feePaise: 320, serviceDate: '2026-11-17' });
+    // A little over O2, so the second reversal always lands here.
+    const a = await sale(outlet.id, { pricePaise: 15000, feePaise: 300, serviceDate: '2026-11-17' });
+    const w3 = await built(WEEK_AFTER);
+    const real = gateway.reverseTransferPartial.bind(gateway);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const spy = vi
+      .spyOn(gateway, 'reverseTransferPartial')
+      .mockImplementationOnce(real)
+      .mockImplementationOnce(async (id, paise, key) => {
+        await real(id, paise, key);
+        throw new Error('Gateway timed out');
+      });
+    expect(await failure(approvePayout(adminId, w3.id, now))).toMatchObject({ code: 'release_incomplete' });
+    spy.mockRestore();
+    expect(gateway.transferReversals.map((r) => r.amountPaise)).toEqual([12480, 2420]);
+    expect((await paymentFor(a.order.id)).reversedPaise).toBe(0);
+    return { outlet, adminId, o2, x, a, w3 };
+  }
+
+  test('a retry that goes negative takes up a lost reversal first, so the excess is not reversed again', async () => {
+    const { outlet, adminId, o2, x, a, w3 } = await lostReversal();
+    await reverseInFull(adminId, o2.order.id);
+    await reverseInFull(adminId, x.order.id, 16000);
+
+    expect(await failure(approvePayout(adminId, w3.id, now))).toMatchObject({ code: 'payout_negative' });
+
+    expect((await paymentFor(a.order.id)).reversedPaise).toBe(2420);
+    expect(await payoutRow(w3.id)).toMatchObject({ status: 'held', approvingAt: null, netPaise: -3200 });
+    const [corrected] = await auditsFor('payout.reconciled_gateway');
+    expect(corrected).toMatchObject({ entityId: w3.id });
+    expect(corrected!.detail).toMatchObject({ paymentId: a.payment.id, reversedPaise: { from: 0, to: 2420 } });
+
+    await sale(outlet.id, { pricePaise: 20000, feePaise: 400, serviceDate: '2026-11-24' });
+    const w4 = await built('2026-11-23');
+    expect(w4).toMatchObject({ netPaise: 12400, status: 'draft' });
+    await approvePayout(adminId, w4.id, now);
+
+    // O1, A and the fourth week's sale, less the 14900 refund.
+    const owed = 11620 + 11700 + 15600 - 14900;
+    expect(gateway.transferReversals.map((r) => r.amountPaise)).toEqual([12480, 2420, 12480]);
+    expect(released()).toBe(owed);
+    expect(await carriedBalance(db, outlet.payoutAccountId!)).toBe(0);
+    expect(await auditsFor('payout.mismatch')).toEqual([]);
+  });
+
+  test('a retry that cannot read the gateway stops, with the mark and the figures as they were', async () => {
+    const { adminId, a, w3 } = await lostReversal();
+    const spy = vi.spyOn(gateway, 'listPaymentTransfers').mockRejectedValueOnce(new Error('Gateway down'));
+
+    const error = await failure(approvePayout(adminId, w3.id, now));
+
+    expect(error).toMatchObject({ code: 'gateway_unavailable', status: 409 });
+    const row = await payoutRow(w3.id);
+    expect(row.approvingAt).not.toBeNull();
+    expect(row.status).toBe('draft');
+    expect((await paymentFor(a.order.id)).reversedPaise).toBe(0);
+    expect(gateway.transferReversals).toHaveLength(2);
+    expect(released()).toBe(11620);
+
+    spy.mockRestore();
+    await approvePayout(adminId, w3.id, now);
+
+    expect((await paymentFor(a.order.id)).reversedPaise).toBe(2420);
+    expect(gateway.transferReversals).toHaveLength(2);
+    expect(await payoutRow(w3.id)).toMatchObject({ status: 'released', approvingAt: null });
+    expect(released()).toBe(11620 + w3.netPaise);
+  });
+
+  test('a transfer the gateway does not list stops the retry too', async () => {
+    const { adminId, w3 } = await lostReversal();
+    vi.spyOn(gateway, 'listPaymentTransfers').mockResolvedValue([]);
+
+    expect(await failure(approvePayout(adminId, w3.id, now))).toMatchObject({ code: 'gateway_unavailable' });
+    expect((await payoutRow(w3.id)).approvingAt).not.toBeNull();
+  });
+
+  test('a release accepted with its answer lost is taken up by the retry', async () => {
+    const { outlet } = await linkedOutlet();
+    const one = await sale(outlet.id);
+    const adminUser = await admin();
+    const payout = await built();
+    const real = gateway.releaseTransfer.bind(gateway);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const spy = vi.spyOn(gateway, 'releaseTransfer').mockImplementationOnce(async (id) => {
+      await real(id);
+      throw new Error('Gateway timed out');
+    });
+
+    await failure(approvePayout(adminUser.id, payout.id, now));
+    expect((await paymentFor(one.order.id)).transferStatus).toBe('on_hold');
+    await approvePayout(adminUser.id, payout.id, now);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(await paymentFor(one.order.id)).toMatchObject({ transferStatus: 'released', releasedPayoutId: payout.id });
+    expect(await payoutRow(payout.id)).toMatchObject({ status: 'released', approvingAt: null });
+    expect((await auditsFor('payout.reconciled_gateway'))[0]!.detail).toMatchObject({
+      transferStatus: { from: 'on_hold', to: 'released' },
+    });
+    expect(await auditsFor('payout.mismatch')).toEqual([]);
+  });
+
+  test('a first approval makes no gateway read, and a clean retry audits nothing', async () => {
+    const { outlet } = await linkedOutlet();
+    await sale(outlet.id);
+    const adminUser = await admin();
+    const payout = await built();
+    const list = vi.spyOn(gateway, 'listPaymentTransfers');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const spy = vi.spyOn(gateway, 'releaseTransfer').mockRejectedValueOnce(new Error('Gateway down'));
+
+    await failure(approvePayout(adminUser.id, payout.id, now));
+    expect(list).not.toHaveBeenCalled();
+    spy.mockRestore();
+    await approvePayout(adminUser.id, payout.id, now);
+
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(await auditsFor('payout.reconciled_gateway')).toEqual([]);
+  });
+
+  test('the refusal names the payout to retry, and the admin list shows it', async () => {
+    const { adminId, w3, w4 } = await twoOpenPayouts();
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(gateway, 'releaseTransfer').mockRejectedValueOnce(new Error('Gateway down'));
+    await failure(approvePayout(adminId, w3.id, now));
+    const token = await createSession(adminId, new Date());
+
+    const res = await request(`/api/v1/admin/payouts/${w4.id}/approve`, token, { method: 'POST' });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: { code: 'approval_in_progress', payoutId: w3.id } });
+    expect(await failure(holdPayout(adminId, w3.id, 'Reason', now))).toMatchObject({ details: { payoutId: w3.id } });
+    const list = (await (await request('/api/v1/admin/payouts', token)).json()) as {
+      payouts: { id: string; approvingAt: string | null }[];
+    };
+    expect(list.payouts.find((p) => p.id === w3.id)!.approvingAt).not.toBeNull();
+    expect(list.payouts.find((p) => p.id === w4.id)!.approvingAt).toBeNull();
   });
 
   test('a retry after some releases went keeps the carried transfers out of the balance', async () => {
