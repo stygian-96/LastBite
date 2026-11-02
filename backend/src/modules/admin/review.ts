@@ -141,11 +141,7 @@ const reviewInput = z.object({
   approve: z.boolean(),
   reason: z.string().trim().max(500).optional(),
   fssaiNumber: z.string().regex(/^\d{14}$/).optional(),
-  fssaiExpiresOn: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .refine((v) => !Number.isNaN(Date.parse(v)))
-    .optional(),
+  fssaiExpiresOn: z.iso.date().optional(),
 });
 export type ReviewInput = z.input<typeof reviewInput>;
 

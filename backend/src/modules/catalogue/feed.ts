@@ -4,6 +4,7 @@ import { db } from '../../db/client.js';
 import { areas, brands, drops, orders, outlets } from '../../db/schema.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { getStore } from '../../integrations/storage.js';
+import { INT4_MAX } from '../../lib/money.js';
 import { hhmm } from './listings.js';
 
 export type CityView = { slug: string; name: string; areas: { id: string; name: string }[] };
@@ -82,8 +83,8 @@ const filtersSchema = z.strictObject({
   category: z.enum(['bakery', 'cafe', 'meals', 'desserts']).optional(),
   veg: z.boolean().optional(),
   pickupBy: hhmm.optional(),
-  maxPricePaise: z.number().int().min(0).optional(),
-  q: z.string().optional(),
+  maxPricePaise: z.number().int().min(0).max(INT4_MAX).optional(),
+  q: z.string().refine((v) => !v.includes('\0')).optional(),
 });
 
 const iso = (t: string) => new Date(t).toISOString();

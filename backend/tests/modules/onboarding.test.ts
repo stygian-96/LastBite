@@ -536,7 +536,7 @@ describe('routes', () => {
     expect(pa.json.payoutAccount).toMatchObject({ panLast4: '821K', accountLast4: '9012', ifsc: 'HDFC0001234' });
     expect(JSON.stringify(pa.json)).not.toMatch(/encrypted|AAJFB4821K|123456789012/i);
 
-    const signed = await call('POST', `/payout-accounts/${pa.json.payoutAccount.id}/agreement`, { signedName: 'A Founder', version: 'v1' }, { 'x-forwarded-for': '198.51.100.7, 10.0.0.1' });
+    const signed = await call('POST', `/payout-accounts/${pa.json.payoutAccount.id}/agreement`, { signedName: 'A Founder', version: 'v1' }, { 'x-forwarded-for': '10.0.0.1, 198.51.100.7' });
     expect(signed.status).toBe(200);
     const [ag] = await db.select().from(agreements);
     expect(ag!.ipAddress).toBe('198.51.100.7');

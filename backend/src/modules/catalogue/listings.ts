@@ -59,12 +59,14 @@ const patchSchema = z.strictObject(fields).partial();
 export type ListingInput = Record<string, unknown>;
 export type ListingPatch = Record<string, unknown>;
 
+const isId = (id: string) => z.uuid().safeParse(id).success;
 const badKey = () => new ApiError('invalid_request', 400, 'Upload the file first, then record it');
 const uniqueDays = (days: number[]) => [...new Set(days)].sort((a, b) => a - b);
 
 // ---------- Reading ----------
 
 async function loadListing(listingId: string, executor: Pick<Tx, 'select'> = db): Promise<Listing> {
+  if (!isId(listingId)) throw new ApiError('not_found', 404, 'Listing not found');
   const [l] = await executor.select().from(listings).where(eq(listings.id, listingId));
   if (!l) throw new ApiError('not_found', 404, 'Listing not found');
   return l;
@@ -165,6 +167,7 @@ export async function archiveListing(userId: string, listingId: string, now: Dat
 export async function copyListing(userId: string, listingId: string, targetOutletId: string): Promise<Listing> {
   const source = await loadManagedListing(userId, listingId);
   const forbidden = () => new ApiError('forbidden', 403, 'Not allowed');
+  if (!isId(targetOutletId)) throw forbidden();
   const [from] = await db.select({ brandId: outlets.brandId }).from(outlets).where(eq(outlets.id, source.outletId));
   const [to] = await db.select({ brandId: outlets.brandId }).from(outlets).where(eq(outlets.id, targetOutletId));
   if (!from || !to || from.brandId !== to.brandId) throw forbidden();

@@ -60,7 +60,7 @@ describe('route', () => {
     })));
     const res = await t.request('/x/abc', post({ n: 3 }, { 'x-forwarded-for': '1.2.3.4, 5.6.7.8' }));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ n: 3, id: 'abc', ip: '1.2.3.4' });
+    expect(await res.json()).toEqual({ n: 3, id: 'abc', ip: '5.6.7.8' });
   });
 });
 
@@ -71,8 +71,26 @@ describe('client address', () => {
     return ((await (await t.request('/x', { headers })).json()) as { ip: string }).ip;
   };
 
-  test('takes the left-most forwarded address when the proxy is trusted', async () => {
-    expect(await seen({ 'x-forwarded-for': ' 1.2.3.4 , 5.6.7.8' })).toBe('1.2.3.4');
+  test('takes the entry the trusted proxy added, not what the client sent', async () => {
+    expect(await seen({ 'x-forwarded-for': ' 6.6.6.6 , 1.2.3.4 ' })).toBe('1.2.3.4');
+  });
+
+  test('counts TRUSTED_PROXY_HOPS from the right', async () => {
+    env().TRUSTED_PROXY_HOPS = 2;
+    try {
+      expect(await seen({ 'x-forwarded-for': '6.6.6.6, 1.2.3.4, 10.0.0.1' })).toBe('1.2.3.4');
+    } finally {
+      env().TRUSTED_PROXY_HOPS = 1;
+    }
+  });
+
+  test('a header shorter than the hops leaves the socket address, here none', async () => {
+    env().TRUSTED_PROXY_HOPS = 2;
+    try {
+      expect(await seen({ 'x-forwarded-for': '1.2.3.4' })).toBe('');
+    } finally {
+      env().TRUSTED_PROXY_HOPS = 1;
+    }
   });
 
   test('ignores the header when the proxy is not trusted', async () => {

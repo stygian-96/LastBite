@@ -21,6 +21,7 @@ const IST_OFFSET_MS = 330 * 60_000;
 /** The IST wall-clock HH:mm of an instant. */
 const istHhmm = (iso: string) => new Date(new Date(iso).getTime() + IST_OFFSET_MS).toISOString().slice(11, 16);
 
+const isId = (id: string) => z.uuid().safeParse(id).success;
 const conflict = (code: string, message: string) => new ApiError(code, 409, message);
 const windowEnded = () => conflict('window_ended', 'The pickup window for tonight has ended');
 const cancelled = () => conflict('drop_cancelled', 'This drop was cancelled');
@@ -43,6 +44,7 @@ export async function publishDrop(
   now: Date,
 ): Promise<Drop> {
   const quantity = parseInput(quantitySchema, rawQuantity);
+  if (!isId(listingId)) throw new ApiError('not_found', 404, 'Listing not found');
   const [found] = await db.select({ outletId: listings.outletId }).from(listings).where(eq(listings.id, listingId));
   if (!found) throw new ApiError('not_found', 404, 'Listing not found');
   if (actorId !== null) await requireOutlet(actorId, found.outletId, [...MANAGERS]);
@@ -137,6 +139,7 @@ export type DropPatch = Record<string, unknown>;
  */
 export async function updateDrop(userId: string, dropId: string, raw: DropPatch, now: Date): Promise<Drop> {
   const patch = parseInput(patchSchema, raw);
+  if (!isId(dropId)) throw new ApiError('not_found', 404, 'Drop not found');
   const [found] = await db.select({ outletId: drops.outletId }).from(drops).where(eq(drops.id, dropId));
   if (!found) throw new ApiError('not_found', 404, 'Drop not found');
   await requireOutlet(userId, found.outletId, [...MANAGERS]);

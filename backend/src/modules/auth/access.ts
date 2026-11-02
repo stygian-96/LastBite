@@ -20,9 +20,10 @@ const active = (userId: string, brandId: string) =>
 /**
  * The membership that lets the user act at an outlet with one of the given roles.
  * A membership with a null outlet covers the whole brand. A brand-wide owner
- * passes whatever roles are listed. Unknown outlets and non-members both get 403.
+ * passes whatever roles are listed. Unknown outlets, malformed IDs and non-members all get 403.
  */
 export async function requireOutlet(userId: string, outletId: string, roles: Role[]): Promise<Membership> {
+  if (!z.uuid().safeParse(outletId).success) throw forbidden();
   const [outlet] = await db.select({ brandId: outlets.brandId }).from(outlets).where(eq(outlets.id, outletId));
   if (!outlet) throw forbidden();
   const rows = await db

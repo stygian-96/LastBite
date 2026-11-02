@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { getStore } from '../integrations/storage.js';
 import { ApiError } from '../lib/errors.js';
 import { route } from '../lib/http.js';
-import { uploadFile, uploadKey } from '../lib/uploads.js';
+import { limitUploads, uploadFile, uploadKey } from '../lib/uploads.js';
 import { addDocument } from '../modules/onboarding/documents.js';
 import {
   getOutletStatus,
@@ -82,7 +82,8 @@ export const vendorOnboarding = new Hono()
   )
   .post(
     '/uploads',
-    route({ auth: 'user', body: uploadBody }, async ({ user, body }) => {
+    route({ auth: 'user', body: uploadBody }, async ({ user, body, now }) => {
+      await limitUploads(user!.id, now);
       const key = uploadKey(FOLDERS[body.purpose], user!.id, body.contentType);
       const bucket = body.purpose === 'document' ? 'private' : 'public';
       const url = await getStore().signedUpload(key, body.contentType, bucket, body.size);

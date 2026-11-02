@@ -1,15 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { db } from '../../src/db/client.js';
-import { areas, auditLog, issues, memberships, notifications, orders, outlets, payments, payoutAccounts } from '../../src/db/schema.js';
+import { areas, auditLog, documents, issues, memberships, notifications, orders, outlets, payments, payoutAccounts } from '../../src/db/schema.js';
 import { FakeGateway, setGateway } from '../../src/integrations/payments.js';
 import { env } from '../../src/lib/env.js';
 import { decideOutlet } from '../../src/modules/admin/review.js';
 import { adminRefund } from '../../src/modules/admin/support.js';
 import { createSession } from '../../src/modules/auth/session.js';
+import { listDrops } from '../../src/modules/catalogue/feed.js';
 import { applyCapture } from '../../src/modules/payments/capture.js';
 import { app } from '../../src/app.js';
-import { makeBrand, makeDrop, makeLiveOutlet, makeOrder, makePaidOrder, makePayment, makePayoutAccount, makeUser } from '../helpers/factories.js';
+import { makeBrand, makeDrop, makeListing, makeLiveOutlet, makeOrder, makePaidOrder, makePayment, makePayoutAccount, makeUser } from '../helpers/factories.js';
 import { getDropRow, getOrderRow, refundsFor, resetDb } from '../helpers/db.js';
 
 // 15:30 IST, with drops on sale until 20:45.
@@ -641,5 +642,111 @@ describe('bank name mismatch', () => {
     for (const name of ['Butterfold Foods Private Limited', 'BUTTERFOLD  foods private   limited', 'Asha Rao', '  asha   RAO ']) {
       expect((await create(name)).json.payoutAccount.nameWarning).toBe(false);
     }
+  });
+});
+
+describe('bad input gets a clean answer', () => {
+  const NIL_LIKE = 'not-a-uuid';
+
+  test('IDs that are not UUIDs on outlets are refused, not a 500', async () => {
+    const user = await makeUser();
+    for (const [method, path, body] of [
+      ['GET', `/vendor/outlets/${NIL_LIKE}/today`, undefined],
+      ['GET', `/vendor/outlets/${NIL_LIKE}/listings`, undefined],
+      ['GET', `/vendor/outlets/${NIL_LIKE}/status`, undefined],
+      ['PATCH', `/vendor/outlets/${NIL_LIKE}`, { address: 'x' }],
+      ['POST', `/vendor/outlets/${NIL_LIKE}/submit`, undefined],
+    ] as const) {
+      expect((await call(method, path, user.id, body)).status).toBe(403);
+    }
+  });
+
+  test('IDs that are not UUIDs on listings and drops are a 404', async () => {
+    const user = await makeUser();
+    for (const [method, path, body] of [
+      ['PUT', `/vendor/listings/${NIL_LIKE}/drops/today`, { quantity: 1 }],
+      ['PATCH', `/vendor/drops/${NIL_LIKE}`, { quantity: 1 }],
+      ['PATCH', `/vendor/listings/${NIL_LIKE}`, { name: 'x' }],
+      ['DELETE', `/vendor/listings/${NIL_LIKE}`, undefined],
+      ['POST', `/vendor/listings/${NIL_LIKE}/copy`, { targetOutletId: NIL_LIKE }],
+    ] as const) {
+      expect((await call(method, path, user.id, body)).status).toBe(404);
+    }
+  });
+
+  test('copying to an ID that is not a UUID is refused', async () => {
+    const listing = await makeListing();
+    const [outlet] = await db.select().from(outlets).where(eq(outlets.id, listing.outletId));
+    const owner = await owns(outlet!.brandId);
+    const { status } = await call('POST', `/vendor/listings/${listing.id}/copy`, owner.id, { targetOutletId: NIL_LIKE });
+    expect(status).toBe(403);
+  });
+
+  test('a date that is not on the calendar is refused everywhere dates are read', async () => {
+    const outlet = await makeLiveOutlet();
+    const owner = await owns(outlet.brandId);
+    expect((await call('GET', `/vendor/outlets/${outlet.id}/orders?date=2026-02-30`, owner.id)).status).toBe(400);
+
+    const draft = await makeLiveOutlet({ brandId: outlet.brandId, status: 'draft' });
+    expect((await call('PATCH', `/vendor/outlets/${draft.id}`, owner.id, { fssaiExpiresOn: '2026-02-30' })).status).toBe(400);
+    expect((await call('PATCH', `/vendor/outlets/${draft.id}`, owner.id, { fssaiExpiresOn: '2026-02-28' })).status).toBe(200);
+
+    const [doc] = await db
+      .insert(documents)
+      .values({ outletId: outlet.id, kind: 'fssai', fileKey: 'documents/x/a.pdf' })
+      .returning();
+    const review = { approve: true, fssaiNumber: '12345678901234', fssaiExpiresOn: '2026-02-30' };
+    expect((await call('POST', `/admin/documents/${doc!.id}/review`, (await admin()).id, review)).status).toBe(400);
+  });
+
+  test('a price that overflows the column is refused', async () => {
+    const [area] = await db.select().from(areas).limit(1);
+    expect((await call('GET', `/drops?city=${area!.city}&max_price=2147483648`)).status).toBe(400);
+    expect((await call('GET', `/drops?city=${area!.city}&max_price=99999999999999999999`)).status).toBe(400);
+    expect((await call('GET', `/drops?city=${area!.city}&max_price=2147483647`)).status).toBe(200);
+  });
+
+  test('a refund amount that overflows the column is refused', async () => {
+    const order = await makePaidOrder();
+    const { status } = await call('POST', `/admin/orders/${order.id}/refund`, (await admin()).id, {
+      amountPaise: 2147483648,
+      chargedTo: 'platform',
+    });
+    expect(status).toBe(400);
+  });
+
+  test('NUL bytes are refused in queries, paths and bodies', async () => {
+    const [area] = await db.select().from(areas).limit(1);
+    expect((await call('GET', `/drops?city=${area!.city}&q=a%00b`)).status).toBe(400);
+    expect((await call('GET', `/drops?city=${area!.city}&area=a%00b`)).status).toBe(400);
+    expect((await call('GET', '/outlets/a%00b/c')).status).toBe(400);
+    const user = await makeUser();
+    expect((await call('POST', '/vendor/outlets', user.id, { brandName: 'a\u0000b', branchName: 'x', category: 'cafe' })).status).toBe(400);
+  });
+
+  test('listDrops itself refuses a NUL in q', async () => {
+    const [area] = await db.select().from(areas).limit(1);
+    await expect(listDrops({ city: area!.city, q: 'a\u0000b' }, NOW)).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe('upload links are rate limited', () => {
+  const file = { contentType: 'image/jpeg', size: 1000 };
+
+  test('30 an hour for a user, across both routes', async () => {
+    const user = await makeUser();
+    for (let i = 0; i < 15; i++) {
+      expect((await call('POST', '/vendor/uploads', user.id, { ...file, purpose: 'photo' })).status).toBe(200);
+      expect((await call('POST', '/me/uploads', user.id, file)).status).toBe(200);
+    }
+    const vendor = await call('POST', '/vendor/uploads', user.id, { ...file, purpose: 'photo' });
+    expect(vendor.status).toBe(429);
+    expect(vendor.json.error.code).toBe('rate_limited');
+    expect((await call('POST', '/me/uploads', user.id, file)).status).toBe(429);
+
+    expect((await call('POST', '/me/uploads', (await makeUser()).id, file)).status).toBe(200);
+
+    vi.setSystemTime(new Date(NOW.getTime() + 3_600_000));
+    expect((await call('POST', '/me/uploads', user.id, file)).status).toBe(200);
   });
 });

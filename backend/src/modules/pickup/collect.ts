@@ -22,9 +22,9 @@ const codeNotFound = () => new ApiError('code_not_found', 404, 'No order with th
 const alreadyCollected = (collectedAt: string | null) =>
   new ApiError('already_collected', 409, 'This order was already collected', { collectedAt });
 
-/** Staff of the outlet only. An ID that is not a UUID is as unknown as any other outlet: 403. */
+/** Staff of the outlet only. */
 export async function requirePickupStaff(userId: string, outletId: string): Promise<void> {
-  await requireOutlet(userId, isId(outletId) ? outletId : '00000000-0000-0000-0000-000000000000', PICKUP_ROLES);
+  await requireOutlet(userId, outletId, PICKUP_ROLES);
 }
 
 /** Collects an order, locking its row. A no-show is corrected here, so both statuses pass. */

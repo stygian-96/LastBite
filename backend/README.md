@@ -73,6 +73,7 @@ npx tsc --noEmit && npm run lint           # types and lint
 | `SESSION_SECRET` | Always | At least 16 characters |
 | `PORT` | No, default 4000 | Port to listen on |
 | `TRUST_PROXY` | No, default off | `true` only behind a proxy that sets `x-forwarded-for` |
+| `TRUSTED_PROXY_HOPS` | No, default 1 | How many proxies in front add to `x-forwarded-for`. The client address is that many entries from the right, so one a client sends itself is ignored |
 | `DEV_FAKE_PROVIDERS` | No, default off | `true` runs the fakes in local development. Refused in production |
 | `CRON_SECRET` | Production | Protects the tick route, and the local dev capture route |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Production | API keys |

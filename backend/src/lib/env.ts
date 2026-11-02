@@ -16,6 +16,8 @@ const schema = z.object({
     .string()
     .optional()
     .transform((v) => v === 'true'),
+  // How many proxies in front add to x-forwarded-for. The address is that many entries from the right.
+  TRUSTED_PROXY_HOPS: z.coerce.number().int().positive().default(1),
   CRON_SECRET: z.string().optional(),
   // Local development with no keys: the fake gateway and store. Counts only with NODE_ENV=development.
   DEV_FAKE_PROVIDERS: z

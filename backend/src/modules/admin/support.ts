@@ -6,6 +6,7 @@ import { getStore } from '../../integrations/storage.js';
 import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
+import { INT4_MAX } from '../../lib/money.js';
 import { normalizePhone } from '../auth/otp.js';
 import { movePendingTo } from '../notifications/enqueue.js';
 import { bagPayment, unrefundedPaise } from '../refunds/cancel.js';
@@ -212,7 +213,7 @@ export async function resolveIssue(adminId: string, issueId: string, rawNote: st
 // ---------- Refunds ----------
 
 const refundInput = z.object({
-  amountPaise: z.number().int().positive(),
+  amountPaise: z.number().int().positive().max(INT4_MAX),
   chargedTo: z.enum(['vendor', 'platform']),
   issueId: z.uuid().optional(),
 });

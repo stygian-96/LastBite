@@ -61,10 +61,7 @@ const patchSchema = z
     photoKeys: z.array(z.string().min(1).max(300)).max(PHOTO_LIMIT),
     logoKey: z.string().min(1).max(300),
     fssaiNumber: z.string().regex(/^\d{14}$/),
-    fssaiExpiresOn: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .refine((v) => !Number.isNaN(Date.parse(v))),
+    fssaiExpiresOn: z.iso.date(),
     gstin: upper.regex(/^[0-9A-Z]{15}$/),
     payoutAccountId: z.uuid(),
   })

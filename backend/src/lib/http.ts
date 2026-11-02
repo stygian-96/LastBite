@@ -12,6 +12,10 @@ export type { SessionUser };
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+const invalidRequest = () => new ApiError('invalid_request', 400, 'Invalid request');
+/** Postgres text cannot hold a NUL, so one would surface as a 500. */
+const hasNul = (value: unknown) => JSON.stringify(value)?.includes('\\u0000') ?? false;
+
 // Domain is only sent when COOKIE_DOMAIN is set, so localhost works without it.
 export const cookieDomain = () => env().COOKIE_DOMAIN || undefined;
 
@@ -32,11 +36,13 @@ type RouteOpts<B> = {
 
 /**
  * The caller's address, empty when it cannot be known. The proxy header is believed only when
- * TRUST_PROXY says a proxy sets it, as anyone can send it to a bare server.
+ * TRUST_PROXY says a proxy sets it, as anyone can send it to a bare server. Even then only the entries
+ * our proxies added count, as a client can start the list with anything: TRUSTED_PROXY_HOPS from the
+ * right is the address the outermost proxy saw.
  */
 function clientIp(c: Context): string {
   if (env().TRUST_PROXY) {
-    const forwarded = c.req.header('x-forwarded-for')?.split(',')[0]?.trim();
+    const forwarded = c.req.header('x-forwarded-for')?.split(',').at(-env().TRUSTED_PROXY_HOPS)?.trim();
     if (forwarded) return forwarded;
   }
   try {
@@ -65,6 +71,7 @@ export function route<B = undefined>(
   return async (c) => {
     const now = new Date();
     const token = getCookie(c, 'session');
+    if (c.req.url.includes('%00')) throw invalidRequest();
 
     // CSRF guard: a cookie-authenticated request that is not a plain read must
     // come from the frontend. Cookie-less requests (webhooks) are unaffected.
@@ -84,7 +91,7 @@ export function route<B = undefined>(
     if (opts.body) {
       const raw: unknown = await c.req.json().catch(() => undefined);
       const parsed = opts.body.safeParse(raw);
-      if (!parsed.success) throw new ApiError('invalid_request', 400, 'Invalid request');
+      if (!parsed.success || hasNul(raw)) throw invalidRequest();
       body = parsed.data;
     }
     const ip = clientIp(c);

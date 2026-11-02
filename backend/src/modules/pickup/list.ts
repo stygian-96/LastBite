@@ -2,7 +2,7 @@ import { and, asc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { drops, orders, users } from '../../db/schema.js';
-import { ApiError, parseInput } from '../../lib/errors.js';
+import { parseInput } from '../../lib/errors.js';
 import { serviceDate } from '../../lib/time.js';
 import { NO_SHOW_GRACE_MINUTES, requirePickupStaff } from './collect.js';
 
@@ -20,10 +20,7 @@ export type VendorOrderRow = {
 };
 
 const querySchema = z.object({
-  date: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .optional(),
+  date: z.iso.date().optional(),
   q: z.string().max(100).optional(),
 });
 
@@ -46,9 +43,6 @@ export async function listOutletOrders(
   now: Date,
 ): Promise<VendorOrderRow[]> {
   const { date, q } = parseInput(querySchema, query);
-  if (date && Number.isNaN(Date.parse(`${date}T00:00:00Z`))) {
-    throw new ApiError('invalid_request', 400, 'Invalid value for date');
-  }
   await requirePickupStaff(userId, outletId);
 
   const day: SQL = date

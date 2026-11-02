@@ -1,3 +1,6 @@
+/** The largest value an integer column holds. */
+export const INT4_MAX = 2_147_483_647;
+
 /** Platform commission on one order, in paise, rounded to the nearest paisa. */
 export function commissionPaise(pricePaise: number, bps: number): number {
   return Math.round((pricePaise * bps) / 10000);
