@@ -28,30 +28,33 @@
   --shadow-nav: 0 -6px 20px rgba(0, 0, 0, 0.05);
 }
 
-body {
-  background: #ffffff;
-  color: var(--color-ink);
-  font-family: var(--font-sans);
-}
+/* In the base layer so Tailwind classes like text-white on a link win over these defaults. */
+@layer base {
+  body {
+    background: #ffffff;
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+  }
 
-a {
-  color: inherit;
-}
+  a {
+    color: inherit;
+  }
 
-button,
-summary,
-label[for],
-input[type="checkbox"] {
-  cursor: pointer;
-}
+  button,
+  summary,
+  label[for],
+  input[type="checkbox"] {
+    cursor: pointer;
+  }
 
-button:disabled {
-  cursor: not-allowed;
-}
+  button:disabled {
+    cursor: not-allowed;
+  }
 
-:focus-visible {
-  outline: 2px solid var(--color-ink);
-  outline-offset: 2px;
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+  }
 }
 
 .tabular {
