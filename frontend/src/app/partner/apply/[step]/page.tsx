@@ -66,12 +66,15 @@ function Account({ next }: StepProps) {
   const { me, refresh } = useSession();
   const [name, setName] = useState(me?.name ?? "");
   const [email, setEmail] = useState(me?.email ?? "");
+  const signedInDigits = me?.phone.replace(/^\+91/, "") ?? "";
   const [phone, setPhone] = useState("");
   const [otp, setOtp] = useState("");
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const digits = phone.replace(/\D/g, "");
+  // The number is verified only when it is the one signed in; a changed number needs its own OTP.
+  const verified = !!me && digits === signedInDigits;
 
   async function send() {
     setBusy(true);
@@ -92,6 +95,8 @@ function Account({ next }: StepProps) {
     try {
       await api.verifyOtp(`+91${digits}`, code);
       await refresh();
+      setSent(false);
+      setOtp("");
     } catch (err) {
       setError(errorCode(err) === "otp_invalid" ? "That code isn’t right. Check the SMS and try again." : errorMessage(err));
     } finally {
@@ -112,7 +117,7 @@ function Account({ next }: StepProps) {
     }
   }
 
-  const ready = !!me && name.trim().length > 1;
+  const ready = verified && name.trim().length > 1;
 
   return (
     <Screen
@@ -120,14 +125,11 @@ function Account({ next }: StepProps) {
       sub="The owner or manager we can reach about orders and payouts."
       footer={
         <Button className="w-full" disabled={!ready || busy} onClick={save}>
-          {me ? "Continue" : "Verify your number to continue"}
+          {verified ? "Continue" : "Verify your number to continue"}
         </Button>
       }
     >
       <Field id="owner" label="Owner’s full name" hint="Should match the name on your PAN." autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} />
-      {me ? (
-        <Field id="owner-phone" label="Mobile number" value={me.phone} readOnly hint="You’ll get the daily “how many tonight?” prompt here on WhatsApp." />
-      ) : (
         <div className="flex flex-col gap-2">
           <label htmlFor="owner-phone" className="text-[13px] font-medium text-muted">
             Mobile number
@@ -140,10 +142,17 @@ function Account({ next }: StepProps) {
               inputMode="numeric"
               maxLength={11}
               value={phone}
-              onChange={(event) => setPhone(event.target.value.replace(/[^\d ]/g, ""))}
+              onChange={(event) => {
+                setPhone(event.target.value.replace(/[^\d ]/g, ""));
+                setSent(false);
+                setOtp("");
+              }}
               className="tabular h-14 min-w-0 flex-1 rounded-2xl bg-fill px-4 font-medium"
             />
-            {!sent && (
+            {verified && (
+              <span className="flex h-14 flex-none items-center rounded-2xl bg-[#dcfce7] px-3 text-[13px] font-medium text-[#166534]">Verified</span>
+            )}
+            {!verified && !sent && (
               <button type="button" disabled={digits.length !== 10 || busy} onClick={send} className="h-14 flex-none rounded-2xl bg-dark px-4 text-sm font-medium text-white disabled:bg-[#f0f0f0] disabled:text-muted">
                 Send OTP
               </button>
@@ -151,8 +160,7 @@ function Account({ next }: StepProps) {
           </div>
           <span className="text-[13px] text-muted">You’ll get the daily “how many tonight?” prompt here on WhatsApp.</span>
         </div>
-      )}
-      {!me && sent && (
+      {!verified && sent && (
         <Field
           id="owner-otp"
           label="6-digit code sent by SMS"
@@ -220,7 +228,14 @@ function OutletStep({ outlet, next }: StepProps) {
   const areas = cities.data?.find((c) => c.slug === city)?.areas ?? [];
   const areaName = areas.find((a) => a.id === areaId)?.name;
   const mapsOk = isMapsUrl(mapsUrl);
-  const ready = (outlet || business.trim()) && areaId && address.trim() && /^\d{6}$/.test(pincode) && mapsOk;
+  const missing = [
+    !outlet && !business.trim() && "business name",
+    !areaId && "area",
+    !address.trim() && "address",
+    !/^\d{6}$/.test(pincode) && "6-digit pincode",
+    !mapsOk && "Google Maps link",
+  ].filter(Boolean);
+  const ready = missing.length === 0;
 
   async function save() {
     setBusy(true);
@@ -251,9 +266,12 @@ function OutletStep({ outlet, next }: StepProps) {
       title="Your outlet"
       sub="This is what customers see and where they come."
       footer={
-        <Button className="w-full" disabled={!ready || busy} onClick={save}>
-          {busy ? "Saving…" : "Continue"}
-        </Button>
+        <div className="flex flex-col gap-2">
+          {!ready && <span className="text-center text-[13px] text-muted">Still needed: {missing.join(", ")}</span>}
+          <Button className="w-full" disabled={!ready || busy} onClick={save}>
+            {busy ? "Saving…" : "Continue"}
+          </Button>
+        </div>
       }
     >
       {!outlet && <Field id="business" label="Business name" value={business} onChange={(event) => setBusiness(event.target.value)} />}
@@ -295,7 +313,7 @@ function OutletStep({ outlet, next }: StepProps) {
         id="maps"
         label="Paste your Google Maps link"
         type="url"
-        hint={mapsUrl && !mapsOk ? "That doesn’t look like a Google Maps link." : "Open your shop in Google Maps, tap Share and paste the link. Customers use it for directions."}
+        hint={mapsUrl && !mapsOk ? "Use the link from Share in Google Maps, starting https://maps.app.goo.gl/ or https://www.google.com/maps/." : "Open your shop in Google Maps, tap Share and paste the link. Customers use it for directions."}
         value={mapsUrl}
         onChange={(event) => setMapsUrl(event.target.value)}
       />
