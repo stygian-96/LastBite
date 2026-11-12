@@ -28,7 +28,10 @@ const STEPS = [
 export default function Partner() {
   const { me } = useSession();
   const outlets = useQuery(() => api.getVendorOutlets(), [me?.id], { enabled: !!me });
-  const hasApplication = !!outlets.data?.length;
+  const open = (outlets.data ?? []).filter((o) => o.status !== "closed");
+  const live = open.some((o) => o.status === "live" || o.status === "suspended");
+  // Every way in goes through /partner/start, which signs the vendor in and picks up where they left off.
+  const cta = live ? "Go to your dashboard" : open.length > 0 ? "Continue your application" : me ? "Start your application" : "Get started";
 
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-2xl flex-col">
@@ -37,11 +40,9 @@ export default function Partner() {
           <Logo size="sm" />
           <span className="text-sm text-muted">partners</span>
         </Link>
-        {hasApplication && (
-          <Link href="/vendor/application" className="flex min-h-11 items-center rounded-full bg-fill px-3.5 text-[13px] font-medium no-underline">
-            Continue application
-          </Link>
-        )}
+        <Link href="/partner/start" className="flex min-h-11 items-center rounded-full bg-fill px-3.5 text-[13px] font-medium no-underline">
+          {me ? (open.length > 0 ? cta : "Apply") : "Partner sign in"}
+        </Link>
       </div>
 
       <div className="flex flex-1 flex-col gap-4 px-4 pb-4 pt-1">
@@ -103,7 +104,8 @@ export default function Partner() {
       </div>
 
       <div className="sticky bottom-0 bg-white px-4 pb-6 pt-3">
-        <LinkButton href="/partner/apply/1">Get started</LinkButton>
+        <LinkButton href="/partner/start">{cta}</LinkButton>
+        {!me && <span className="mt-2 block text-center text-xs text-muted">Already applied? This signs you in and takes you back to it.</span>}
       </div>
     </div>
   );

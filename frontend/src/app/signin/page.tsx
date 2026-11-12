@@ -4,7 +4,8 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { bagKind, MiniOrderCard } from "@/components/customer";
-import { Button, TopBar } from "@/components/ui";
+import { Illo, type IlloKind } from "@/components/Illo";
+import { Button, Logo, TopBar } from "@/components/ui";
 import { api, errorCode, errorMessage, isMock } from "@/lib/api";
 import { clock, phoneDisplay, timeRange } from "@/lib/format";
 import { useQuery, useSecondsLeft } from "@/lib/hooks";
@@ -12,12 +13,34 @@ import { useSession } from "@/lib/session";
 
 const RESEND_SECONDS = 30;
 
+/** What the desktop panel says, by why someone is signing in. */
+const PANEL: Record<"partner" | "order" | "customer", { kind: IlloKind; title: string; body: string }> = {
+  partner: {
+    kind: "bakery",
+    title: "Tonight’s leftovers, sold before you close",
+    body: "Sign in to apply, carry on with your application, or open your dashboard. One number, one code, every time.",
+  },
+  order: {
+    kind: "meals",
+    title: "Your bag is waiting",
+    body: "Sign in once to pay and get your pickup code. We’ll keep it held while you do.",
+  },
+  customer: {
+    kind: "cafe",
+    title: "Good food at closing-time prices",
+    body: "Reserve what bakeries, cafés and kitchens near you have left tonight, and collect it on your way home.",
+  },
+};
+
 export default function SignIn() {
   const router = useRouter();
   const params = useSearchParams();
   const orderId = params.get("order");
   const dropId = params.get("drop");
-  const next = params.get("next");
+  // Only a path on this site, so a crafted link can't send someone elsewhere after signing in.
+  const asked = params.get("next");
+  const next = asked && asked.startsWith("/") && !asked.startsWith("//") ? asked : null;
+  const partner = !!next && (next.startsWith("/partner") || next.startsWith("/vendor"));
   const { me, loading, refresh } = useSession();
 
   const [step, setStep] = useState<"phone" | "otp">("phone");
@@ -75,25 +98,53 @@ export default function SignIn() {
 
   async function goBack() {
     if (orderId) await api.releaseHold(orderId).catch(() => undefined);
-    router.push(dropId ? `/listing/${dropId}` : "/browse");
+    router.push(dropId ? `/listing/${dropId}` : partner ? "/partner" : "/browse");
   }
 
   const isPhone = step === "phone";
   const held = order.data?.status === "held" ? order.data : null;
 
+  const panel = PANEL[orderId ? "order" : partner ? "partner" : "customer"];
+
+  // Phones get the single column; from lg the form sits beside a panel saying what signing in is for.
   return (
-    <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col">
-      <TopBar title="Sign in" onBack={goBack} />
-      <form onSubmit={isPhone ? sendCode : verify} className="flex flex-1 flex-col">
+    <div className="flex min-h-dvh lg:grid lg:grid-cols-2">
+      <aside className="relative hidden flex-col gap-16 overflow-hidden bg-dark p-12 text-white lg:flex">
+        <Link href={partner ? "/partner" : "/"} className="text-white no-underline">
+          <Logo />
+        </Link>
+        <div className="relative z-10 flex max-w-md flex-col gap-4">
+          <h2 className="text-[36px] font-bold leading-[1.08] tracking-tight xl:text-[46px]">{panel.title}</h2>
+          <p className="text-[17px] leading-relaxed text-dark-sub">{panel.body}</p>
+        </div>
+        <div aria-hidden className="absolute -bottom-28 -right-20 flex size-[380px] items-center justify-center rounded-full bg-dark-2 xl:size-[460px]">
+          <Illo kind={panel.kind} size={260} />
+        </div>
+      </aside>
+
+    <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col lg:justify-center lg:py-10">
+      <div className="lg:hidden">
+        <TopBar title="Sign in" onBack={goBack} />
+      </div>
+      <div className="hidden px-4 lg:block">
+        <button type="button" onClick={goBack} className="min-h-11 text-sm font-medium text-muted underline-offset-4 hover:underline">
+          {orderId ? "Cancel and go back" : partner ? "Back to partner page" : "Back to browsing"}
+        </button>
+      </div>
+      <form onSubmit={isPhone ? sendCode : verify} className="flex flex-1 flex-col lg:flex-none">
         <div className="flex flex-1 flex-col gap-[22px] px-4 py-3">
           <div className="flex flex-col gap-2">
-            <h1 className="text-[26px] font-bold tracking-tight">{isPhone ? (orderId ? "Sign in to pay" : "Sign in") : "Enter the code"}</h1>
+            <h1 className="text-[26px] font-bold tracking-tight">
+              {isPhone ? (orderId ? "Sign in to pay" : partner ? "Sign in to your partner account" : "Sign in") : "Enter the code"}
+            </h1>
             <p className="text-[15px] leading-normal text-muted">
               {!isPhone
                 ? `We sent it by SMS to ${phoneDisplay(digits)}.`
                 : orderId
                   ? "Your bag is held for 5 minutes, including this step. You only sign in once."
-                  : "We’ll send a 6-digit code by SMS. You only sign in once."}
+                  : partner
+                    ? "New here? Use the number you’ll run the outlet with. We’ll take you to your application, or to where you left off."
+                    : "We’ll send a 6-digit code by SMS. You only sign in once."}
             </p>
           </div>
 
@@ -116,7 +167,9 @@ export default function SignIn() {
                   className="tabular h-14 min-w-0 flex-1 rounded-2xl bg-fill px-4 text-[17px] font-medium text-ink"
                 />
               </div>
-              <span className="text-[13px] text-muted">Only for your pickup code and refund updates. No spam.</span>
+              <span className="text-[13px] text-muted">
+                {partner ? "For order alerts and the evening “how many tonight?” message." : "Only for your pickup code and refund updates. No spam."}
+              </span>
             </div>
           ) : (
             <div className="flex flex-col gap-2">
@@ -187,6 +240,7 @@ export default function SignIn() {
           </span>
         </div>
       </form>
+    </div>
     </div>
   );
 }

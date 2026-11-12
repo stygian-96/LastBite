@@ -179,6 +179,8 @@ export type VendorOutlet = {
   commissionBps: number;
   status: OutletStatus;
   onboardingStep: number;
+  /** Set when first sent for review; kept if the vendor withdraws it. */
+  submittedAt?: string | null;
   pausedUntil: string | null;
   brandName?: string; // not returned yet
 };

@@ -18,6 +18,7 @@ import {
   type SectionKey,
   type VendorOutlet,
 } from "@/lib/api";
+import { phoneDisplay } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 
@@ -105,43 +106,8 @@ function Account({ next }: StepProps) {
   const { me, refresh } = useSession();
   const [name, setName] = useState(me?.name ?? "");
   const [email, setEmail] = useState(me?.email ?? "");
-  const signedInDigits = me?.phone.replace(/^\+91/, "") ?? "";
-  const [phone, setPhone] = useState("");
-  const [otp, setOtp] = useState("");
-  const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const digits = phone.replace(/\D/g, "");
-  // The number is verified only when it is the one signed in; a changed number needs its own OTP.
-  const verified = !!me && digits === signedInDigits;
-
-  async function send() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.sendOtp(`+91${digits}`);
-      setSent(true);
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function verify(code: string) {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.verifyOtp(`+91${digits}`, code);
-      await refresh();
-      setSent(false);
-      setOtp("");
-    } catch (err) {
-      setError(errorCode(err) === "otp_invalid" ? "That code isn’t right. Check the SMS and try again." : errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function save() {
     setBusy(true);
@@ -156,64 +122,25 @@ function Account({ next }: StepProps) {
     }
   }
 
-  const ready = verified && name.trim().length > 1;
-
   return (
     <Screen
       title="About you"
       sub="The owner or manager we can reach about orders and payouts."
       footer={
-        <Button className="w-full" disabled={!ready || busy} onClick={save}>
-          {verified ? "Continue" : "Verify your number to continue"}
+        <Button className="w-full" disabled={name.trim().length < 2 || busy} onClick={save}>
+          {busy ? "Saving…" : "Continue"}
         </Button>
       }
     >
       <Field id="owner" label="Owner’s full name" hint="Should match the name on your PAN." autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} />
-        <div className="flex flex-col gap-2">
-          <label htmlFor="owner-phone" className="text-[13px] font-medium text-muted">
-            Mobile number
-          </label>
-          <div className="flex gap-2">
-            <span className="flex h-14 items-center rounded-2xl bg-fill px-4 font-medium">+91</span>
-            <input
-              id="owner-phone"
-              type="tel"
-              inputMode="numeric"
-              maxLength={11}
-              value={phone}
-              onChange={(event) => {
-                setPhone(event.target.value.replace(/[^\d ]/g, ""));
-                setSent(false);
-                setOtp("");
-              }}
-              className="tabular h-14 min-w-0 flex-1 rounded-2xl bg-fill px-4 font-medium"
-            />
-            {verified && (
-              <span className="flex h-14 flex-none items-center rounded-2xl bg-[#dcfce7] px-3 text-[13px] font-medium text-[#166534]">Verified</span>
-            )}
-            {!verified && !sent && (
-              <button type="button" disabled={digits.length !== 10 || busy} onClick={send} className="h-14 flex-none rounded-2xl bg-dark px-4 text-sm font-medium text-white disabled:bg-[#f0f0f0] disabled:text-muted">
-                Send OTP
-              </button>
-            )}
-          </div>
-          <span className="text-[13px] text-muted">You’ll get the daily “how many tonight?” prompt here on WhatsApp.</span>
+      <div className="flex flex-col gap-2">
+        <span className="text-[13px] font-medium text-muted">Mobile number</span>
+        <div className="flex h-14 items-center justify-between gap-2 rounded-2xl bg-fill px-4">
+          <span className="tabular font-medium">{me ? phoneDisplay(me.phone) : ""}</span>
+          <span className="rounded-xl bg-[#dcfce7] px-2.5 py-1 text-[13px] font-medium text-[#166534]">Verified</span>
         </div>
-      {!verified && sent && (
-        <Field
-          id="owner-otp"
-          label="6-digit code sent by SMS"
-          inputMode="numeric"
-          autoComplete="one-time-code"
-          maxLength={6}
-          value={otp}
-          onChange={(event) => {
-            const code = event.target.value.replace(/\D/g, "").slice(0, 6);
-            setOtp(code);
-            if (code.length === 6) verify(code);
-          }}
-        />
-      )}
+        <span className="text-[13px] text-muted">The number you signed in with. You’ll get the daily “how many tonight?” prompt here on WhatsApp.</span>
+      </div>
       <Field id="owner-email" label="Email" type="email" autoComplete="email" hint="For weekly statements and your partner agreement." value={email} onChange={(event) => setEmail(event.target.value)} />
       <FormError message={error} />
     </Screen>
@@ -795,14 +722,14 @@ export default function Apply() {
 
   // Only a real answer of "no application" starts a new one; a failed load must not.
   const needsOutlet = step > 2 && !outlet && !!outlets.data && !!me;
-  const signedOut = step > 1 && !loading && !me;
+  // Sign in first, then the form; signing in brings the vendor back to this step.
+  const signedOut = !loading && !me;
   useEffect(() => {
-    if (signedOut) router.replace("/partner/apply/1");
+    if (signedOut) router.replace(`/signin?next=${encodeURIComponent(`/partner/apply/${step}${window.location.search}`)}`);
     else if (needsOutlet) router.replace("/partner/apply/2");
-  }, [signedOut, needsOutlet, router]);
+  }, [signedOut, needsOutlet, router, step]);
 
-  // Step 1 stays mounted through its own sign-in, or the form would lose what was typed.
-  const waiting = loading || (step > 1 && ((me && outlets.loading) || (outlet && status.loading))) || signedOut || needsOutlet;
+  const waiting = loading || (me && outlets.loading) || (step > 1 && outlet && status.loading) || signedOut || needsOutlet;
   const Step = STEPS[step - 1];
 
   return (

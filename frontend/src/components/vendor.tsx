@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Chip, ErrorState, LinkButton, Logo, PageSkeleton, Sheet, StatusChip } from "@/components/ui";
 import { api, errorCode, errorDetails, errorMessage, type CancelReason, type VendorOrder, type VendorOutlet } from "@/lib/api";
-import { rupees, time } from "@/lib/format";
+import { phoneDisplay, rupees, time } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 import { readJson, writeJson } from "@/lib/storage";
@@ -30,6 +30,43 @@ function GoTo({ href }: { href: string }) {
 }
 
 const KEY = "lb_vendor_outlet";
+
+// Set while logging out, so the dashboard doesn't send the vendor to sign in on the way to /partner.
+let loggingOut = false;
+
+/** Who is signed in, and Log out, as on the admin side: foot of the sidebar, or behind Account on a phone. */
+function AccountCard() {
+  const router = useRouter();
+  const { me, signOut } = useSession();
+  const [busy, setBusy] = useState(false);
+  if (!me) return null;
+  return (
+    <div className="flex flex-col gap-2.5 rounded-2xl bg-fill p-3">
+      <span className="flex flex-col gap-0.5">
+        <strong className="text-sm font-medium">{me.name || "Partner"}</strong>
+        <span className="text-xs text-muted">{phoneDisplay(me.phone)}</span>
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          loggingOut = true;
+          try {
+            await signOut();
+            router.replace("/partner");
+          } catch {
+            loggingOut = false;
+            setBusy(false);
+          }
+        }}
+        className="min-h-10 rounded-full border border-[#dddddd] bg-white px-3.5 text-[13px] font-medium disabled:text-muted"
+      >
+        {busy ? "Logging out…" : "Log out"}
+      </button>
+    </div>
+  );
+}
 
 function OutletSwitcher({ outlets, value, onChange }: { outlets: VendorOutlet[]; value: VendorOutlet; onChange: (id: string) => void }) {
   if (outlets.length < 2) {
@@ -64,9 +101,11 @@ export function VendorShell({ title, children }: { title: string; children: (out
   const { me, loading } = useSession();
   const query = useQuery(() => api.getVendorOutlets(), [me?.id], { enabled: !!me });
   const [picked, setPicked] = useState<string | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
 
   useEffect(() => {
-    if (!loading && !me) router.replace(`/signin?next=${encodeURIComponent(path)}`);
+    if (me) loggingOut = false;
+    else if (!loading && !loggingOut) router.replace(`/signin?next=${encodeURIComponent(path)}`);
   }, [loading, me, path, router]);
 
   useEffect(() => {
@@ -84,6 +123,7 @@ export function VendorShell({ title, children }: { title: string; children: (out
         <h1 className="text-2xl font-bold">No outlet yet</h1>
         <p className="text-sm text-muted">Apply to start selling. It takes about 10 minutes.</p>
         <LinkButton href="/partner/apply/1">Start your application</LinkButton>
+        <AccountCard />
       </div>
     );
   }
@@ -100,7 +140,7 @@ export function VendorShell({ title, children }: { title: string; children: (out
 
   return (
     <div className="flex min-h-dvh flex-col lg:flex-row">
-      <aside className="hidden w-60 flex-none flex-col gap-5 border-r border-[#f0f0f0] p-5 lg:flex">
+      <aside className="sticky top-0 hidden h-dvh w-60 flex-none flex-col gap-5 border-r border-[#f0f0f0] p-5 lg:flex">
         <Link href="/" className="flex items-center gap-2 no-underline">
           <Logo size="sm" />
           <span className="text-sm text-muted">partner</span>
@@ -118,15 +158,31 @@ export function VendorShell({ title, children }: { title: string; children: (out
             </Link>
           ))}
         </nav>
+        <div className="mt-auto">
+          <AccountCard />
+        </div>
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center justify-between gap-3 px-4 pb-2 pt-[18px] lg:px-8 lg:pt-7">
           <h1 className="text-2xl font-bold">{title}</h1>
-          <div className="min-w-0 lg:hidden">
+          <div className="flex min-w-0 items-center gap-2 lg:hidden">
             <OutletSwitcher outlets={outlets} value={outlet} onChange={pick} />
+            <button
+              type="button"
+              aria-expanded={accountOpen}
+              onClick={() => setAccountOpen(!accountOpen)}
+              className="min-h-10 flex-none rounded-full border border-[#dddddd] px-3.5 text-[13px] font-medium"
+            >
+              Account
+            </button>
           </div>
         </div>
+        {accountOpen && (
+          <div className="px-4 pb-2 lg:hidden">
+            <AccountCard />
+          </div>
+        )}
         <div className="flex flex-1 flex-col gap-3.5 px-4 pb-4 pt-1 lg:max-w-5xl lg:px-8">{children(outlet, outlets)}</div>
 
         <nav
