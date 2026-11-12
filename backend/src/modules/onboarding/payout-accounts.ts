@@ -1,11 +1,11 @@
 import { isIP } from 'node:net';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx } from '../../db/client.js';
-import { agreements, payoutAccounts, users } from '../../db/schema.js';
+import { agreements, documents, outlets, payoutAccounts, users } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { encrypt } from '../../lib/crypto.js';
-import { parseInput } from '../../lib/errors.js';
+import { ApiError, parseInput } from '../../lib/errors.js';
 import { readablePayoutAccounts, requireBrandOwner, requirePayoutAccount } from '../auth/access.js';
 
 export type PayoutAccount = typeof payoutAccounts.$inferSelect;
@@ -114,6 +114,82 @@ export async function updatePayoutAccount(
     });
     return row!;
   });
+}
+
+// ---------- Fixing an application's PAN or bank details ----------
+
+const panPart = payoutInput.pick({ legalName: true, pan: true });
+const bankPart = payoutInput.pick({ holderName: true, accountNumber: true, ifsc: true });
+export type PanDetails = z.input<typeof panPart>;
+export type BankDetails = z.input<typeof bankPart>;
+
+/**
+ * Corrects the PAN or the bank half of an account that is not verified yet, during an application.
+ * The matching file (PAN card, or bank proof) goes back to waiting for review with the new details,
+ * whether it was approved or flagged: an admin often flags a file because the details typed did not
+ * match it. A new photo is optional. While an application using the account is under review it is
+ * locked, as the rest of the application is. A verified account changes through updatePayoutAccount.
+ */
+async function fixAccountPart(
+  userId: string,
+  id: string,
+  part: 'pan' | 'bank',
+  set: Partial<typeof payoutAccounts.$inferInsert>,
+  detail: Record<string, unknown>,
+): Promise<PayoutAccount> {
+  await requirePayoutAccount(userId, id);
+  return withTx(async (tx) => {
+    const [account] = await tx.select().from(payoutAccounts).where(eq(payoutAccounts.id, id)).for('update');
+    if (account!.status !== 'pending') {
+      throw new ApiError('not_editable', 409, 'This account is already verified. Change it from your payout settings');
+    }
+    const using = await tx.select({ status: outlets.status }).from(outlets).where(eq(outlets.payoutAccountId, id));
+    if (using.some((o) => o.status === 'in_review')) {
+      throw new ApiError('not_editable', 409, 'Your application is under review. Withdraw it to make changes');
+    }
+    const [row] = await tx.update(payoutAccounts).set(set).where(eq(payoutAccounts.id, id)).returning();
+    const kind = part === 'pan' ? 'pan' : 'bank_proof';
+    await tx
+      .update(documents)
+      .set({ status: 'pending', rejectionReason: null, reviewedBy: null, reviewedAt: null })
+      .where(
+        and(
+          eq(documents.payoutAccountId, id),
+          isNull(documents.outletId),
+          eq(documents.kind, kind),
+          inArray(documents.status, ['approved', 'rejected']),
+        ),
+      );
+    await audit(tx, { actorId: userId, action: `payout_account.fix_${part}`, entity: 'payout_account', entityId: id, detail });
+    return row!;
+  });
+}
+
+export function fixPanDetails(userId: string, id: string, raw: PanDetails): Promise<PayoutAccount> {
+  const input = parseInput(panPart, raw);
+  return fixAccountPart(
+    userId,
+    id,
+    'pan',
+    { legalName: input.legalName, panEncrypted: encrypt(input.pan), panLast4: input.pan.slice(-4) },
+    { panLast4: input.pan.slice(-4) },
+  );
+}
+
+export function fixBankDetails(userId: string, id: string, raw: BankDetails): Promise<PayoutAccount> {
+  const input = parseInput(bankPart, raw);
+  return fixAccountPart(
+    userId,
+    id,
+    'bank',
+    {
+      holderName: input.holderName,
+      accountEncrypted: encrypt(input.accountNumber),
+      accountLast4: input.accountNumber.slice(-4),
+      ifsc: input.ifsc,
+    },
+    { accountLast4: input.accountNumber.slice(-4) },
+  );
 }
 
 const agreementInput = z.object({

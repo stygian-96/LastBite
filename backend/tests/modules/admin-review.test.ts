@@ -216,12 +216,14 @@ describe('document review', () => {
     expect(a!.documents.filter((d) => d.status === 'approved').map((d) => d.kind).sort()).toEqual(['bank_proof', 'pan']);
   });
 
-  test('an already reviewed document cannot be reviewed again', async () => {
+  test('an approved document cannot be approved again, and a rejected one cannot be reviewed', async () => {
     const { outlet, pa } = await submittedOutlet();
     const admin = await makeUser({ isAdmin: true });
-    const d = (await docsOf(outlet.id, pa.id))[0]!;
-    await reviewDocument(admin.id, d.id, { approve: true }, T0);
-    const err = await failure(reviewDocument(admin.id, d.id, { approve: false, reason: 'x' }, T0));
+    const [d, e] = await docsOf(outlet.id, pa.id);
+    await reviewDocument(admin.id, d!.id, { approve: true }, T0);
+    expect(await failure(reviewDocument(admin.id, d!.id, { approve: true }, T0))).toMatchObject({ status: 409, code: 'invalid_state' });
+    await reviewDocument(admin.id, e!.id, { approve: false, reason: 'Blurred' }, T0);
+    const err = await failure(reviewDocument(admin.id, e!.id, { approve: true }, T0));
     expect(err).toMatchObject({ status: 409, code: 'invalid_state' });
     expect((await failure(reviewDocument(admin.id, randomUUID(), { approve: true }, T0)))?.status).toBe(404);
   });

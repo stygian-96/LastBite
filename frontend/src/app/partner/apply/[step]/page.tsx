@@ -1,13 +1,23 @@
 "use client";
 
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { useCities } from "@/components/customer";
 import { Choice, FilePick, FormError, ListingForm, TextArea } from "@/components/forms";
 import { BackIcon, Button, Field, PageSkeleton, Tabs } from "@/components/ui";
 import { AGREEMENT_VERSION, COMMISSION_PERCENT } from "@/config/brand";
-import { api, errorCode, errorMessage, type OpeningHours, type OutletCategory, type OutletStatusView, type VendorOutlet } from "@/lib/api";
+import {
+  api,
+  errorCode,
+  errorMessage,
+  type OpeningHours,
+  type OutletCategory,
+  type OutletStatusView,
+  type PayoutAccount,
+  type SectionKey,
+  type VendorOutlet,
+} from "@/lib/api";
 import { useQuery } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 
@@ -21,7 +31,36 @@ type StepProps = {
   outlet: VendorOutlet | null;
   status: OutletStatusView | null;
   next: () => void;
+  /** An approved section the vendor chose to change, from their application page. */
+  reopen?: SectionKey | null;
 };
+
+const APPLICATION_PAGE = "/vendor/application";
+
+function sectionOf(status: OutletStatusView | null, key: SectionKey) {
+  return status?.sections.find((s) => s.key === key) ?? { key, state: "missing" as const };
+}
+
+/** The outlet's own payout account, for showing what is saved. Its secrets never come back, only last 4 digits. */
+function useAccount(outlet: VendorOutlet | null): PayoutAccount | null {
+  const accounts = useQuery(() => api.getPayoutAccounts(outlet!.brandId), [outlet?.brandId], { enabled: !!outlet?.payoutAccountId });
+  return accounts.data?.find((a) => a.id === outlet?.payoutAccountId) ?? null;
+}
+
+function Approved({ what, reopen }: { what: string; reopen: string }) {
+  return (
+    <div className="flex flex-col gap-1.5 rounded-2xl bg-ok-bg p-3.5 text-[13px] leading-normal text-ok-fg">
+      <strong className="font-medium">🔒 {what} approved</strong>
+      <span>
+        Need to change it?{" "}
+        <Link href={reopen} className="font-medium text-ink underline">
+          Change it
+        </Link>{" "}
+        and we’ll check it again.
+      </span>
+    </div>
+  );
+}
 
 function Header({ step }: { step: number }) {
   return (
@@ -33,7 +72,7 @@ function Header({ step }: { step: number }) {
         <span className="tabular text-sm font-medium">
           Step {step} of {TOTAL_STEPS}
         </span>
-        <Link href="/partner/status" className="flex min-h-11 items-center rounded-full bg-fill px-3.5 text-[13px] font-medium no-underline">
+        <Link href={APPLICATION_PAGE} className="flex min-h-11 items-center rounded-full bg-fill px-3.5 text-[13px] font-medium no-underline">
           Save &amp; exit
         </Link>
       </div>
@@ -342,16 +381,19 @@ function DocCard({ title, why, badge, children }: { title: string; why: string; 
   );
 }
 
-function Documents({ outlet, status, next }: StepProps) {
-  const fixes = status?.fixes ?? [];
-  const needsFssaiFile = !outlet || fixes.some((f) => f.code.startsWith("fssai_document"));
+function Documents({ outlet, status, next, reopen }: StepProps) {
+  const licence = sectionOf(status, "licence");
+  const panSection = sectionOf(status, "pan");
   const hasAccount = !!outlet?.payoutAccountId;
-  const needsPanFile = !hasAccount || fixes.some((f) => f.code.startsWith("pan_document"));
+  const account = useAccount(outlet);
+  const licenceLocked = licence.state === "approved" && reopen !== "licence";
+  const panLocked = hasAccount && panSection.state === "approved" && reopen !== "pan";
 
   const [fssai, setFssai] = useState(outlet?.fssaiNumber ?? "");
   const [expiry, setExpiry] = useState(outlet?.fssaiExpiresOn ?? "");
   const [fssaiFile, setFssaiFile] = useState<File | null>(null);
   const [pan, setPan] = useState(panDraft?.pan ?? "");
+  const [legalName, setLegalName] = useState<string | null>(null);
   const [panFile, setPanFile] = useState<File | null>(null);
   const [registered, setRegistered] = useState(!!outlet?.gstin);
   const [gstin, setGstin] = useState(outlet?.gstin ?? "");
@@ -359,15 +401,21 @@ function Documents({ outlet, status, next }: StepProps) {
   const [error, setError] = useState<string | null>(null);
 
   const fssaiDigits = fssai.replace(/\D/g, "");
-  const panOk = hasAccount || /^[A-Z]{5}\d{4}[A-Z]$/.test(pan);
+  const licenceChanged = fssaiDigits !== (outlet?.fssaiNumber ?? "") || expiry !== (outlet?.fssaiExpiresOn ?? "");
+  // A flagged part is fixed by new details, a new photo, or both. A missing one needs its photo.
+  const licenceOk =
+    licenceLocked ||
+    (fssaiDigits.length === 14 && !!expiry && (licence.state === "missing" ? !!fssaiFile : licence.state !== "needs_fix" || licenceChanged || !!fssaiFile));
+  const panValid = /^[A-Z]{5}\d{4}[A-Z]$/.test(pan);
+  const name = legalName ?? account?.legalName ?? "";
+  const panChanged = hasAccount && pan.length > 0;
+  const panOk = !hasAccount
+    ? panValid && (!!panFile || !!panDraft?.fileKey)
+    : panLocked ||
+      ((pan.length === 0 || (panValid && name.trim().length > 0)) &&
+        (panSection.state === "missing" ? !!panFile : panSection.state !== "needs_fix" || panChanged || !!panFile));
   const gstOk = !registered || /^[0-9A-Z]{15}$/.test(gstin);
-  const ready =
-    fssaiDigits.length === 14 &&
-    !!expiry &&
-    (!needsFssaiFile || !!fssaiFile) &&
-    panOk &&
-    (!needsPanFile || !!panFile || !!panDraft?.fileKey) &&
-    gstOk;
+  const ready = licenceOk && panOk && gstOk;
 
   async function save() {
     if (!outlet) return;
@@ -376,14 +424,14 @@ function Documents({ outlet, status, next }: StepProps) {
     try {
       await api.saveOutlet(outlet.id, {
         step: 4,
-        fssaiNumber: fssaiDigits,
-        fssaiExpiresOn: expiry,
+        ...(licenceLocked ? {} : { fssaiNumber: fssaiDigits, fssaiExpiresOn: expiry }),
         ...(registered ? { gstin } : {}),
       });
-      if (fssaiFile) await api.addDocument(outlet.id, { kind: "fssai", fileKey: await api.uploadFile(fssaiFile, "document") });
+      if (fssaiFile && !licenceLocked) await api.addDocument(outlet.id, { kind: "fssai", fileKey: await api.uploadFile(fssaiFile, "document") });
       const panKey = panFile ? await api.uploadFile(panFile, "document") : null;
       if (hasAccount) {
-        if (panKey) await api.addDocument(outlet.id, { kind: "pan", fileKey: panKey, payoutAccountId: outlet.payoutAccountId! });
+        if (panChanged && !panLocked) await api.fixPanDetails(outlet.payoutAccountId!, { legalName: name.trim(), pan });
+        if (panKey && !panLocked) await api.addDocument(outlet.id, { kind: "pan", fileKey: panKey, payoutAccountId: outlet.payoutAccountId! });
       } else {
         panDraft = { pan, fileKey: panKey ?? panDraft?.fileKey ?? null };
       }
@@ -393,6 +441,13 @@ function Documents({ outlet, status, next }: StepProps) {
       setBusy(false);
     }
   }
+
+  const flagged = (reason?: string) =>
+    reason ? (
+      <p className="rounded-xl bg-warn-bg px-3 py-2 text-[13px] leading-normal text-warn-fg">
+        <strong className="font-medium">From our team:</strong> {reason}
+      </p>
+    ) : null;
 
   return (
     <Screen
@@ -404,15 +459,57 @@ function Documents({ outlet, status, next }: StepProps) {
         </Button>
       }
     >
-      <DocCard title="FSSAI licence" why="Why: selling food in India needs a valid licence. We show it on your listings so customers can trust you." badge={needsFssaiFile ? "Photo needed" : "Added"}>
-        <Field id="fssai" label="14-digit licence number" inputMode="numeric" value={fssai} onChange={(event) => setFssai(event.target.value)} />
-        <Field id="fssai-expiry" label="Expiry date" type="date" value={expiry} onChange={(event) => setExpiry(event.target.value)} />
-        {needsFssaiFile && <FilePick label="Upload FSSAI licence" file={fssaiFile} onPick={setFssaiFile} />}
+      <DocCard title="FSSAI licence" why="Why: selling food in India needs a valid licence. We show it on your listings so customers can trust you." badge={licence.state === "missing" ? "Photo needed" : undefined}>
+        {flagged(licence.state === "needs_fix" ? licence.reason : undefined)}
+        {licenceLocked ? (
+          <>
+            <span className="text-sm">
+              {outlet?.fssaiNumber} · valid to {outlet?.fssaiExpiresOn}
+            </span>
+            <Approved what="Licence" reopen="/partner/apply/3?back=application&reopen=licence" />
+          </>
+        ) : (
+          <>
+            <Field id="fssai" label="14-digit licence number" inputMode="numeric" value={fssai} onChange={(event) => setFssai(event.target.value)} />
+            <Field id="fssai-expiry" label="Expiry date" type="date" value={expiry} onChange={(event) => setExpiry(event.target.value)} />
+            <FilePick
+              label={licence.state === "missing" ? "Upload FSSAI licence" : "Upload a new licence photo (optional)"}
+              hint={licence.state === "needs_fix" ? "Fix the number or date above, upload a clearer photo, or both." : undefined}
+              file={fssaiFile}
+              onPick={setFssaiFile}
+            />
+          </>
+        )}
       </DocCard>
 
-      <DocCard title="PAN" why="Why: required by law for payouts and tax reporting. Business PAN, or owner’s PAN if you’re a sole proprietor." badge={needsPanFile ? "Photo needed" : "Added"}>
-        {!hasAccount && <Field id="pan" label="PAN number" autoCapitalize="characters" maxLength={10} value={pan} onChange={(event) => setPan(event.target.value.toUpperCase())} />}
-        {needsPanFile && <FilePick label="Upload PAN photo" file={panFile} onPick={setPanFile} />}
+      <DocCard title="PAN" why="Why: required by law for payouts and tax reporting. Business PAN, or owner’s PAN if you’re a sole proprietor." badge={!hasAccount || panSection.state === "missing" ? "Photo needed" : undefined}>
+        {flagged(panSection.state === "needs_fix" ? panSection.reason : undefined)}
+        {panLocked ? (
+          <>
+            <span className="text-sm">
+              {account ? `${account.legalName} · •••• ${account.panLast4}` : "Saved"}
+            </span>
+            <Approved what="PAN" reopen="/partner/apply/3?back=application&reopen=pan" />
+          </>
+        ) : (
+          <>
+            {hasAccount && (
+              <>
+                <Field id="legal-name" label="Legal name (as on PAN)" value={name} onChange={(event) => setLegalName(event.target.value)} />
+                {account && <span className="-mt-2 text-xs text-muted">Saved PAN ends in {account.panLast4}. Type the full number only to change it.</span>}
+              </>
+            )}
+            <Field
+              id="pan"
+              label={hasAccount ? "New PAN number (optional)" : "PAN number"}
+              autoCapitalize="characters"
+              maxLength={10}
+              value={pan}
+              onChange={(event) => setPan(event.target.value.toUpperCase())}
+            />
+            <FilePick label={!hasAccount || panSection.state === "missing" ? "Upload PAN photo" : "Upload a new PAN photo (optional)"} file={panFile} onPick={setPanFile} />
+          </>
+        )}
       </DocCard>
 
       <DocCard title="GST" why="Why: if you’re registered, we add your GSTIN to invoices. Not registered? That’s fine, skip it.">
@@ -431,25 +528,35 @@ function Documents({ outlet, status, next }: StepProps) {
   );
 }
 
-function Payout({ outlet, status, next }: StepProps) {
+function Payout({ outlet, status, next, reopen }: StepProps) {
   const { me } = useSession();
-  const [holder, setHolder] = useState("");
+  const saved = !!outlet?.payoutAccountId;
+  const savedAccount = useAccount(outlet);
+  const bank = sectionOf(status, "bank");
+  const bankLocked = saved && bank.state === "approved" && reopen !== "bank";
+  const [holderEdit, setHolder] = useState<string | null>(null);
   const [account, setAccount] = useState("");
-  const [ifsc, setIfsc] = useState("");
+  const [ifscEdit, setIfsc] = useState<string | null>(null);
+  const holder = holderEdit ?? savedAccount?.holderName ?? "";
+  const ifsc = ifscEdit ?? savedAccount?.ifsc ?? "";
   const [proof, setProof] = useState<File | null>(null);
   const [nameOk, setNameOk] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const saved = !!outlet?.payoutAccountId;
-  const needsProof = !saved || !!status?.fixes.some((f) => f.code.startsWith("bank_proof_document"));
+  const needsProof = !saved || bank.state === "missing";
   const owner = me?.name ?? "";
   const business = outlet?.brandName ?? "";
   const typed = holder.trim().toLowerCase();
   const mismatch = !saved && typed.length > 2 && typed !== owner.toLowerCase() && typed !== business.toLowerCase() && !nameOk;
   const accountDigits = account.replace(/\s/g, "");
   const formOk = holder.trim() && /^\d{9,18}$/.test(accountDigits) && /^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc);
-  const ready = saved ? !needsProof || !!proof : !!formOk && !!proof && !!panDraft && !mismatch;
+  // Saved details change together: the full account number again, with holder and IFSC.
+  const edited = saved && (account.length > 0 || holderEdit !== null || ifscEdit !== null);
+  const fixOk = !edited || !!formOk;
+  const ready = saved
+    ? bankLocked || (fixOk && (needsProof ? !!proof : bank.state !== "needs_fix" || edited || !!proof))
+    : !!formOk && !!proof && !!panDraft && !mismatch;
 
   async function save() {
     if (!outlet) return;
@@ -457,6 +564,9 @@ function Payout({ outlet, status, next }: StepProps) {
     setError(null);
     try {
       let accountId = outlet.payoutAccountId;
+      if (accountId && edited && !bankLocked) {
+        await api.fixBankDetails(accountId, { holderName: holder.trim(), accountNumber: accountDigits, ifsc });
+      }
       if (!accountId) {
         const created = await api.createPayoutAccount({
           brandId: outlet.brandId,
@@ -471,7 +581,7 @@ function Payout({ outlet, status, next }: StepProps) {
         if (panDraft?.fileKey) await api.addDocument(outlet.id, { kind: "pan", fileKey: panDraft.fileKey, payoutAccountId: accountId });
         panDraft = null;
       }
-      if (proof) await api.addDocument(outlet.id, { kind: "bank_proof", fileKey: await api.uploadFile(proof, "document"), payoutAccountId: accountId });
+      if (proof && !bankLocked) await api.addDocument(outlet.id, { kind: "bank_proof", fileKey: await api.uploadFile(proof, "document"), payoutAccountId: accountId });
       await api.saveOutlet(outlet.id, { step: 5 });
       next();
     } catch (err) {
@@ -490,8 +600,38 @@ function Payout({ outlet, status, next }: StepProps) {
         </Button>
       }
     >
-      {saved ? (
-        <div className="rounded-2xl bg-ok-bg p-3.5 text-[13px] text-ok-fg">Your bank details are saved.</div>
+      {bank.state === "needs_fix" && bank.reason && (
+        <p className="rounded-xl bg-warn-bg px-3 py-2 text-[13px] leading-normal text-warn-fg">
+          <strong className="font-medium">From our team:</strong> {bank.reason}
+        </p>
+      )}
+      {bankLocked ? (
+        <>
+          {savedAccount && (
+            <span className="text-sm">
+              {savedAccount.holderName} · {savedAccount.ifsc} · ••{savedAccount.accountLast4}
+            </span>
+          )}
+          <Approved what="Bank account" reopen="/partner/apply/4?back=application&reopen=bank" />
+        </>
+      ) : saved ? (
+        <>
+          <Field id="holder" label="Account holder name (as on passbook)" value={holder} onChange={(event) => setHolder(event.target.value)} />
+          <Field
+            id="account"
+            label="Account number"
+            inputMode="numeric"
+            placeholder={savedAccount ? `Saved: ••${savedAccount.accountLast4}` : undefined}
+            value={account}
+            onChange={(event) => setAccount(event.target.value)}
+          />
+          <Field id="ifsc" label="IFSC" maxLength={11} value={ifsc} onChange={(event) => setIfsc(event.target.value.toUpperCase())} />
+          <span className="-mt-2 text-xs text-muted">
+            {edited && !formOk
+              ? "To change any bank detail, type the full account number again, with the holder name and IFSC."
+              : "Leave these as they are to keep your saved account."}
+          </span>
+        </>
       ) : !panDraft ? (
         <div role="alert" className="flex flex-col gap-2 rounded-2xl bg-wait-bg p-3.5 text-[13px] leading-normal text-wait-fg">
           <strong className="font-medium">We need your PAN first</strong>
@@ -524,7 +664,14 @@ function Payout({ outlet, status, next }: StepProps) {
           <Field id="ifsc" label="IFSC" maxLength={11} value={ifsc} onChange={(event) => setIfsc(event.target.value.toUpperCase())} />
         </>
       )}
-      {needsProof && (panDraft || saved) && <FilePick label="Cancelled cheque or passbook first page" hint="Why: confirms the account is really yours before we send money." file={proof} onPick={setProof} />}
+      {!bankLocked && (panDraft || saved) && (
+        <FilePick
+          label={needsProof ? "Cancelled cheque or passbook first page" : "Upload a new cheque or passbook photo (optional)"}
+          hint={bank.state === "needs_fix" ? "Fix the details above, upload a clearer photo, or both." : "Why: confirms the account is really yours before we send money."}
+          file={proof}
+          onPick={setProof}
+        />
+      )}
       <FormError message={error} />
     </Screen>
   );
@@ -563,9 +710,9 @@ function Agreement({ outlet }: StepProps) {
     try {
       await api.signAgreement(outlet!.payoutAccountId!, { signedName: signature.trim(), version: AGREEMENT_VERSION });
       await api.submitOutlet(outlet!.id);
-      router.push("/partner/status");
+      router.push(APPLICATION_PAGE);
     } catch (err) {
-      if (errorCode(err) === "incomplete") router.push("/partner/status");
+      if (errorCode(err) === "incomplete") router.push(APPLICATION_PAGE);
       else {
         setError(errorMessage(err));
         setBusy(false);
@@ -637,12 +784,17 @@ export default function Apply() {
   const params = useParams<{ step: string }>();
   const step = Math.min(TOTAL_STEPS, Math.max(1, Number(params.step) || 1));
   const router = useRouter();
+  const search = useSearchParams();
+  // From the application page: save returns there, and an approved part may be opened to change.
+  const backToApplication = search.get("back") === "application";
+  const reopen = search.get("reopen") as SectionKey | null;
   const { me, loading } = useSession();
   const outlets = useQuery(() => api.getVendorOutlets(), [me?.id, step], { enabled: !!me });
   const outlet = outlets.data?.find((o) => o.status === "draft" || o.status === "changes_needed") ?? null;
   const status = useQuery(() => api.getOutletStatus(outlet!.id), [outlet?.id, step], { enabled: !!outlet });
 
-  const needsOutlet = step > 2 && !outlet && !outlets.loading && !!me;
+  // Only a real answer of "no application" starts a new one; a failed load must not.
+  const needsOutlet = step > 2 && !outlet && !!outlets.data && !!me;
   const signedOut = step > 1 && !loading && !me;
   useEffect(() => {
     if (signedOut) router.replace("/partner/apply/1");
@@ -656,10 +808,23 @@ export default function Apply() {
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-xl flex-col">
       <Header step={step} />
-      {waiting ? (
+      {outlets.error && !outlets.data && step > 1 ? (
+        <div className="flex flex-col gap-3 px-4 pt-6">
+          <p className="text-sm text-muted">We couldn’t load your application. Check your connection and try again.</p>
+          <Button size="md" variant="quiet" onClick={outlets.reload}>
+            Try again
+          </Button>
+        </div>
+      ) : waiting ? (
         <PageSkeleton />
       ) : (
-        <Step key={`${step}-${outlet?.id ?? "new"}`} outlet={outlet} status={status.data ?? null} next={() => router.push(`/partner/apply/${step + 1}`)} />
+        <Step
+          key={`${step}-${outlet?.id ?? "new"}-${reopen ?? ""}`}
+          outlet={outlet}
+          status={status.data ?? null}
+          reopen={reopen}
+          next={() => router.push(backToApplication ? APPLICATION_PAGE : `/partner/apply/${step + 1}`)}
+        />
       )}
     </div>
   );

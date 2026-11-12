@@ -225,7 +225,7 @@ export async function queueRefundIssued(tx: Tx, refundId: string): Promise<void>
 export async function queueApplicationNotice(
   tx: Tx,
   outletId: string,
-  template: 'application_approved' | 'changes_needed',
+  template: 'application_approved' | 'changes_needed' | 'application_rejected',
   eventKey: string,
   reason?: string,
 ): Promise<void> {
@@ -233,7 +233,7 @@ export async function queueApplicationNotice(
   if (!outlet) return;
   const info = await outletInfo(tx, outletId);
   const owners = (await staffOf(tx, [outlet], ['owner'])).get(outletId) ?? [];
-  const prefix = template === 'application_approved' ? 'approved' : 'changes';
+  const prefix = { application_approved: 'approved', changes_needed: 'changes', application_rejected: 'rejected' }[template];
   await enqueueMany(
     tx,
     owners.map((owner) => ({

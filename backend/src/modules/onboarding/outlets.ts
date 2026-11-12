@@ -221,6 +221,23 @@ export async function saveOutletStep(userId: string, outletId: string, raw: Outl
     const set: Partial<typeof outlets.$inferInsert> = { ...fields, ...(contactPhone ? { contactPhone } : {}) };
     if (step !== undefined) set.onboardingStep = Math.max(current.onboardingStep, Math.min(step + 1, LAST_STEP));
     if (Object.keys(set).length > 0) await tx.update(outlets).set(set).where(eq(outlets.id, outletId));
+    // New licence details send the licence file back for review with them, approved or flagged.
+    const licenceChanged =
+      (patch.fssaiNumber !== undefined && patch.fssaiNumber !== current.fssaiNumber) ||
+      (patch.fssaiExpiresOn !== undefined && patch.fssaiExpiresOn !== current.fssaiExpiresOn);
+    if (licenceChanged) {
+      await tx
+        .update(documents)
+        .set({ status: 'pending', rejectionReason: null, reviewedBy: null, reviewedAt: null })
+        .where(
+          and(
+            eq(documents.outletId, outletId),
+            isNull(documents.payoutAccountId),
+            eq(documents.kind, 'fssai'),
+            inArray(documents.status, ['approved', 'rejected']),
+          ),
+        );
+    }
     if (logoKey !== undefined) await tx.update(brands).set({ logoKey }).where(eq(brands.id, current.brandId));
     await audit(tx, {
       actorId: userId,
@@ -328,8 +345,9 @@ function docState(rows: DocRow[], kind: string): { state: 'ok' | 'rejected' | 'm
 const hasHours = (h: unknown) =>
   !!h && typeof h === 'object' && Object.values(h).some((v) => Array.isArray(v) && v.length > 0);
 
+// A flagged file is fixed by correcting the details that go with it, by a new photo, or both.
 const rejectedMessage = (label: string, reason?: string) =>
-  reason ? `The ${label} was rejected: ${reason}. Upload it again` : `The ${label} was rejected. Upload it again`;
+  reason ? `The ${label} needs fixing: ${reason}. Correct the details or upload it again` : `The ${label} needs fixing. Correct the details or upload it again`;
 
 async function runChecks(o: Outlet): Promise<Check[]> {
   const fixes: Check[] = [];
@@ -400,19 +418,78 @@ function requestedChanges(o: Outlet, checks: Check[]): Fix[] {
   return checks.length > 0 ? [] : [{ code: 'changes_requested', message: 'Check your details, then submit again' }];
 }
 
-/** Where the outlet stands and what is still missing or was rejected. */
+export type SectionState = 'approved' | 'waiting' | 'needs_fix' | 'missing' | 'done';
+export type Section = { key: 'details' | 'licence' | 'pan' | 'bank' | 'listing' | 'agreement'; state: SectionState; reason?: string };
+
+/** A document section's state, from its newest file that is not replaced. */
+function fileSection(rows: DocRow[], kind: string, detailsMissing: boolean): Omit<Section, 'key'> {
+  const live = rows.filter((r) => r.kind === kind && r.status !== 'replaced');
+  const rejected = live.find((r) => r.status === 'rejected');
+  if (rejected) return { state: 'needs_fix', reason: rejected.rejectionReason ?? undefined };
+  if (detailsMissing || live.length === 0) return { state: 'missing' };
+  if (live.some((r) => r.status === 'pending')) return { state: 'waiting' };
+  return { state: 'approved' };
+}
+
+/** Each part of the application and where it stands, for the vendor's checklist. */
+async function sections(o: Outlet, checks: Check[]): Promise<Section[]> {
+  const missing = (step: Step) => checks.some((c) => c.step === step && c.code.endsWith('_missing') && !c.code.includes('document'));
+  const outletDocs = await db.select().from(documents).where(eq(documents.outletId, o.id));
+  const accountDocs = o.payoutAccountId
+    ? await db.select().from(documents).where(eq(documents.payoutAccountId, o.payoutAccountId))
+    : [];
+  const plain = (step: Step): SectionState => (checks.some((c) => c.step === step) ? 'missing' : 'done');
+  return [
+    { key: 'details', state: plain('details') },
+    { key: 'licence', ...fileSection(outletDocs, 'fssai', missing('licence')) },
+    { key: 'pan', ...fileSection(accountDocs, 'pan', !o.payoutAccountId) },
+    { key: 'bank', ...fileSection(accountDocs, 'bank_proof', !o.payoutAccountId) },
+    { key: 'listing', state: plain('listing') },
+    { key: 'agreement', state: plain('agreement') },
+  ];
+}
+
+/** Where the outlet stands, each part of the application, and what is still missing or was flagged. */
 export async function getOutletStatus(
   userId: string,
   outletId: string,
-): Promise<{ status: string; steps: { key: string; done: boolean }[]; fixes: Fix[] }> {
+): Promise<{
+  status: string;
+  steps: { key: string; done: boolean }[];
+  sections: Section[];
+  fixes: Fix[];
+  changesReason: string | null;
+  rejectionReason: string | null;
+}> {
   await requireOutlet(userId, outletId, ['owner', 'manager']);
   const o = await loadOutlet(outletId);
   const checks = await runChecks(o);
   return {
     status: o.status,
     steps: STEPS.map((key) => ({ key, done: !checks.some((c) => c.step === key) })),
-    fixes: [...requestedChanges(o, checks), ...checks.map(toFix)],
+    sections: await sections(o, checks),
+    fixes: o.status === 'rejected' ? [] : [...requestedChanges(o, checks), ...checks.map(toFix)],
+    changesReason: o.status === 'changes_needed' ? o.changesReason : null,
+    rejectionReason: o.status === 'rejected' ? o.rejectionReason : null,
   };
+}
+
+/**
+ * Takes an application back from review so the vendor can change it. It returns to draft, and is
+ * sent again with submitOutlet.
+ */
+export async function withdrawOutlet(userId: string, outletId: string): Promise<Outlet> {
+  await requireOutlet(userId, outletId, ['owner', 'manager']);
+  return withTx(async (tx) => {
+    const [row] = await tx
+      .update(outlets)
+      .set({ status: 'draft' })
+      .where(and(eq(outlets.id, outletId), eq(outlets.status, 'in_review')))
+      .returning();
+    if (!row) throw new ApiError('not_in_review', 409, 'Only an application under review can be withdrawn');
+    await audit(tx, { actorId: userId, action: 'outlet.withdraw', entity: 'outlet', entityId: outletId });
+    return row;
+  });
 }
 
 const notSubmittable = () => new ApiError('not_submittable', 409, 'This outlet was already submitted');

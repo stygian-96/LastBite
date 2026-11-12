@@ -130,6 +130,7 @@ export const outlets = pgTable("outlets", {
 	submittedAt: timestamp("submitted_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	changesReason: text("changes_reason"),
+	rejectionReason: text("rejection_reason"),
 }, (table) => [
 	index("outlets_area_id_idx").using("btree", table.areaId.asc().nullsLast().op("uuid_ops")).where(sql`(status = 'live'::text)`),
 	index("outlets_fssai_number_idx").using("btree", table.fssaiNumber.asc().nullsLast().op("text_ops")),
@@ -151,7 +152,7 @@ export const outlets = pgTable("outlets", {
 		}),
 	unique("outlets_brand_id_slug_key").on(table.brandId, table.slug),
 	check("outlets_category_check", sql`category = ANY (ARRAY['bakery'::text, 'cafe'::text, 'restaurant'::text, 'sweets'::text, 'kitchen'::text])`),
-	check("outlets_status_check", sql`status = ANY (ARRAY['draft'::text, 'in_review'::text, 'changes_needed'::text, 'live'::text, 'suspended'::text, 'closed'::text])`),
+	check("outlets_status_check", sql`status = ANY (ARRAY['draft'::text, 'in_review'::text, 'changes_needed'::text, 'live'::text, 'suspended'::text, 'closed'::text, 'rejected'::text])`),
 ]);
 
 export const areas = pgTable("areas", {

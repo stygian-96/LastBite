@@ -36,11 +36,17 @@ const invalidState = () => new ApiError('invalid_state', 409, 'That change is no
 
 // ---------- The review queue ----------
 
+export const APPLICATION_TABS = ['review', 'sent_back', 'drafts', 'rejected'] as const;
+export type ApplicationTab = (typeof APPLICATION_TABS)[number];
+
 /**
- * Outlets waiting for a decision, oldest submission first: those in review, plus any outlet with a
- * document still pending (a licence renewal on a live outlet). Documents carry short-lived read links.
+ * Applications in one tab. `review` (the default) is what waits for a decision, oldest submission
+ * first: outlets in review, plus any outlet with a document still pending (a licence renewal on a
+ * live outlet). `sent_back` waits on the vendor, `drafts` were never submitted, and `rejected` were
+ * turned down; those three are newest first. Documents carry short-lived read links.
  */
-export async function listApplications(): Promise<Application[]> {
+export async function listApplications(rawTab?: string): Promise<Application[]> {
+  const tab: ApplicationTab = (APPLICATION_TABS as readonly string[]).includes(rawTab ?? '') ? (rawTab as ApplicationTab) : 'review';
   const pendingForOutlet = db
     .select({ id: documents.outletId })
     .from(documents)
@@ -50,17 +56,24 @@ export async function listApplications(): Promise<Application[]> {
     .from(documents)
     .where(and(eq(documents.status, 'pending'), isNotNull(documents.payoutAccountId)));
 
-  const rows = await db
-    .select()
-    .from(outlets)
-    .where(
-      or(
-        eq(outlets.status, 'in_review'),
-        inArray(outlets.id, pendingForOutlet),
-        inArray(outlets.payoutAccountId, pendingForAccount),
+  const byTab = {
+    // A pending file outside review is a renewal on a live outlet. One on an application sent back
+    // waits for the vendor to send it again, and one on a rejected application never will be.
+    review: or(
+      eq(outlets.status, 'in_review'),
+      and(
+        inArray(outlets.status, ['live', 'suspended']),
+        or(inArray(outlets.id, pendingForOutlet), inArray(outlets.payoutAccountId, pendingForAccount)),
       ),
-    );
-  rows.sort((a, b) => (a.submittedAt ?? a.createdAt).localeCompare(b.submittedAt ?? b.createdAt));
+    ),
+    sent_back: eq(outlets.status, 'changes_needed'),
+    drafts: eq(outlets.status, 'draft'),
+    rejected: eq(outlets.status, 'rejected'),
+  };
+  // shortcut: no paging; fine for hundreds of applications, page it when a tab grows past that.
+  const rows = await db.select().from(outlets).where(byTab[tab]);
+  const when = (o: Outlet) => o.submittedAt ?? o.createdAt;
+  rows.sort((a, b) => (tab === 'review' ? when(a).localeCompare(when(b)) : when(b).localeCompare(when(a))));
   if (rows.length === 0) return [];
 
   const outletIds = rows.map((o) => o.id);
@@ -168,7 +181,9 @@ export async function reviewDocument(adminId: string, docId: string, raw: Review
   await withTx(async (tx) => {
     const [doc] = await tx.select().from(documents).where(eq(documents.id, docId)).for('update');
     if (!doc) throw notFound('Document');
-    if (doc.status !== 'pending') throw invalidState();
+    // An approved file can be sent back too ("ask to change"), but only before anything relying on it is live.
+    const reopening = doc.status === 'approved' && !input.approve;
+    if (doc.status !== 'pending' && !reopening) throw invalidState();
 
     const owner = doc.outletId
       ? and(eq(documents.outletId, doc.outletId), isNull(documents.payoutAccountId))
@@ -178,6 +193,9 @@ export async function reviewDocument(adminId: string, docId: string, raw: Review
       : eq(outlets.payoutAccountId, doc.payoutAccountId!);
     const affected = await tx.select().from(outlets).where(dependants).for('update');
 
+    if (reopening && affected.some((o) => o.status === 'live' || o.status === 'suspended')) {
+      throw new ApiError('invalid_state', 409, 'This file is in use by a live outlet; ask the vendor to upload a new one instead');
+    }
     if (licence && !(doc.kind === 'fssai' && doc.outletId && affected[0]?.status === 'live')) {
       throw new ApiError('invalid_request', 400, 'The FSSAI number and expiry can be set only when renewing a live outlet');
     }
@@ -235,7 +253,7 @@ export async function reviewDocument(adminId: string, docId: string, raw: Review
 // ---------- Deciding an outlet ----------
 
 const decisionInput = z.object({
-  decision: z.enum(['approve', 'request_changes', 'suspend', 'reinstate', 'close']),
+  decision: z.enum(['approve', 'request_changes', 'reject', 'suspend', 'reinstate', 'close']),
   reason: z.string().trim().max(500).optional(),
 });
 export type Decision = z.input<typeof decisionInput>['decision'];
@@ -244,6 +262,8 @@ export type Decision = z.input<typeof decisionInput>['decision'];
 const TRANSITIONS: Record<Decision, { from: string[]; to: string }> = {
   approve: { from: ['in_review'], to: 'live' },
   request_changes: { from: ['in_review'], to: 'changes_needed' },
+  // Turned down for good: spam, or a vendor we won't take. Any application not yet live.
+  reject: { from: ['draft', 'in_review', 'changes_needed'], to: 'rejected' },
   suspend: { from: ['live'], to: 'suspended' },
   reinstate: { from: ['suspended'], to: 'live' },
   close: { from: ['live', 'suspended'], to: 'closed' },
@@ -292,6 +312,9 @@ export async function decideOutlet(
     if (input.decision === 'request_changes' && !input.reason) {
       throw new ApiError('invalid_request', 400, 'Say what needs to change');
     }
+    if (input.decision === 'reject' && !input.reason) {
+      throw new ApiError('invalid_request', 400, 'Say why the application is rejected');
+    }
 
     let verified = false;
     if (input.decision === 'approve') {
@@ -313,13 +336,21 @@ export async function decideOutlet(
       }
     }
 
-    const asked = input.decision === 'request_changes' ? { changesReason: input.reason } : {};
+    const asked =
+      input.decision === 'request_changes'
+        ? { changesReason: input.reason }
+        : input.decision === 'reject'
+          ? { rejectionReason: input.reason }
+          : {};
     await tx.update(outlets).set({ status: move.to, ...asked }).where(eq(outlets.id, outletId));
     if (input.decision === 'approve') await queueApplicationNotice(tx, outletId, 'application_approved', 'live');
     if (input.decision === 'request_changes') {
       await queueApplicationNotice(tx, outletId, 'changes_needed', now.toISOString(), input.reason);
     }
     if (input.decision === 'close') await queueOutletClosed(tx, outletId);
+    if (input.decision === 'reject') {
+      await queueApplicationNotice(tx, outletId, 'application_rejected', now.toISOString(), input.reason);
+    }
     await audit(tx, {
       actorId: adminId,
       action: `outlet.${input.decision}`,

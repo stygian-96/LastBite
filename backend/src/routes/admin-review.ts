@@ -6,7 +6,7 @@ import { decideOutlet, listApplications, reviewDocument, updateOutletAdmin } fro
 export const adminReview = new Hono()
   .get(
     '/applications',
-    route({ auth: 'admin' }, async () => ({ applications: await listApplications() })),
+    route({ auth: 'admin' }, async ({ c }) => ({ applications: await listApplications(c.req.query('tab')) })),
   )
   .post(
     '/documents/:id/review',

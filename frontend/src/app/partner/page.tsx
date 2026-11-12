@@ -38,7 +38,7 @@ export default function Partner() {
           <span className="text-sm text-muted">partners</span>
         </Link>
         {hasApplication && (
-          <Link href="/partner/status" className="flex min-h-11 items-center rounded-full bg-fill px-3.5 text-[13px] font-medium no-underline">
+          <Link href="/vendor/application" className="flex min-h-11 items-center rounded-full bg-fill px-3.5 text-[13px] font-medium no-underline">
             Continue application
           </Link>
         )}

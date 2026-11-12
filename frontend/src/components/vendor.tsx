@@ -18,6 +18,17 @@ const TABS = [
   { href: "/vendor/earnings", label: "Earnings", d: "M7 5h10M7 9h10M10 5c3 0 5 2 5 4s-2 4-5 4H7l7 7" },
 ];
 
+// Before an outlet is live, the dashboard is its application and its listings.
+const APPLICATION_TAB = { href: "/vendor/application", label: "Application", d: "M9 5h10M9 12h10M9 19h10M4 5l1 1 2-2M4 12l1 1 2-2M4 19l1 1 2-2" };
+const ONBOARDING_TABS = [APPLICATION_TAB, TABS[2]!];
+export const isOnboarding = (outlet: VendorOutlet) => outlet.status !== "live" && outlet.status !== "suspended";
+
+function GoTo({ href }: { href: string }) {
+  const router = useRouter();
+  useEffect(() => router.replace(href), [href, router]);
+  return <PageSkeleton />;
+}
+
 const KEY = "lb_vendor_outlet";
 
 function OutletSwitcher({ outlets, value, onChange }: { outlets: VendorOutlet[]; value: VendorOutlet; onChange: (id: string) => void }) {
@@ -66,18 +77,22 @@ export function VendorShell({ title, children }: { title: string; children: (out
   if (loading || !me || query.loading) return <PageSkeleton />;
   if (query.error) return <ErrorState message={errorMessage(query.error)} onRetry={query.reload} />;
 
-  const outlets = (query.data ?? []).filter((o) => o.status === "live" || o.status === "suspended");
+  const outlets = (query.data ?? []).filter((o) => o.status !== "closed");
   if (outlets.length === 0) {
     return (
       <div className="mx-auto flex min-h-dvh max-w-md flex-col gap-3 p-4 pt-10">
-        <h1 className="text-2xl font-bold">No live outlet yet</h1>
-        <p className="text-sm text-muted">Your dashboard opens once your application is approved.</p>
-        <LinkButton href="/partner/status">See your application</LinkButton>
+        <h1 className="text-2xl font-bold">No outlet yet</h1>
+        <p className="text-sm text-muted">Apply to start selling. It takes about 10 minutes.</p>
+        <LinkButton href="/partner/apply/1">Start your application</LinkButton>
       </div>
     );
   }
 
-  const outlet = outlets.find((o) => o.id === picked) ?? outlets[0];
+  const outlet = outlets.find((o) => o.id === picked) ?? outlets[0]!;
+  const tabs = isOnboarding(outlet) ? ONBOARDING_TABS : TABS;
+  // Today, orders and earnings open once the outlet is live.
+  if (isOnboarding(outlet) && !tabs.some((tab) => path === tab.href || path.startsWith(`${tab.href}/`))) return <GoTo href={APPLICATION_TAB.href} />;
+  if (!isOnboarding(outlet) && path === APPLICATION_TAB.href) return <GoTo href="/vendor" />;
   const pick = (id: string) => {
     setPicked(id);
     writeJson(KEY, id);
@@ -92,7 +107,7 @@ export function VendorShell({ title, children }: { title: string; children: (out
         </Link>
         <OutletSwitcher outlets={outlets} value={outlet} onChange={pick} />
         <nav aria-label="Dashboard" className="flex flex-col gap-1">
-          {TABS.map((tab) => (
+          {tabs.map((tab) => (
             <Link
               key={tab.href}
               href={tab.href}
@@ -114,8 +129,12 @@ export function VendorShell({ title, children }: { title: string; children: (out
         </div>
         <div className="flex flex-1 flex-col gap-3.5 px-4 pb-4 pt-1 lg:max-w-5xl lg:px-8">{children(outlet, outlets)}</div>
 
-        <nav aria-label="Vendor" className="sticky bottom-0 z-10 grid grid-cols-4 rounded-t-3xl bg-white px-2 pb-5 pt-2 shadow-nav lg:hidden">
-          {TABS.map((tab) => {
+        <nav
+          aria-label="Vendor"
+          className="sticky bottom-0 z-10 grid rounded-t-3xl bg-white px-2 pb-5 pt-2 shadow-nav lg:hidden"
+          style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
+        >
+          {tabs.map((tab) => {
             const on = path === tab.href;
             return (
               <Link

@@ -8,6 +8,7 @@ export type TemplateName =
   | 'late_payment_refunded'
   | 'application_approved'
   | 'changes_needed'
+  | 'application_rejected'
   | 'daily_prompt'
   | 'followed_outlet_listed'
   | 'licence_expiring'
@@ -144,6 +145,15 @@ export const TEMPLATES: Record<TemplateName, Template> = {
       (v.reason ? `${s(v.reason)}\n\n` : '') +
       'Open your application to fix them and send it back.',
     sms: (v) => `${brand()}: Changes needed before ${s(v.business)} can go live. See what to fix: ${s(v.link)}`,
+  },
+  application_rejected: {
+    audience: 'vendor',
+    marketing: false,
+    whatsapp: (v) =>
+      `Hi ${s(v.owner)}, we’re sorry: we can’t take *${s(v.business)}* onto ${brand()}.\n\n` +
+      (v.reason ? `${s(v.reason)}\n\n` : '') +
+      'Reply here if you think this is a mistake.',
+    sms: (v) => `${brand()}: We can't take ${s(v.business)} on for now. See why: ${s(v.link)}`,
   },
   daily_prompt: {
     audience: 'vendor',

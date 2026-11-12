@@ -7,6 +7,7 @@ import type {
   AdminVendorDetail,
   AdminVendorHistory,
   Application,
+  ApplicationTab,
   CancelReason,
   City,
   DocumentKind,
@@ -83,6 +84,13 @@ export type Api = {
   createPayoutAccount(body: PayoutAccountInput & { brandId: string }): Promise<PayoutAccount>;
   signAgreement(accountId: string, body: { signedName: string; version: string }): Promise<void>;
   submitOutlet(id: string): Promise<VendorOutlet>;
+  /** Takes an application back from review so it can be changed. */
+  withdrawOutlet(id: string): Promise<VendorOutlet>;
+  getPayoutAccounts(brandId: string): Promise<PayoutAccount[]>;
+  /** Corrects the PAN half of an account not verified yet; its PAN file goes back for review. */
+  fixPanDetails(accountId: string, body: { legalName: string; pan: string }): Promise<PayoutAccount>;
+  /** Corrects the bank half of an account not verified yet; its bank proof goes back for review. */
+  fixBankDetails(accountId: string, body: { holderName: string; accountNumber: string; ifsc: string }): Promise<PayoutAccount>;
   getOutletStatus(id: string): Promise<OutletStatusView>;
 
   // Vendor daily use
@@ -105,7 +113,7 @@ export type Api = {
   getStatementCsv(payoutId: string): Promise<string>;
 
   // Admin
-  getApplications(): Promise<Application[]>;
+  getApplications(tab?: ApplicationTab): Promise<Application[]>;
   reviewDocument(id: string, body: { approve: boolean; reason?: string }): Promise<void>;
   decideOutlet(id: string, body: { decision: OutletDecision; reason?: string }): Promise<void>;
   getVendors(params?: { status?: OutletStatus; q?: string; areaId?: string; offset?: number }): Promise<{ vendors: AdminVendor[]; hasMore: boolean }>;
@@ -232,6 +240,13 @@ export const httpApi: Api = {
     await send("POST", `/vendor/payout-accounts/${accountId}/agreement`, body);
   },
   submitOutlet: async (id) => (await request<{ outlet: VendorOutlet }>("POST", `/vendor/outlets/${id}/submit`)).outlet,
+  withdrawOutlet: async (id) => (await request<{ outlet: VendorOutlet }>("POST", `/vendor/outlets/${id}/withdraw`)).outlet,
+  getPayoutAccounts: async (brandId) =>
+    (await request<{ payoutAccounts: PayoutAccount[] }>("GET", `/vendor/payout-accounts${query({ brand_id: brandId })}`)).payoutAccounts,
+  fixPanDetails: async (accountId, body) =>
+    (await request<{ payoutAccount: PayoutAccount }>("PATCH", `/vendor/payout-accounts/${accountId}/pan`, body)).payoutAccount,
+  fixBankDetails: async (accountId, body) =>
+    (await request<{ payoutAccount: PayoutAccount }>("PATCH", `/vendor/payout-accounts/${accountId}/bank`, body)).payoutAccount,
   getOutletStatus: (id) => request("GET", `/vendor/outlets/${id}/status`),
 
   getVendorOutlets: async () => (await request<{ outlets: VendorOutlet[] }>("GET", "/vendor/outlets")).outlets,
@@ -265,7 +280,7 @@ export const httpApi: Api = {
   getEarnings: (payoutAccountId) => request("GET", `/vendor/earnings${query({ payout_account: payoutAccountId })}`),
   getStatementCsv: async (payoutId) => (await send("GET", `/vendor/payouts/${payoutId}/statement`)).text(),
 
-  getApplications: async () => (await request<{ applications: Application[] }>("GET", "/admin/applications")).applications,
+  getApplications: async (tab) => (await request<{ applications: Application[] }>("GET", `/admin/applications${query({ tab })}`)).applications,
   reviewDocument: async (id, body) => {
     await send("POST", `/admin/documents/${id}/review`, body);
   },

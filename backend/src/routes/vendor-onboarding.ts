@@ -13,8 +13,17 @@ import {
   startOutlet,
   submitOutlet,
   updateOutletSettings,
+  withdrawOutlet,
 } from '../modules/onboarding/outlets.js';
-import { createPayoutAccount, listPayoutAccounts, signAgreement, updatePayoutAccount, type PayoutAccount } from '../modules/onboarding/payout-accounts.js';
+import {
+  createPayoutAccount,
+  fixBankDetails,
+  fixPanDetails,
+  listPayoutAccounts,
+  signAgreement,
+  updatePayoutAccount,
+  type PayoutAccount,
+} from '../modules/onboarding/payout-accounts.js';
 
 const FOLDERS = { photo: 'photos', logo: 'logos', document: 'documents' } as const;
 
@@ -122,6 +131,21 @@ export const vendorOnboarding = new Hono()
       payoutAccount: publicPayoutAccount(await updatePayoutAccount(user!.id, params.id!, body, now)),
     })),
   )
+  .patch(
+    '/payout-accounts/:id/pan',
+    route({ auth: 'user', body: z.object({ legalName: z.string(), pan: z.string() }) }, async ({ user, params, body }) => ({
+      payoutAccount: publicPayoutAccount(await fixPanDetails(user!.id, params.id!, body)),
+    })),
+  )
+  .patch(
+    '/payout-accounts/:id/bank',
+    route(
+      { auth: 'user', body: z.object({ holderName: z.string(), accountNumber: z.string(), ifsc: z.string() }) },
+      async ({ user, params, body }) => ({
+        payoutAccount: publicPayoutAccount(await fixBankDetails(user!.id, params.id!, body)),
+      }),
+    ),
+  )
   .post(
     '/payout-accounts/:id/agreement',
     route(
@@ -137,6 +161,10 @@ export const vendorOnboarding = new Hono()
     route({ auth: 'user' }, async ({ user, params, now }) => ({
       outlet: await submitOutlet(user!.id, params.id!, now),
     })),
+  )
+  .post(
+    '/outlets/:id/withdraw',
+    route({ auth: 'user' }, async ({ user, params }) => ({ outlet: await withdrawOutlet(user!.id, params.id!) })),
   )
   .get(
     '/outlets/:id/status',

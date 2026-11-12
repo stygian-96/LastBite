@@ -7,7 +7,7 @@ export type OutletCategory = "bakery" | "cafe" | "restaurant" | "sweets" | "kitc
 export type Diet = "veg" | "egg" | "nonveg" | "mixed";
 export type ListingType = "surprise_bag" | "fixed_box";
 export type OrderStatus = "held" | "expired" | "paid" | "collected" | "no_show" | "cancelled";
-export type OutletStatus = "draft" | "in_review" | "changes_needed" | "live" | "suspended" | "closed";
+export type OutletStatus = "draft" | "in_review" | "changes_needed" | "live" | "suspended" | "closed" | "rejected";
 
 export type Area = { id: string; name: string };
 export type City = { slug: string; name: string; areas: Area[] };
@@ -205,10 +205,19 @@ export type OutletPatch = Partial<
 
 export type Fix = { code: string; message: string };
 
+export type SectionKey = "details" | "licence" | "pan" | "bank" | "listing" | "agreement";
+/** approved and waiting are about a file an admin reviews; done and missing are for the rest. */
+export type SectionState = "approved" | "waiting" | "needs_fix" | "missing" | "done";
+
 export type OutletStatusView = {
   status: OutletStatus;
   steps: { key: "details" | "licence" | "payout" | "agreement" | "listing"; done: boolean }[];
+  sections: { key: SectionKey; state: SectionState; reason?: string }[];
   fixes: Fix[];
+  /** What the admin asked for, while changes are needed. */
+  changesReason: string | null;
+  /** Why the application was turned down, once rejected. */
+  rejectionReason: string | null;
 };
 
 export type DocumentKind = "fssai" | "gst" | "pan" | "bank_proof";
@@ -333,14 +342,15 @@ export type ReviewedDocument = {
 };
 
 export type Application = {
-  outlet: VendorOutlet & { submittedAt: string | null; createdAt: string };
+  outlet: VendorOutlet & { submittedAt: string | null; createdAt: string; changesReason?: string | null; rejectionReason?: string | null };
   brand: { id: string; name: string };
   payoutAccount: Omit<PayoutAccount, "brandId"> | null;
   documents: ReviewedDocument[];
   warnings: { code: string; message: string; outletIds: string[] }[];
 };
 
-export type OutletDecision = "approve" | "request_changes" | "suspend" | "reinstate" | "close";
+export type OutletDecision = "approve" | "request_changes" | "reject" | "suspend" | "reinstate" | "close";
+export type ApplicationTab = "review" | "sent_back" | "drafts" | "rejected";
 
 export type AdminVendor = {
   outlet: {

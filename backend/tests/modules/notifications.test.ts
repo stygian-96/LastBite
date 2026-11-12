@@ -140,6 +140,12 @@ describe('templates', () => {
       reason: 'The FSSAI photo is blurred.',
       link: 'https://www.example.in/p',
     },
+    application_rejected: {
+      owner: 'Ananya',
+      business: 'Butterfold Bakehouse Indiranagar',
+      reason: 'We are not taking on outlets in this area yet.',
+      link: 'https://www.example.in/p',
+    },
     daily_prompt: {
       owner: 'Ananya',
       listings: 'Bakery Surprise Bag (usual 6)\nFour Croissants Box (usual 5)',

@@ -25,7 +25,9 @@ import type {
   Order,
   OutletCategory,
   OutletPage,
+  OutletStatusView,
   Payout,
+  PayoutAccount,
   Profile,
   ReviewedDocument,
   SignedInUser,
@@ -1299,7 +1301,35 @@ export const mockApi: Api = {
         done: !found.some((f) => f.step === key),
       })),
       fixes: found.map(({ code, message }) => ({ code, message })),
+      sections: mockSections(db, row),
+      changesReason: null,
+      rejectionReason: null,
     };
+  },
+
+  async withdrawOutlet(id) {
+    await wait();
+    const db = load();
+    const row = outletOf(db, id);
+    if (row.status !== "in_review") fail("not_in_review", "Only an application under review can be withdrawn", 409);
+    row.status = "draft";
+    save(db);
+    return publicVendorOutlet(row);
+  },
+
+  async getPayoutAccounts(brandId) {
+    await wait();
+    return load()
+      .accounts.filter((a) => a.brandId === brandId)
+      .map(({ agreed: _a, ...a }) => ({ ...a, status: "pending" as const }));
+  },
+
+  async fixPanDetails(accountId, body) {
+    return fixAccount(accountId, "pan", { legalName: body.legalName, panLast4: body.pan.slice(-4) });
+  },
+
+  async fixBankDetails(accountId, body) {
+    return fixAccount(accountId, "bank_proof", { holderName: body.holderName, accountLast4: body.accountNumber.slice(-4), ifsc: body.ifsc.toUpperCase() });
   },
 
   // ---------- Vendor daily use ----------
@@ -1768,6 +1798,44 @@ export const mockApi: Api = {
     save(db);
   },
 };
+
+/** The mock's version of the section states the backend reports. */
+function mockSections(db: Db, row: OutletRow): OutletStatusView["sections"] {
+  const found = checks(db, row);
+  const docFor = (kind: string) =>
+    db.documents.filter((d) => d.kind === kind && d.status !== "replaced" && (d.outletId === row.id || (!!row.payoutAccountId && d.payoutAccountId === row.payoutAccountId))).at(-1);
+  const file = (kind: string) => {
+    const d = docFor(kind);
+    if (!d) return { state: "missing" as const };
+    if (d.status === "rejected") return { state: "needs_fix" as const, reason: d.rejectionReason ?? undefined };
+    return { state: d.status === "approved" ? ("approved" as const) : ("waiting" as const) };
+  };
+  const plain = (step: string) => (found.some((f) => f.step === step) ? ("missing" as const) : ("done" as const));
+  return [
+    { key: "details", state: plain("details") },
+    { key: "licence", ...file("fssai") },
+    { key: "pan", ...file("pan") },
+    { key: "bank", ...file("bank_proof") },
+    { key: "listing", state: plain("listing") },
+    { key: "agreement", state: plain("agreement") },
+  ];
+}
+
+async function fixAccount(accountId: string, kind: "pan" | "bank_proof", patch: Partial<AccountRow>): Promise<PayoutAccount> {
+  await wait();
+  const db = load();
+  const account = db.accounts.find((a) => a.id === accountId) ?? fail("not_found", "Account not found", 404);
+  Object.assign(account, patch);
+  for (const d of db.documents) {
+    if (d.payoutAccountId === accountId && d.kind === kind && (d.status === "approved" || d.status === "rejected")) {
+      d.status = "pending";
+      d.rejectionReason = null;
+    }
+  }
+  save(db);
+  const { agreed: _a, ...rest } = account;
+  return { ...rest, status: "pending" };
+}
 
 // Payment isn't connected yet: capture stands in for Razorpay and its webhook.
 export const mockControls = { capture };

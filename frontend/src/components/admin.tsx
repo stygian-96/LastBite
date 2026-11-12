@@ -26,6 +26,7 @@ const OUTLET_STATUS: Record<OutletStatus, { label: string; tone: "ok" | "warn" |
   changes_needed: { label: "Changes needed", tone: "wait" },
   draft: { label: "Draft", tone: "info" },
   closed: { label: "Closed", tone: "info" },
+  rejected: { label: "Rejected", tone: "warn" },
 };
 
 const ACTION = "min-h-10 rounded-full border border-[#dddddd] px-3.5 text-[13px] font-medium disabled:text-muted";
