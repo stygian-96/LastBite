@@ -86,7 +86,7 @@ export const adminSupport = new Hono()
   .post(
     '/users/:id/phone',
     route({ auth: 'admin', body: z.object({ phone: z.string().min(1).max(20) }) }, async ({ user, params, body }) => {
-      await changeUserPhone(user!.id, params.id!, body.phone);
+      await changeUserPhone(user!.id, params.id!, body.phone, user!.isSuperAdmin);
       return { ok: true };
     }),
   );

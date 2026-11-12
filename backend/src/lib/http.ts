@@ -30,8 +30,8 @@ export type RouteCtx<B> = {
 };
 
 type RouteOpts<B> = {
-  // 'user' needs a signed-in user, 'admin' needs an admin.
-  auth?: 'none' | 'user' | 'admin';
+  // 'user' needs a signed-in user, 'admin' needs an admin, 'superadmin' an admin who manages admins.
+  auth?: 'none' | 'user' | 'admin' | 'superadmin';
   body?: ZodType<B>;
 };
 
@@ -82,10 +82,11 @@ export function route<B = undefined>(
     }
 
     let user: SessionUser | null = null;
-    if (opts.auth === 'user' || opts.auth === 'admin') {
+    if (opts.auth === 'user' || opts.auth === 'admin' || opts.auth === 'superadmin') {
       user = token ? await getSessionUser(token, now) : null;
       if (!user) throw new ApiError('unauthenticated', 401, 'Sign in to continue');
       if (opts.auth === 'admin' && !user.isAdmin) throw new ApiError('forbidden', 403, 'Not allowed');
+      if (opts.auth === 'superadmin' && !user.isSuperAdmin) throw new ApiError('forbidden', 403, 'Not allowed');
     }
 
     let body = undefined as B;

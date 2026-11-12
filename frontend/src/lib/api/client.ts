@@ -1,6 +1,8 @@
 import { ApiError } from "./errors";
 import type {
   AdminInventory,
+  AdminMe,
+  AdminUser,
   AdminVendor,
   AdminVendorDetail,
   AdminVendorHistory,
@@ -105,6 +107,10 @@ export type Api = {
   reviewDocument(id: string, body: { approve: boolean; reason?: string }): Promise<void>;
   decideOutlet(id: string, body: { decision: OutletDecision; reason?: string }): Promise<void>;
   getVendors(params?: { status?: OutletStatus; q?: string; areaId?: string; offset?: number }): Promise<{ vendors: AdminVendor[]; hasMore: boolean }>;
+  getAdminMe(): Promise<AdminMe>;
+  getAdmins(): Promise<AdminUser[]>;
+  addAdmin(body: { phone: string; name?: string }): Promise<AdminUser>;
+  removeAdmin(id: string): Promise<void>;
   getVendor(id: string): Promise<AdminVendorDetail>;
   getVendorHistory(id: string, days?: 7 | 30 | 90): Promise<AdminVendorHistory>;
   getInventory(params?: { outletId?: string; q?: string; areaId?: string }): Promise<AdminInventory>;
@@ -265,6 +271,12 @@ export const httpApi: Api = {
   },
   getVendors: (params = {}) =>
     request("GET", `/admin/vendors${query({ status: params.status, q: params.q, area_id: params.areaId, offset: params.offset })}`),
+  getAdminMe: async () => (await request<{ me: AdminMe }>("GET", "/admin/me")).me,
+  getAdmins: async () => (await request<{ admins: AdminUser[] }>("GET", "/admin/admins")).admins,
+  addAdmin: async (body) => (await request<{ admin: AdminUser }>("POST", "/admin/admins", body)).admin,
+  removeAdmin: async (id) => {
+    await send("DELETE", `/admin/admins/${id}`);
+  },
   getVendor: async (id) => (await request<{ vendor: AdminVendorDetail }>("GET", `/admin/vendors/${id}`)).vendor,
   getVendorHistory: (id, days) => request("GET", `/admin/vendors/${id}/history${query({ days })}`),
   getInventory: (params = {}) =>

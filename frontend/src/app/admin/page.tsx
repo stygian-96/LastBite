@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { InventoryView, VendorsView } from "@/components/admin";
+import { AdminsView, InventoryView, ProfileCard, VendorsView } from "@/components/admin";
 import { FormError, TextArea } from "@/components/forms";
 import { Button, ErrorState, Logo, PageSkeleton, StatusChip, Tabs } from "@/components/ui";
 import { api, errorDetails, errorMessage, errorStatus, type Application, type ReviewedDocument } from "@/lib/api";
@@ -169,17 +169,21 @@ function Detail({ app, onChanged }: { app: Application; onChanged: () => void })
   );
 }
 
-type Section = "applications" | "vendors" | "inventory";
-const SECTIONS: { id: Section; label: string }[] = [
-  { id: "applications", label: "Applications" },
-  { id: "vendors", label: "Vendors" },
-  { id: "inventory", label: "Tonight" },
+type Section = "applications" | "vendors" | "inventory" | "admins";
+// `short` fits four tabs across a phone.
+const SECTIONS: { id: Section; label: string; short: string; superOnly?: true }[] = [
+  { id: "applications", label: "Applications", short: "Review" },
+  { id: "vendors", label: "Vendors", short: "Vendors" },
+  { id: "inventory", label: "Tonight", short: "Tonight" },
+  { id: "admins", label: "Admins", short: "Admins", superOnly: true },
 ];
 
 export default function Admin() {
   const router = useRouter();
-  const { me, loading } = useSession();
+  const { me, loading, signOut } = useSession();
   const applications = useQuery(() => api.getApplications(), [me?.id], { enabled: !!me });
+  const adminMe = useQuery(() => api.getAdminMe(), [me?.id], { enabled: !!me });
+  const [accountOpen, setAccountOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [section, go] = useHashTab(
     SECTIONS.map((s) => s.id),
@@ -190,13 +194,24 @@ export default function Admin() {
     if (!loading && !me) router.replace("/signin?next=/admin");
   }, [loading, me, router]);
 
-  if (loading || !me || applications.loading) return <PageSkeleton />;
+  if (loading || !me || applications.loading || adminMe.loading) return <PageSkeleton />;
 
   if (errorStatus(applications.error) === 403) {
     return (
       <div className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-2 p-4">
         <h1 className="text-2xl font-bold">Admins only</h1>
         <p className="text-sm text-muted">This account can’t open the review queue.</p>
+        <Button
+          size="md"
+          variant="quiet"
+          className="mt-2 self-start"
+          onClick={async () => {
+            await signOut();
+            router.replace("/signin?next=/admin");
+          }}
+        >
+          Log out and switch account
+        </Button>
       </div>
     );
   }
@@ -204,40 +219,62 @@ export default function Admin() {
 
   const queue = applications.data ?? [];
   const current = queue.find((app) => app.outlet.id === selected) ?? queue[0];
+  const isSuper = !!adminMe.data?.isSuperAdmin;
+  const sections = SECTIONS.filter((s) => !s.superOnly || isSuper);
+  const shown = sections.some((s) => s.id === section) ? section : "applications";
+  const logOut = async () => {
+    await signOut();
+    router.replace("/signin?next=/admin");
+  };
 
   return (
     <div className="flex min-h-dvh flex-col lg:flex-row">
-      <aside className="hidden w-52 flex-none flex-col gap-5 border-r border-[#f0f0f0] p-5 lg:flex">
+      <aside className="sticky top-0 hidden h-dvh w-52 flex-none flex-col gap-5 border-r border-[#f0f0f0] p-5 lg:flex">
         <span className="flex items-center gap-2">
           <Logo size="sm" />
           <span className="text-sm text-muted">admin</span>
         </span>
         <nav aria-label="Admin" className="flex flex-col gap-1">
-          {SECTIONS.map(({ id, label }) => (
+          {sections.map(({ id, label }) => (
             <button
               key={id}
               type="button"
-              aria-current={section === id ? "page" : undefined}
+              aria-current={shown === id ? "page" : undefined}
               onClick={() => go(id)}
-              className={`flex min-h-11 items-center justify-between rounded-xl px-3 text-left text-sm font-medium ${section === id ? "bg-dark text-white" : "text-ink"}`}
+              className={`flex min-h-11 items-center justify-between rounded-xl px-3 text-left text-sm font-medium ${shown === id ? "bg-dark text-white" : "text-ink"}`}
             >
               {label} {id === "applications" && <span>{queue.length}</span>}
             </button>
           ))}
         </nav>
+        {adminMe.data && (
+          <div className="mt-auto">
+            <ProfileCard me={adminMe.data} onSignOut={logOut} />
+          </div>
+        )}
       </aside>
 
       <div className="flex flex-col gap-3 border-b border-[#f0f0f0] p-3 lg:hidden">
         <span className="flex items-center gap-2">
           <Logo size="sm" />
           <span className="text-sm text-muted">admin</span>
+          <button
+            type="button"
+            aria-expanded={accountOpen}
+            onClick={() => setAccountOpen(!accountOpen)}
+            className="ml-auto min-h-10 rounded-full border border-[#dddddd] px-3.5 text-[13px] font-medium"
+          >
+            Account
+          </button>
         </span>
-        <Tabs value={section} onChange={go} options={SECTIONS} />
+        {accountOpen && adminMe.data && <ProfileCard me={adminMe.data} onSignOut={logOut} />}
+        <Tabs value={shown} onChange={go} options={sections.map(({ id, short }) => ({ id, label: short }))} />
       </div>
 
-      {section === "vendors" && <VendorsView />}
-      {section === "inventory" && <InventoryView />}
-      {section === "applications" && (
+      {shown === "vendors" && <VendorsView />}
+      {shown === "inventory" && <InventoryView />}
+      {shown === "admins" && adminMe.data && <AdminsView me={adminMe.data} />}
+      {shown === "applications" && (
         <>
           <section aria-label="Queue" className="flex flex-none flex-col gap-1 border-b border-[#f0f0f0] p-3 lg:w-80 lg:border-b-0 lg:border-r">
             <div className="flex items-baseline justify-between px-2 py-2">

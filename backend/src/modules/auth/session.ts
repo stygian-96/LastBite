@@ -6,7 +6,7 @@ import { hashToken } from '../../lib/crypto.js';
 
 export const SESSION_MAX_AGE_SECONDS = 30 * 86_400;
 
-export type SessionUser = { id: string; phone: string; name: string | null; isAdmin: boolean };
+export type SessionUser = { id: string; phone: string; name: string | null; isAdmin: boolean; isSuperAdmin: boolean };
 
 /** Creates a session and returns the raw token. Only its hash is stored. */
 export async function createSession(userId: string, now: Date): Promise<string> {
@@ -22,7 +22,7 @@ export async function createSession(userId: string, now: Date): Promise<string> 
 /** The signed-in user for a session token, or null when it is unknown, expired or the user was deleted. */
 export async function getSessionUser(token: string, now: Date): Promise<SessionUser | null> {
   const [row] = await db
-    .select({ id: users.id, phone: users.phone, name: users.name, isAdmin: users.isAdmin })
+    .select({ id: users.id, phone: users.phone, name: users.name, isAdmin: users.isAdmin, isSuperAdmin: users.isSuperAdmin })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
     .where(

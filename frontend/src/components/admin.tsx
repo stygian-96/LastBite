@@ -8,7 +8,9 @@ import {
   api,
   errorMessage,
   type AdminInventoryRow,
+  type AdminMe,
   type AdminOrderCounts,
+  type AdminUser,
   type AdminVendor,
   type AdminVendorDetail,
   type Listing,
@@ -149,7 +151,7 @@ function SearchBox({ label, value, onChange }: { label: string; value: string; o
       placeholder={label}
       value={value}
       onChange={(event) => onChange(event.target.value)}
-      className={`${INPUT} min-w-0 flex-1`}
+      className={`${INPUT} min-w-0 sm:flex-1`}
     />
   );
 }
@@ -809,5 +811,176 @@ export function VendorDetailView({ vendor, onChanged }: { vendor: AdminVendorDet
         {tab === "history" && <HistoryTab outletId={outlet.id} />}
       </div>
     </div>
+  );
+}
+
+// ---------- Profile and admins ----------
+
+/** Who is signed in, and Log out. Shown at the foot of the sidebar, and behind Account on a phone. */
+export function ProfileCard({ me, onSignOut }: { me: AdminMe; onSignOut: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="flex flex-col gap-2.5 rounded-2xl bg-fill p-3">
+      <span className="flex flex-col gap-0.5">
+        <strong className="text-sm font-medium">{me.name || "Admin"}</strong>
+        <span className="text-xs text-muted">{phoneDisplay(me.phone)}</span>
+        <span className="text-xs text-muted">{me.isSuperAdmin ? "Super admin" : "Admin"}</span>
+      </span>
+      <button
+        type="button"
+        className={ACTION}
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await onSignOut();
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "Logging out…" : "Log out"}
+      </button>
+    </div>
+  );
+}
+
+function AdminRow({ admin, me, onChanged }: { admin: AdminUser; me: AdminMe; onChanged: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.removeAdmin(admin.id);
+      onChanged();
+    } catch (err) {
+      setError(errorMessage(err));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li className={`flex flex-col gap-2.5 rounded-2xl border-[1.5px] p-3.5 ${confirming ? "border-coral" : "border-line"}`}>
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <strong className="text-[15px] font-medium">
+            {admin.name || "No name yet"}
+            {admin.id === me.id && <span className="font-normal text-muted"> · you</span>}
+          </strong>
+          <span className="text-xs text-muted">
+            {phoneDisplay(admin.phone)} · added {shortDate(admin.createdAt)}
+          </span>
+        </span>
+        {admin.isSuperAdmin ? (
+          <StatusChip tone="info">Super admin</StatusChip>
+        ) : (
+          !confirming && (
+            <button type="button" className={ACTION} onClick={() => setConfirming(true)}>
+              Remove
+            </button>
+          )
+        )}
+      </div>
+      {confirming && (
+        <div className="flex flex-col gap-2.5">
+          <p className="text-[13px] leading-normal text-muted">
+            They lose admin access straight away. Their account stays, so they can still order as a customer.
+          </p>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button size="md" variant="quiet" disabled={busy} onClick={() => setConfirming(false)}>
+              Keep admin
+            </Button>
+            <Button size="md" variant="dark" disabled={busy} onClick={remove}>
+              {busy ? "Removing…" : "Remove admin"}
+            </Button>
+          </div>
+        </div>
+      )}
+      <FormError message={error} />
+    </li>
+  );
+}
+
+/** Super admins only: who can open /admin, and adding or removing them. */
+export function AdminsView({ me }: { me: AdminMe }) {
+  const admins = useQuery(() => api.getAdmins(), []);
+  const [phone, setPhone] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [added, setAdded] = useState<string | null>(null);
+
+  async function add() {
+    setBusy(true);
+    setError(null);
+    setAdded(null);
+    try {
+      const admin = await api.addAdmin({ phone, ...(name.trim() ? { name: name.trim() } : {}) });
+      setAdded(`${admin.name || phoneDisplay(admin.phone)} is now an admin. They sign in at /admin with their phone number.`);
+      setPhone("");
+      setName("");
+      admins.reload();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section aria-label="Admins" className="flex min-w-0 flex-1 flex-col gap-3.5 p-4 lg:p-6">
+      <div className="flex flex-col gap-1">
+        <h1 className="text-2xl font-bold">Admins</h1>
+        <p className="text-[13px] text-muted">People who can open this admin space. Only super admins see this page.</p>
+      </div>
+
+      <form
+        className="flex flex-col gap-2.5 rounded-2xl bg-fill p-3.5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void add();
+        }}
+      >
+        <strong className="text-sm font-medium">Add an admin</strong>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <input
+            type="tel"
+            inputMode="tel"
+            aria-label="Mobile number"
+            placeholder="Mobile number"
+            value={phone}
+            onChange={(event) => setPhone(event.target.value)}
+            className={`${INPUT} min-w-0 bg-white sm:flex-1`}
+          />
+          <input
+            aria-label="Name (optional)"
+            placeholder="Name (optional)"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className={`${INPUT} min-w-0 bg-white sm:flex-1`}
+          />
+          <Button size="md" variant="dark" type="submit" disabled={busy || !phone.trim()}>
+            {busy ? "Adding…" : "Add admin"}
+          </Button>
+        </div>
+        <FormError message={error} />
+        {added && <p className="text-[13px] text-ok-fg">{added}</p>}
+      </form>
+
+      {admins.error ? (
+        <ErrorState message={errorMessage(admins.error)} onRetry={admins.reload} />
+      ) : !admins.data ? (
+        <ListSkeleton />
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {admins.data.map((admin) => (
+            <AdminRow key={admin.id} admin={admin} me={me} onChanged={admins.reload} />
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

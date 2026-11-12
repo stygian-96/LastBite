@@ -34,12 +34,14 @@ export const users = pgTable("users", {
 	name: text(),
 	email: text(),
 	isAdmin: boolean("is_admin").default(false).notNull(),
+	isSuperAdmin: boolean("is_super_admin").default(false).notNull(),
 	whatsappOptIn: boolean("whatsapp_opt_in").default(true).notNull(),
 	marketingOptIn: boolean("marketing_opt_in").default(false).notNull(),
 	deletedAt: timestamp("deleted_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	unique("users_phone_key").on(table.phone),
+	check("users_super_admin_check", sql`(NOT is_super_admin) OR is_admin`),
 ]);
 
 export const sessions = pgTable("sessions", {

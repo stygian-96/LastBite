@@ -14,6 +14,7 @@ import type { Api } from "./client";
 import { ApiError, type ErrorDetails } from "./errors";
 import type {
   AdminInventoryRow,
+  AdminUser,
   AdminVendor,
   Application,
   Drop,
@@ -79,6 +80,8 @@ type Db = {
   documents: DocRow[];
   payouts: Payout[];
   user: SignedInUser | null;
+  /** Admins the mock super admin added. The signed-in admin is the super admin. */
+  admins?: AdminUser[];
   profile: Profile | null;
   following: string[];
   nextNumber: number;
@@ -1625,6 +1628,45 @@ export const mockApi: Api = {
           };
         }),
     };
+  },
+
+  async getAdminMe() {
+    await wait();
+    const db = load();
+    requireAdmin(db);
+    const { id, phone, name } = db.user!;
+    return { id, phone, name, isSuperAdmin: true };
+  },
+
+  async getAdmins() {
+    await wait();
+    const db = load();
+    requireAdmin(db);
+    const { id, phone, name } = db.user!;
+    return [{ id, phone, name, isSuperAdmin: true, createdAt: new Date().toISOString() }, ...(db.admins ?? [])];
+  },
+
+  async addAdmin(body) {
+    await wait();
+    const db = load();
+    requireAdmin(db);
+    const digits = body.phone.replace(/\D/g, "").slice(-10);
+    if (!/^[6-9]\d{9}$/.test(digits)) fail("invalid_phone", "Enter a valid mobile number", 400);
+    const phone = `+91${digits}`;
+    if (phone === db.user!.phone || db.admins?.some((a) => a.phone === phone)) fail("already_admin", "That number is already an admin", 409);
+    const admin: AdminUser = { id: `admin-${digits}`, phone, name: body.name?.trim() || null, isSuperAdmin: false, createdAt: new Date().toISOString() };
+    db.admins = [...(db.admins ?? []), admin];
+    save(db);
+    return admin;
+  },
+
+  async removeAdmin(id) {
+    await wait();
+    const db = load();
+    requireAdmin(db);
+    if (!db.admins?.some((a) => a.id === id)) fail("not_found", "Admin not found", 404);
+    db.admins = db.admins!.filter((a) => a.id !== id);
+    save(db);
   },
 
   async getVendor(id) {

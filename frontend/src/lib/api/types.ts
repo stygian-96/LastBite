@@ -389,6 +389,9 @@ export type AdminVendorDetail = AdminVendor & {
   tonightDrops: AdminInventoryRow[];
 };
 
+export type AdminMe = { id: string; phone: string; name: string | null; isSuperAdmin: boolean };
+export type AdminUser = { id: string; phone: string; name: string | null; isSuperAdmin: boolean; createdAt: string };
+
 export type AdminVendorHistory = {
   from: string;
   to: string;

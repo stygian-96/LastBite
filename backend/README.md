@@ -127,6 +127,16 @@ curl -X POST https://api.example.com/api/v1/internal/jobs/tick \
 
 Making a linked account is several calls, and each finished step is saved, so a retry carries on from there on the same Razorpay account. After 5 failed tries the job stops and writes `linked_account.stuck` to the audit log. Fix the cause, then call `POST /api/v1/admin/payout-accounts/:id/verify`, which clears the count and sets it going again. A bank change that is re-verified starts a new linked account, on a new email.
 
+## Admins
+
+The first super admin is made from the command line, in any environment. No route can make one:
+
+```bash
+npm run admin:super -- 98765 43210
+```
+
+That number then signs in at `/admin` as usual. A super admin adds and removes other admins under Admins there. A super admin can't be removed from the app, and only a super admin can change an admin's phone number, so one admin can't take over another's account.
+
 ## Webhooks
 
 Point these at the API:

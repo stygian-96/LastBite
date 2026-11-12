@@ -335,7 +335,7 @@ export async function findUsers(rawPhone: string | undefined) {
  * Moves a user and their queued messages to a new number, and ends their sessions, so the old phone
  * is signed out. The audit row keeps only the last 4 digits, as it outlives an account deletion.
  */
-export async function changeUserPhone(adminId: string, userId: string, phone: string): Promise<void> {
+export async function changeUserPhone(adminId: string, userId: string, phone: string, bySuperAdmin = false): Promise<void> {
   const e164 = normalizePhone(phone);
   if (!e164) throw new ApiError('invalid_phone', 400, 'Enter a valid mobile number');
   if (!isId(userId)) throw notFound('User');
@@ -344,6 +344,8 @@ export async function changeUserPhone(adminId: string, userId: string, phone: st
     await withTx(async (tx) => {
       const [user] = await tx.select().from(users).where(eq(users.id, userId)).for('update');
       if (!user || user.deletedAt) throw notFound('User');
+      // Moving an admin's number to a phone you hold would let you sign in as them.
+      if (user.isAdmin && !bySuperAdmin) throw new ApiError('forbidden', 403, "Only a super admin can change an admin's number");
       await tx.update(users).set({ phone: e164 }).where(eq(users.id, userId));
       await tx.delete(sessions).where(eq(sessions.userId, userId));
       await movePendingTo(tx, user.phone, e164);

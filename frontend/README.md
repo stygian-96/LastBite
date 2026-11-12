@@ -36,7 +36,7 @@ DEV_CAPTURE_SECRET=the backend's CRON_SECRET
 
 - **Sign in:** the code is printed in the backend's console.
 - **Pay:** with `NEXT_PUBLIC_DEV_CAPTURE=1`, Pay finishes through the backend's fake gateway, via `src/app/dev/capture/[id]/route.ts`. That route keeps the secret on the server and answers 404 in production. Razorpay Checkout goes in `src/lib/payment.ts`.
-- **Admin:** no route makes an admin, so set `is_admin` on your user in the dev database.
+- **Admin:** run `npm run admin:super -- <your number>` in `backend/` to make yourself a super admin, then add other admins under Admins in `/admin`.
 - **An empty database:** apply as a vendor at `/partner`, approve it at `/admin`, then publish tonight's quantity at `/vendor`.
 
 [API-GAPS.md](API-GAPS.md) lists what the backend doesn't give yet.
