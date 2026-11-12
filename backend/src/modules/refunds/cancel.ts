@@ -172,9 +172,26 @@ export async function cancelDrop(actorId: string, dropId: string, rawReason: unk
   const [found] = await db.select({ outletId: drops.outletId }).from(drops).where(eq(drops.id, dropId));
   if (!found) throw dropNotFound();
   await requireOutlet(actorId, found.outletId, CANCEL_ROLES);
+  await cancelDropWithRetries(dropId, { actorId, reason, now });
+}
 
+/** An admin's drop cancel: a reason of their own, and they say who pays for the refunds. */
+export async function adminCancelDrop(
+  adminId: string,
+  dropId: string,
+  raw: { reason: string; chargedTo: string },
+  now: Date,
+): Promise<void> {
+  const { reason, chargedTo } = parseInput(adminCancelInput, raw);
+  if (!isId(dropId)) throw dropNotFound();
+  const [found] = await db.select({ id: drops.id }).from(drops).where(eq(drops.id, dropId));
+  if (!found) throw dropNotFound();
+  await cancelDropWithRetries(dropId, { actorId: adminId, reason, now, chargedTo });
+}
+
+async function cancelDropWithRetries(dropId: string, cancel: Cancel): Promise<void> {
   for (let i = 0; i < DROP_CANCEL_TRIES; i++) {
-    if (await tryCancelDrop(dropId, { actorId, reason, now })) return;
+    if (await tryCancelDrop(dropId, cancel)) return;
   }
   throw new ApiError('drop_busy', 409, 'This drop is busy. Try again');
 }

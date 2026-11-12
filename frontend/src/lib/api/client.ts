@@ -1,5 +1,9 @@
 import { ApiError } from "./errors";
 import type {
+  AdminInventory,
+  AdminVendor,
+  AdminVendorDetail,
+  AdminVendorHistory,
   Application,
   CancelReason,
   City,
@@ -16,6 +20,7 @@ import type {
   OutletDecision,
   OutletPage,
   OutletPatch,
+  OutletStatus,
   OutletStatusView,
   PayInfo,
   PayoutAccount,
@@ -99,6 +104,12 @@ export type Api = {
   getApplications(): Promise<Application[]>;
   reviewDocument(id: string, body: { approve: boolean; reason?: string }): Promise<void>;
   decideOutlet(id: string, body: { decision: OutletDecision; reason?: string }): Promise<void>;
+  getVendors(params?: { status?: OutletStatus; q?: string; areaId?: string; offset?: number }): Promise<{ vendors: AdminVendor[]; hasMore: boolean }>;
+  getVendor(id: string): Promise<AdminVendorDetail>;
+  getVendorHistory(id: string, days?: 7 | 30 | 90): Promise<AdminVendorHistory>;
+  getInventory(params?: { outletId?: string; q?: string; areaId?: string }): Promise<AdminInventory>;
+  adminSetDropStatus(id: string, status: "live" | "paused"): Promise<void>;
+  adminCancelDrop(id: string, body: { reason: string; chargedTo: "vendor" | "platform" }): Promise<void>;
 };
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
@@ -251,5 +262,17 @@ export const httpApi: Api = {
   },
   decideOutlet: async (id, body) => {
     await send("POST", `/admin/outlets/${id}/decision`, body);
+  },
+  getVendors: (params = {}) =>
+    request("GET", `/admin/vendors${query({ status: params.status, q: params.q, area_id: params.areaId, offset: params.offset })}`),
+  getVendor: async (id) => (await request<{ vendor: AdminVendorDetail }>("GET", `/admin/vendors/${id}`)).vendor,
+  getVendorHistory: (id, days) => request("GET", `/admin/vendors/${id}/history${query({ days })}`),
+  getInventory: (params = {}) =>
+    request("GET", `/admin/inventory${query({ outlet_id: params.outletId, q: params.q, area_id: params.areaId })}`),
+  adminSetDropStatus: async (id, status) => {
+    await send("PATCH", `/admin/drops/${id}`, { status });
+  },
+  adminCancelDrop: async (id, body) => {
+    await send("POST", `/admin/drops/${id}/cancel`, body);
   },
 };

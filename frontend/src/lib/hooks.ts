@@ -89,3 +89,29 @@ export function useDebounced<T>(value: T, ms = 250): T {
   }, [value, ms]);
   return debounced;
 }
+
+/**
+ * A tab kept in the URL hash, so a link or Back lands on the same tab. Read after mount: on a
+ * client-side navigation the URL changes after the first render. replaceState, as Next's router owns
+ * the history entries.
+ */
+export function useHashTab<T extends string>(tabs: readonly T[], fallback: T): [T, (tab: T) => void] {
+  const [tab, setTab] = useState<T>(fallback);
+  const tabsKey = tabs.join();
+  useEffect(() => {
+    const read = () => setTab(tabs.find((t) => `#${t}` === window.location.hash) ?? fallback);
+    const first = setTimeout(read, 0);
+    window.addEventListener("hashchange", read);
+    return () => {
+      clearTimeout(first);
+      window.removeEventListener("hashchange", read);
+    };
+    // tabsKey stands in for tabs, which callers pass as a fresh array.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabsKey, fallback]);
+  const go = useCallback((next: T) => {
+    history.replaceState(history.state, "", `#${next}`);
+    setTab(next);
+  }, []);
+  return [tab, go];
+}

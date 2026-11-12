@@ -13,6 +13,8 @@ import { readJson, writeJson } from "@/lib/storage";
 import type { Api } from "./client";
 import { ApiError, type ErrorDetails } from "./errors";
 import type {
+  AdminInventoryRow,
+  AdminVendor,
   Application,
   Drop,
   DropDetail,
@@ -1515,6 +1517,14 @@ export const mockApi: Api = {
     const db = load();
     requireAdmin(db);
     const row = outletOf(db, id);
+    if (body.decision === "suspend" || body.decision === "reinstate") {
+      if (row.status !== (body.decision === "suspend" ? "live" : "suspended")) {
+        fail("invalid_state", "That change is not allowed from the current status", 409);
+      }
+      row.status = body.decision === "suspend" ? "suspended" : "live";
+      save(db);
+      return;
+    }
     if (row.status !== "in_review") fail("invalid_state", "That change is not allowed from the current status", 409);
     if (body.decision === "approve") {
       const pending = db.documents.filter(
@@ -1529,6 +1539,145 @@ export const mockApi: Api = {
     } else {
       row.status = "changes_needed";
     }
+    save(db);
+  },
+
+  async getVendors(params = {}) {
+    await wait();
+    const db = load();
+    requireAdmin(db);
+    const q = params.q?.trim().toLowerCase();
+    const offset = params.offset ?? 0;
+    const area = params.areaId && CITIES.flatMap((c) => c.areas).find((a) => slug(a) === params.areaId);
+    const all = db.outlets
+      .filter((o) => o.status !== "draft" && (!params.status || o.status === params.status) && (!params.areaId || o.area === area))
+      .filter((o) => !q || [o.brandName, o.branchName, o.contactPhone ?? ""].some((t) => t.toLowerCase().includes(q)))
+      .map((o): AdminVendor => {
+        const tonight = db.drops.filter((d) => d.outletId === o.id && d.status !== "cancelled");
+        return {
+          outlet: {
+            id: o.id,
+            branchName: o.branchName,
+            slug: o.slug,
+            category: o.category,
+            status: o.status,
+            contactPhone: o.contactPhone,
+            pausedUntil: o.pausedUntil,
+            submittedAt: o.submittedAt,
+            createdAt: o.createdAt,
+          },
+          brand: { id: o.brandId, name: o.brandName, slug: o.brandSlug },
+          area: { city: o.city, name: o.area },
+          ownerPhone: o.ownerPhone,
+          tonight: {
+            drops: tonight.length,
+            quantity: tonight.reduce((n, d) => n + d.quantity, 0),
+            reserved: tonight.reduce((n, d) => n + d.quantity - d.remaining, 0),
+          },
+        };
+      });
+    return { vendors: all.slice(offset, offset + 50), hasMore: all.length > offset + 50 };
+  },
+
+  async getInventory(params = {}) {
+    await wait();
+    const db = load();
+    requireAdmin(db);
+    const count = (dropId: string, status: string) => db.orders.filter((o) => o.dropId === dropId && o.status === status).length;
+    return {
+      serviceDate: db.day,
+      drops: db.drops
+        .filter((d) => !params.outletId || d.outletId === params.outletId)
+        .filter((d) => {
+          const o = outletOf(db, d.outletId);
+          const q = params.q?.trim().toLowerCase();
+          const area = params.areaId && CITIES.flatMap((c) => c.areas).find((a) => slug(a) === params.areaId);
+          return (!q || [o.brandName, o.branchName, d.name].some((t) => t.toLowerCase().includes(q))) && (!params.areaId || o.area === area);
+        })
+        .sort((a, b) => a.pickupStartAt.localeCompare(b.pickupStartAt))
+        .map((d): AdminInventoryRow => {
+          const o = outletOf(db, d.outletId);
+          return {
+            drop: {
+              id: d.id,
+              name: d.name,
+              status: d.status,
+              serviceDate: istDay(d.pickupStartAt),
+              quantity: d.quantity,
+              reservedCount: d.quantity - d.remaining,
+              pricePaise: d.pricePaise,
+              pickupStartAt: d.pickupStartAt,
+              pickupEndAt: d.pickupEndAt,
+              salesEndAt: d.salesEndAt,
+            },
+            outlet: { id: o.id, branchName: o.branchName, status: o.status },
+            brand: { id: o.brandId, name: o.brandName },
+            area: { city: o.city, name: o.area },
+            orders: {
+              paid: count(d.id, "paid"),
+              collected: count(d.id, "collected"),
+              noShow: count(d.id, "no_show"),
+              cancelled: count(d.id, "cancelled"),
+              soldPaise: db.orders
+                .filter((o) => o.dropId === d.id && ["paid", "collected", "no_show"].includes(o.status))
+                .reduce((n, o) => n + o.pricePaise, 0),
+            },
+          };
+        }),
+    };
+  },
+
+  async getVendor(id) {
+    const [vendor] = (await mockApi.getVendors()).vendors.filter((v) => v.outlet.id === id);
+    if (!vendor) fail("not_found", "Outlet not found", 404);
+    const db = load();
+    const o = outletOf(db, id);
+    const orders = db.orders.filter((order) => order.outletId === id);
+    const cancelled = orders.filter((order) => order.status === "cancelled").length;
+    return {
+      ...vendor!,
+      details: {
+        address: o.address,
+        pincode: o.pincode,
+        mapsUrl: o.mapsUrl,
+        pickupInstructions: o.pickupInstructions,
+        fssaiNumber: o.fssaiNumber,
+        fssaiExpiresOn: o.fssaiExpiresOn,
+        gstin: o.gstin,
+        commissionBps: 2000,
+        pauseReason: null,
+      },
+      stats: { orders30d: orders.length, cancelled30d: cancelled, cancellationRate: orders.length ? cancelled / orders.length : 0 },
+      listings: db.listings.filter((l) => l.outletId === id),
+      tonightDrops: (await mockApi.getInventory({ outletId: id })).drops,
+    };
+  },
+
+  // shortcut: the mock keeps only tonight's drops, so there is no history to show.
+  async getVendorHistory(_id, days = 30) {
+    await wait();
+    requireAdmin(load());
+    return { from: "", to: "", days, drops: [] };
+  },
+
+  async adminSetDropStatus(id, status) {
+    await wait();
+    const db = load();
+    requireAdmin(db);
+    const drop = dropRow(db, id);
+    if (drop.status === "cancelled") fail("drop_cancelled", "This drop was cancelled", 409);
+    drop.status = status;
+    save(db);
+  },
+
+  async adminCancelDrop(id) {
+    await wait();
+    const db = load();
+    requireAdmin(db);
+    const drop = dropRow(db, id);
+    if (drop.status === "cancelled") fail("drop_cancelled", "This drop was cancelled", 409);
+    drop.status = "cancelled";
+    for (const order of db.orders.filter((o) => o.dropId === id && o.status === "paid")) cancelPaid(db, order);
     save(db);
   },
 };

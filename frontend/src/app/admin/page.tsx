@@ -2,11 +2,12 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { InventoryView, VendorsView } from "@/components/admin";
 import { FormError, TextArea } from "@/components/forms";
-import { Button, ErrorState, Logo, PageSkeleton, StatusChip } from "@/components/ui";
+import { Button, ErrorState, Logo, PageSkeleton, StatusChip, Tabs } from "@/components/ui";
 import { api, errorDetails, errorMessage, errorStatus, type Application, type ReviewedDocument } from "@/lib/api";
 import { shortDate } from "@/lib/format";
-import { useQuery } from "@/lib/hooks";
+import { useHashTab, useQuery } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 
 const DOC_LABEL = { fssai: "FSSAI licence", pan: "PAN", gst: "GST", bank_proof: "Bank proof" };
@@ -168,11 +169,22 @@ function Detail({ app, onChanged }: { app: Application; onChanged: () => void })
   );
 }
 
+type Section = "applications" | "vendors" | "inventory";
+const SECTIONS: { id: Section; label: string }[] = [
+  { id: "applications", label: "Applications" },
+  { id: "vendors", label: "Vendors" },
+  { id: "inventory", label: "Tonight" },
+];
+
 export default function Admin() {
   const router = useRouter();
   const { me, loading } = useSession();
   const applications = useQuery(() => api.getApplications(), [me?.id], { enabled: !!me });
   const [selected, setSelected] = useState<string | null>(null);
+  const [section, go] = useHashTab(
+    SECTIONS.map((s) => s.id),
+    "applications",
+  );
 
   useEffect(() => {
     if (!loading && !me) router.replace("/signin?next=/admin");
@@ -200,39 +212,61 @@ export default function Admin() {
           <Logo size="sm" />
           <span className="text-sm text-muted">admin</span>
         </span>
-        <nav aria-label="Admin">
-          <span aria-current="page" className="flex min-h-11 items-center justify-between rounded-xl bg-dark px-3 text-sm font-medium text-white">
-            Applications <span>{queue.length}</span>
-          </span>
+        <nav aria-label="Admin" className="flex flex-col gap-1">
+          {SECTIONS.map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              aria-current={section === id ? "page" : undefined}
+              onClick={() => go(id)}
+              className={`flex min-h-11 items-center justify-between rounded-xl px-3 text-left text-sm font-medium ${section === id ? "bg-dark text-white" : "text-ink"}`}
+            >
+              {label} {id === "applications" && <span>{queue.length}</span>}
+            </button>
+          ))}
         </nav>
       </aside>
 
-      <section aria-label="Queue" className="flex flex-none flex-col gap-1 border-b border-[#f0f0f0] p-3 lg:w-80 lg:border-b-0 lg:border-r">
-        <div className="flex items-baseline justify-between px-2 py-2">
-          <strong className="text-[15px] font-medium">Application queue</strong>
-          <span className="text-xs text-muted">oldest first</span>
-        </div>
-        {queue.length === 0 && <p className="px-2 py-4 text-sm text-muted">Nothing waiting for review.</p>}
-        {queue.map((app) => {
-          const on = app === current;
-          return (
-            <button
-              key={app.outlet.id}
-              type="button"
-              aria-pressed={on}
-              onClick={() => setSelected(app.outlet.id)}
-              className={`flex flex-col gap-1 rounded-2xl p-3 text-left ${on ? "bg-tint" : ""}`}
-            >
-              <strong className="text-sm font-medium">{app.brand.name}</strong>
-              <span className="text-xs text-muted">
-                {app.outlet.category} · {app.outlet.branchName}
-              </span>
-            </button>
-          );
-        })}
-      </section>
+      <div className="flex flex-col gap-3 border-b border-[#f0f0f0] p-3 lg:hidden">
+        <span className="flex items-center gap-2">
+          <Logo size="sm" />
+          <span className="text-sm text-muted">admin</span>
+        </span>
+        <Tabs value={section} onChange={go} options={SECTIONS} />
+      </div>
 
-      {current && <Detail key={current.outlet.id} app={current} onChanged={applications.reload} />}
+      {section === "vendors" && <VendorsView />}
+      {section === "inventory" && <InventoryView />}
+      {section === "applications" && (
+        <>
+          <section aria-label="Queue" className="flex flex-none flex-col gap-1 border-b border-[#f0f0f0] p-3 lg:w-80 lg:border-b-0 lg:border-r">
+            <div className="flex items-baseline justify-between px-2 py-2">
+              <strong className="text-[15px] font-medium">Application queue</strong>
+              <span className="text-xs text-muted">oldest first</span>
+            </div>
+            {queue.length === 0 && <p className="px-2 py-4 text-sm text-muted">Nothing waiting for review.</p>}
+            {queue.map((app) => {
+              const on = app === current;
+              return (
+                <button
+                  key={app.outlet.id}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => setSelected(app.outlet.id)}
+                  className={`flex flex-col gap-1 rounded-2xl p-3 text-left ${on ? "bg-tint" : ""}`}
+                >
+                  <strong className="text-sm font-medium">{app.brand.name}</strong>
+                  <span className="text-xs text-muted">
+                    {app.outlet.category} · {app.outlet.branchName}
+                  </span>
+                </button>
+              );
+            })}
+          </section>
+
+          {current && <Detail key={current.outlet.id} app={current} onChanged={applications.reload} />}
+        </>
+      )}
     </div>
   );
 }

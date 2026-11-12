@@ -135,14 +135,15 @@ export type DropPatch = Record<string, unknown>;
 
 /**
  * Pause, resume, change quantity, or (before the first reservation) price and pickup times.
- * Cancelling a drop is a separate flow because it refunds customers.
+ * Cancelling a drop is a separate flow because it refunds customers. `asAdmin` skips the membership
+ * check: the admin route has already checked the caller is an admin.
  */
-export async function updateDrop(userId: string, dropId: string, raw: DropPatch, now: Date): Promise<Drop> {
+export async function updateDrop(userId: string, dropId: string, raw: DropPatch, now: Date, asAdmin = false): Promise<Drop> {
   const patch = parseInput(patchSchema, raw);
   if (!isId(dropId)) throw new ApiError('not_found', 404, 'Drop not found');
   const [found] = await db.select({ outletId: drops.outletId }).from(drops).where(eq(drops.id, dropId));
   if (!found) throw new ApiError('not_found', 404, 'Drop not found');
-  await requireOutlet(userId, found.outletId, [...MANAGERS]);
+  if (!asAdmin) await requireOutlet(userId, found.outletId, [...MANAGERS]);
 
   return withTx(async (tx) => {
     // The row lock keeps a concurrent reservation from slipping between the checks and the write.

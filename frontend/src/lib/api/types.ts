@@ -329,3 +329,69 @@ export type Application = {
 };
 
 export type OutletDecision = "approve" | "request_changes" | "suspend" | "reinstate" | "close";
+
+export type AdminVendor = {
+  outlet: {
+    id: string;
+    branchName: string;
+    slug: string;
+    category: string;
+    status: OutletStatus;
+    contactPhone: string | null;
+    pausedUntil: string | null;
+    submittedAt: string | null;
+    createdAt: string;
+  };
+  brand: { id: string; name: string; slug: string };
+  area: { city: string; name: string } | null;
+  ownerPhone: string | null;
+  tonight: { drops: number; quantity: number; reserved: number };
+};
+
+export type AdminInventoryRow = {
+  drop: {
+    id: string;
+    name: string;
+    status: "live" | "paused" | "cancelled";
+    serviceDate: string;
+    quantity: number;
+    reservedCount: number;
+    pricePaise: number;
+    pickupStartAt: string;
+    pickupEndAt: string;
+    salesEndAt: string;
+  };
+  outlet: { id: string; branchName: string; status: OutletStatus };
+  brand: { id: string; name: string };
+  area: { city: string; name: string } | null;
+  orders: AdminOrderCounts;
+};
+
+/** Sold is every bag paid for and not cancelled: waiting, collected and no-show. */
+export type AdminOrderCounts = { paid: number; collected: number; noShow: number; cancelled: number; soldPaise: number };
+
+export type AdminInventory = { serviceDate: string; drops: AdminInventoryRow[] };
+
+export type AdminVendorDetail = AdminVendor & {
+  details: {
+    address: string | null;
+    pincode: string | null;
+    mapsUrl: string | null;
+    pickupInstructions: string | null;
+    fssaiNumber: string | null;
+    fssaiExpiresOn: string | null;
+    gstin: string | null;
+    commissionBps: number;
+    pauseReason: string | null;
+  };
+  stats: { orders30d: number; cancelled30d: number; cancellationRate: number };
+  listings: Listing[];
+  tonightDrops: AdminInventoryRow[];
+};
+
+export type AdminVendorHistory = {
+  from: string;
+  to: string;
+  days: number;
+  drops: { drop: AdminInventoryRow["drop"]; orders: AdminOrderCounts }[];
+};
