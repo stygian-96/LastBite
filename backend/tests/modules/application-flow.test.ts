@@ -142,6 +142,26 @@ describe('asking to change an approved section', () => {
   });
 });
 
+describe('telling the vendor', () => {
+  const changeNotices = () => db.select().from(notifications).where(eq(notifications.template, 'changes_needed'));
+
+  test('a file flagged after the application was already sent back still messages the vendor', async () => {
+    const { outlet, pa, admin } = await submitted();
+    await decideOutlet(admin.id, outlet.id, { decision: 'request_changes', reason: 'Add a counter photo' }, T0);
+    expect(await changeNotices()).toHaveLength(1);
+    await reviewDocument(admin.id, (await docOf('bank_proof', { payoutAccountId: pa.id })).id, { approve: false, reason: 'Photo is blurred' }, T0);
+    const notices = await changeNotices();
+    expect(notices).toHaveLength(2);
+    expect(notices.map((n) => n.variables)).toContainEqual(expect.objectContaining({ reason: 'Photo is blurred' }));
+  });
+
+  test('one flag on an application in review sends one message, not two', async () => {
+    const { outlet, admin } = await submitted();
+    await reviewDocument(admin.id, (await docOf('fssai', { outletId: outlet.id })).id, { approve: false, reason: 'Expired' }, T0);
+    expect(await changeNotices()).toHaveLength(1);
+  });
+});
+
 describe('the vendor fixing flagged details', () => {
   test('a flagged bank proof can be fixed by correcting the details, without a new photo', async () => {
     const { owner, outlet, pa, admin } = await submitted();

@@ -231,7 +231,10 @@ export async function reviewDocument(adminId: string, docId: string, raw: Review
         .where(and(dependants, eq(outlets.status, 'in_review')))
         .returning({ id: outlets.id });
       sentBack.push(...back.map((b) => b.id));
-      for (const id of sentBack) await queueApplicationNotice(tx, id, 'changes_needed', docId, input.reason);
+      // Tell the vendor about every application this file holds up: the ones just sent back, and any
+      // already waiting on them or not sent yet, which would otherwise learn of a new flag only by looking.
+      const waiting = affected.filter((o) => o.status === 'changes_needed' || o.status === 'draft').map((o) => o.id);
+      for (const id of [...sentBack, ...waiting]) await queueApplicationNotice(tx, id, 'changes_needed', docId, input.reason);
     }
 
     await audit(tx, {
