@@ -92,10 +92,6 @@ export function Stepper({
   );
 }
 
-const TYPES: { id: ListingType; label: string; hint: string }[] = [
-  { id: "surprise_bag", label: "Surprise Bag", hint: "Contents vary. Easiest for mixed leftovers." },
-  { id: "fixed_box", label: "Fixed item / box", hint: "Customers know exactly what they get." },
-];
 const DIETS: { id: Diet; label: string }[] = [
   { id: "veg", label: "Veg" },
   { id: "egg", label: "Contains egg" },
@@ -123,7 +119,8 @@ export function ListingForm({
   submitLabel: string;
   onSaved: (listing: Listing) => void;
 }) {
-  const [type, setType] = useState<ListingType>(listing?.type ?? "surprise_bag");
+  // New listings are surprise bags. An older fixed box keeps its type when edited.
+  const type: ListingType = listing?.type ?? "surprise_bag";
   const [name, setName] = useState(listing?.name ?? "");
   const [description, setDescription] = useState(listing?.description ?? "");
   const [food, setFood] = useState<FoodCategory>(listing?.foodCategory ?? "bakery");
@@ -174,24 +171,20 @@ export function ListingForm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div role="radiogroup" aria-label="Listing type" className="grid grid-cols-2 gap-2">
-        {TYPES.map((option) => (
-          <button
-            key={option.id}
-            type="button"
-            role="radio"
-            aria-checked={type === option.id}
-            onClick={() => setType(option.id)}
-            className={`flex flex-col gap-1 rounded-2xl border-[1.5px] p-3 text-left ${type === option.id ? "border-coral bg-tint" : "border-line"}`}
-          >
-            <strong className="text-sm font-medium">{option.label}</strong>
-            <span className="text-xs leading-snug text-muted">{option.hint}</span>
-          </button>
-        ))}
+      <Field id="listing-name" label="Name" placeholder="Bakery Surprise Bag" value={name} onChange={(event) => setName(event.target.value)} />
+      <div className="flex flex-col gap-1.5">
+        <TextArea
+          id="listing-about"
+          label="What to expect"
+          placeholder="Usually 4–6 of today’s bakes: bread, croissants, a cake slice or cookies."
+          aria-describedby="listing-about-hint"
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+        />
+        <span id="listing-about-hint" className="text-xs leading-snug text-muted">
+          Want customers to know exactly what they’ll get? List the items here, like “2 croissants, 1 sourdough loaf and a brownie”.
+        </span>
       </div>
-
-      <Field id="listing-name" label="Name" placeholder={type === "surprise_bag" ? "Bakery Surprise Bag" : "Four Croissants Box"} value={name} onChange={(event) => setName(event.target.value)} />
-      <TextArea id="listing-about" label={type === "surprise_bag" ? "What to expect" : "What they get"} placeholder="Usually 4–6 of today’s bakes: bread, croissants, a cake slice or cookies." value={description} onChange={(event) => setDescription(event.target.value)} />
 
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-2 text-[13px] font-medium text-muted">Category</legend>
