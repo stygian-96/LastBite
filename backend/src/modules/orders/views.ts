@@ -1,6 +1,6 @@
 import { and, desc, eq, gt, inArray, isNull, not, or, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
-import { brands, drops, orders, outlets, refunds } from '../../db/schema.js';
+import { brands, drops, listings, orders, outlets, refunds } from '../../db/schema.js';
 import { ApiError } from '../../lib/errors.js';
 import { toIso } from '../../lib/time.js';
 
@@ -11,8 +11,15 @@ export type OrderView = {
   id: string;
   number: string;
   status: string;
+  /** Bags in this order. */
+  quantity: number;
+  /** The order total: unitPricePaise × quantity. */
   pricePaise: number;
+  unitPricePaise: number;
+  /** The value of one bag. */
   valuePaise: number;
+  /** While on hold, the most bags this order can be changed to: the listing's limit, or what is left. */
+  maxQuantity: number;
   name: string;
   type: string;
   diet: string;
@@ -39,7 +46,11 @@ const columns = {
   id: orders.id,
   number: orders.number,
   status: orders.status,
+  quantity: orders.quantity,
   pricePaise: orders.pricePaise,
+  dropQuantity: drops.quantity,
+  reservedCount: drops.reservedCount,
+  maxPerOrder: listings.maxPerOrder,
   holdExpiresAt: orders.holdExpiresAt,
   pickupCode: orders.pickupCode,
   valuePaise: drops.valuePaise,
@@ -61,6 +72,7 @@ function selectOrders(where: SQL | undefined) {
     .select(columns)
     .from(orders)
     .innerJoin(drops, eq(drops.id, orders.dropId))
+    .innerJoin(listings, eq(listings.id, drops.listingId))
     .innerJoin(outlets, eq(outlets.id, orders.outletId))
     .innerJoin(brands, eq(brands.id, outlets.brandId))
     .where(where);
@@ -86,8 +98,13 @@ function toView(row: Row, refund: RefundSummary | null): OrderView {
     id: row.id,
     number: `SJ-${row.number.toString()}`,
     status: row.status,
+    quantity: row.quantity,
     pricePaise: row.pricePaise,
+    unitPricePaise: row.pricePaise / row.quantity,
     valuePaise: row.valuePaise,
+    // A held order's own bags count as its to keep.
+    maxQuantity:
+      row.status === 'held' ? Math.min(row.maxPerOrder, row.dropQuantity - row.reservedCount + row.quantity) : row.quantity,
     name: row.name,
     type: row.type,
     diet: row.diet,

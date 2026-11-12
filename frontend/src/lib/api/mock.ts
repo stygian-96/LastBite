@@ -50,7 +50,7 @@ type OutletRow = VendorOutlet & {
   ownerPhone: string | null;
 };
 
-type DropRow = Omit<Drop, "brandName" | "branchName" | "area" | "city" | "brandSlug" | "outletSlug"> & {
+type DropRow = Omit<Drop, "brandName" | "branchName" | "area" | "city" | "brandSlug" | "outletSlug" | "maxQuantity"> & {
   listingId: string;
   quantity: number;
   status: "live" | "paused" | "cancelled";
@@ -59,7 +59,12 @@ type DropRow = Omit<Drop, "brandName" | "branchName" | "area" | "city" | "brandS
   losesRace?: boolean;
 };
 
-type OrderRow = Omit<Order, "brandName" | "branchName" | "address" | "mapsUrl" | "pickupInstructions" | "city" | "brandSlug" | "outletSlug"> & {
+type OrderRow = Omit<
+  Order,
+  "brandName" | "branchName" | "address" | "mapsUrl" | "pickupInstructions" | "city" | "brandSlug" | "outletSlug" | "quantity" | "unitPricePaise" | "maxQuantity"
+> & {
+  /** Seeded rows have none, meaning one bag. */
+  quantity?: number;
   outletId: string;
   dropId: string;
   mine: boolean;
@@ -415,6 +420,7 @@ function seedDrops(now: number): DropRow[] {
 function seedListings(drops: DropRow[]): Listing[] {
   const listings = drops.map(
     (d): Listing => ({
+      maxPerOrder: 3,
       id: d.listingId,
       outletId: d.outletId,
       type: d.type,
@@ -658,14 +664,19 @@ function expireHolds(db: Db, now: number) {
   for (const order of db.orders) {
     if (order.status === "held" && new Date(order.holdExpiresAt).getTime() < now) {
       order.status = "expired";
-      returnStock(db, order.dropId);
+      returnStock(db, order.dropId, order.quantity ?? 1);
     }
   }
 }
 
-function returnStock(db: Db, dropId: string) {
+function returnStock(db: Db, dropId: string, count = 1) {
   const drop = db.drops.find((d) => d.id === dropId);
-  if (drop) drop.remaining = Math.min(drop.quantity, drop.remaining + 1);
+  if (drop) drop.remaining = Math.min(drop.quantity, drop.remaining + count);
+}
+
+/** The vendor's limit on bags per order for this drop's listing. */
+function capOf(db: Db, drop: DropRow): number {
+  return Math.min(db.listings.find((l) => l.id === drop.listingId)?.maxPerOrder ?? 3, 10);
 }
 
 const wait = () => new Promise((resolve) => setTimeout(resolve, LATENCY_MS));
@@ -699,14 +710,28 @@ function publicVendorOutlet(row: OutletRow): VendorOutlet {
 function dropView(db: Db, row: DropRow): Drop {
   const { listingId: _l, quantity: _q, status: _s, description: _d, allergens: _al, losesRace: _r, ...rest } = row;
   const o = outletOf(db, row.outletId);
-  return { ...rest, brandName: o.brandName, branchName: o.branchName, area: o.area, city: o.city, brandSlug: o.brandSlug, outletSlug: o.slug };
+  return {
+    ...rest,
+    maxQuantity: Math.min(capOf(db, row), Math.max(0, row.remaining)),
+    brandName: o.brandName,
+    branchName: o.branchName,
+    area: o.area,
+    city: o.city,
+    brandSlug: o.brandSlug,
+    outletSlug: o.slug,
+  };
 }
 
 function orderView(db: Db, row: OrderRow): Order {
-  const { outletId, dropId: _d, mine: _m, customerLabel: _c, ...rest } = row;
+  const { outletId, dropId, mine: _m, customerLabel: _c, ...rest } = row;
   const o = outletOf(db, outletId);
+  const quantity = row.quantity ?? 1;
+  const drop = db.drops.find((d) => d.id === dropId);
   return {
     ...rest,
+    quantity,
+    unitPricePaise: row.pricePaise / quantity,
+    maxQuantity: row.status === "held" && drop ? Math.min(capOf(db, drop), drop.remaining + quantity) : quantity,
     brandName: o.brandName,
     branchName: o.branchName,
     address: o.address,
@@ -786,7 +811,7 @@ function collect(db: Db, order: OrderRow) {
 function cancelPaid(db: Db, order: OrderRow) {
   order.status = "cancelled";
   order.refund = { amountPaise: order.pricePaise, status: "pending" };
-  returnStock(db, order.dropId);
+  returnStock(db, order.dropId, order.quantity ?? 1);
 }
 
 function checks(db: Db, o: OutletRow) {
@@ -934,7 +959,7 @@ export const mockApi: Api = {
       const clash = taken(hold.outletId);
       if (clash) {
         hold.status = "expired";
-        returnStock(db, hold.dropId);
+        returnStock(db, hold.dropId, hold.quantity ?? 1);
         existingOrderId = clash.id;
       } else {
         hold.mine = true;
@@ -954,7 +979,7 @@ export const mockApi: Api = {
     save(db);
   },
 
-  async reserve(dropId) {
+  async reserve(dropId, quantity = 1) {
     await wait();
     const db = load();
     const now = Date.now();
@@ -975,7 +1000,9 @@ export const mockApi: Api = {
     }
     if (drop.status !== "live" || new Date(drop.salesEndAt).getTime() <= now) fail("not_on_sale", "This bag is not on sale", 409);
     if (drop.remaining <= 0) fail("sold_out", "Sold out for tonight", 409);
-    drop.remaining -= 1;
+    if (quantity > capOf(db, drop)) fail("over_limit", `You can take up to ${capOf(db, drop)} of this bag`, 409, { maxPerOrder: capOf(db, drop) });
+    if (quantity > drop.remaining) fail("not_enough_left", `Only ${drop.remaining} left`, 409, { remaining: drop.remaining });
+    drop.remaining -= quantity;
     const number = db.nextNumber++;
     const row: OrderRow = {
       id: `order-${number}`,
@@ -990,7 +1017,8 @@ export const mockApi: Api = {
       type: drop.type,
       diet: drop.diet,
       allergens: drop.allergens,
-      pricePaise: drop.pricePaise,
+      quantity,
+      pricePaise: drop.pricePaise * quantity,
       valuePaise: drop.valuePaise,
       pickupCode: null,
       pickupStartAt: drop.pickupStartAt,
@@ -1009,6 +1037,22 @@ export const mockApi: Api = {
     await wait();
     const db = load();
     return orderView(db, orderRow(db, id));
+  },
+
+  async changeQuantity(id, quantity) {
+    await wait();
+    const db = load();
+    const order = orderRow(db, id);
+    if (order.status !== "held") fail("hold_not_active", "This order is no longer on hold", 409);
+    const drop = dropRow(db, order.dropId);
+    const had = order.quantity ?? 1;
+    if (quantity > capOf(db, drop)) fail("over_limit", `You can take up to ${capOf(db, drop)} of this bag`, 409);
+    if (quantity - had > drop.remaining) fail("not_enough_left", `Only ${drop.remaining + had} left`, 409);
+    drop.remaining -= quantity - had;
+    order.pricePaise = (order.pricePaise / had) * quantity;
+    order.quantity = quantity;
+    save(db);
+    return orderView(db, order);
   },
 
   async payOrder(id, body) {
@@ -1032,7 +1076,7 @@ export const mockApi: Api = {
     const order = orderRow(db, id);
     if (order.status === "held") {
       order.status = "expired";
-      returnStock(db, order.dropId);
+      returnStock(db, order.dropId, order.quantity ?? 1);
       save(db);
     }
   },
@@ -1396,6 +1440,7 @@ export const mockApi: Api = {
           status: o.status as VendorOrder["status"],
           customerLabel: o.customerLabel || "Customer",
           dropName: o.name,
+          quantity: o.quantity ?? 1,
           pricePaise: o.pricePaise,
           pickupStartAt: o.pickupStartAt,
           pickupEndAt: o.pickupEndAt,

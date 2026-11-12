@@ -1,11 +1,12 @@
 import { and, asc, eq, gt, ilike, isNotNull, isNull, lte, or, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { areas, brands, drops, orders, outlets } from '../../db/schema.js';
+import { areas, brands, drops, listings, orders, outlets } from '../../db/schema.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { getStore } from '../../integrations/storage.js';
 import { INT4_MAX } from '../../lib/money.js';
 import { toIso as iso } from '../../lib/time.js';
+import { MAX_PER_ORDER } from '../orders/reserve.js';
 import { hhmm } from './listings.js';
 
 export type CityView = { slug: string; name: string; areas: { id: string; name: string }[] };
@@ -19,6 +20,8 @@ export type DropCard = {
   pricePaise: number;
   valuePaise: number;
   remaining: number;
+  /** The most bags one order can take now: the vendor's limit, or what is left if that is fewer. */
+  maxQuantity: number;
   pickupStartAt: string;
   pickupEndAt: string;
   salesEndAt: string;
@@ -105,6 +108,7 @@ const cardColumns = {
   valuePaise: drops.valuePaise,
   quantity: drops.quantity,
   reservedCount: drops.reservedCount,
+  maxPerOrder: sql<number>`(SELECT ${listings.maxPerOrder} FROM ${listings} WHERE ${listings.id} = ${drops.listingId})`,
   pickupStartAt: drops.pickupStartAt,
   pickupEndAt: drops.pickupEndAt,
   salesEndAt: drops.salesEndAt,
@@ -128,6 +132,7 @@ type CardRow = {
   valuePaise: number;
   quantity: number;
   reservedCount: number;
+  maxPerOrder: number;
   pickupStartAt: string;
   pickupEndAt: string;
   salesEndAt: string;
@@ -151,6 +156,7 @@ function toCard(r: CardRow): DropCard {
     pricePaise: r.pricePaise,
     valuePaise: r.valuePaise,
     remaining: Math.max(0, r.quantity - r.reservedCount),
+    maxQuantity: Math.min(r.maxPerOrder, MAX_PER_ORDER, Math.max(0, r.quantity - r.reservedCount)),
     pickupStartAt: iso(r.pickupStartAt),
     pickupEndAt: iso(r.pickupEndAt),
     salesEndAt: iso(r.salesEndAt),

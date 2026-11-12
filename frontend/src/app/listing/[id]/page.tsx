@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
-import { CustomerShell, leftText, outletHref } from "@/components/customer";
+import { CustomerShell, leftText, outletHref, QuantityPicker } from "@/components/customer";
 import { Illo, illoFor } from "@/components/Illo";
 import { BackIcon, DietMark, dietLong, ErrorState, ExternalButton, LinkButton, Notice, PageSkeleton, SlowBanner } from "@/components/ui";
 import { api, errorCode, errorDetails, errorMessage, errorStatus, type DropDetail } from "@/lib/api";
@@ -54,12 +54,16 @@ export default function Listing() {
   const drop = useQuery(() => api.getDrop(id), [id]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
+  const [wanted, setWanted] = useState(1);
+  // Never more than can be had now; stock can drop while the page is open.
+  const maxBags = Math.max(1, drop.data?.maxQuantity ?? 1);
+  const bags = Math.min(wanted, maxBags);
 
   async function reserve() {
     setBusy(true);
     setProblem(null);
     try {
-      const order = await api.reserve(id);
+      const order = await api.reserve(id, bags);
       const params = `order=${order.id}&drop=${id}`;
       router.push(me ? `/checkout/${order.id}?drop=${id}` : `/signin?${params}`);
     } catch (err) {
@@ -72,6 +76,10 @@ export default function Listing() {
         setProblem({ kind: "already", orderId });
       } else if (code === "hold_exists") {
         setProblem({ kind: "hold", orderId });
+      } else if (code === "over_limit" || code === "not_enough_left") {
+        // Someone took bags meanwhile, or the vendor lowered the limit: show the new numbers.
+        setProblem({ kind: "other", message: `${errorMessage(err)}. Pick fewer bags and try again.` });
+        drop.reload();
       } else {
         setProblem({ kind: "other", message: errorMessage(err) });
       }
@@ -176,7 +184,7 @@ export default function Listing() {
       {problem?.kind === "already" && (
         <div role="alert" className="flex flex-col gap-2 rounded-2xl bg-wait-bg p-3.5 text-[13px] leading-normal text-wait-fg">
           <strong className="text-sm font-medium">You already have a bag from {item.brandName} tonight</strong>
-          It’s one bag per outlet each night.
+          It’s one order per outlet each night.
           <LinkButton href={problem.orderId ? `/orders/${problem.orderId}` : "/orders"} size="md" variant="dark">
             Show my order
           </LinkButton>
@@ -206,15 +214,20 @@ export default function Listing() {
           </Notice>
         </div>
       ) : (
+        <div className="flex flex-col gap-2">
+        <QuantityPicker value={bags} max={maxBags} onChange={setWanted} disabled={busy} note={left <= maxBags ? `Only ${left} left` : undefined} />
         <button
           type="button"
           disabled={busy}
           onClick={reserve}
           className="flex h-14 w-full flex-col items-center justify-center rounded-full bg-coral leading-tight text-on-coral disabled:opacity-70"
         >
-          <span className="text-base font-medium">{busy ? "Holding your bag…" : `Reserve for ${rupees(item.pricePaise)}`}</span>
-          <span className="text-[11px] opacity-85">we hold it for 5 min from here</span>
+          <span className="text-base font-medium">
+            {busy ? (bags > 1 ? "Holding your bags…" : "Holding your bag…") : bags > 1 ? `Reserve ${bags} for ${rupees(item.pricePaise * bags)}` : `Reserve for ${rupees(item.pricePaise)}`}
+          </span>
+          <span className="text-[11px] opacity-85">we hold {bags > 1 ? "them" : "it"} for 5 min from here</span>
         </button>
+        </div>
       )}
     </div>
   );

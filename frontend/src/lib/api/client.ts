@@ -53,7 +53,9 @@ export type Api = {
   logout(): Promise<void>;
 
   // Customer
-  reserve(dropId: string): Promise<Order>;
+  reserve(dropId: string, quantity?: number): Promise<Order>;
+  /** Changes how many bags a hold is for, until payment starts. */
+  changeQuantity(orderId: string, quantity: number): Promise<Order>;
   getOrder(id: string): Promise<Order>;
   payOrder(id: string, body: { allergenAck: true }): Promise<PayInfo>;
   releaseHold(id: string): Promise<void>;
@@ -182,7 +184,8 @@ export const httpApi: Api = {
     await send("POST", "/auth/logout");
   },
 
-  reserve: async (dropId) => (await request<{ order: Order }>("POST", "/orders", { dropId })).order,
+  reserve: async (dropId, quantity = 1) => (await request<{ order: Order }>("POST", "/orders", { dropId, quantity })).order,
+  changeQuantity: async (orderId, quantity) => (await request<{ order: Order }>("PATCH", `/orders/${orderId}/quantity`, { quantity })).order,
   getOrder: async (id) => (await request<{ order: Order }>("GET", `/orders/${id}`)).order,
   payOrder: (id, body) => request("POST", `/orders/${id}/pay`, body),
   releaseHold: async (id) => {

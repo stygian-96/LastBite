@@ -6,7 +6,7 @@ import { ApiError } from '../lib/errors.js';
 import { signAnonId, verifyAnonId } from '../lib/crypto.js';
 import { cookieDomain, route } from '../lib/http.js';
 import { getSessionUser } from '../modules/auth/session.js';
-import { releaseHold, reserveDrop } from '../modules/orders/reserve.js';
+import { changeHoldQuantity, releaseHold, reserveDrop } from '../modules/orders/reserve.js';
 import { getOrder, listMyOrders, type Viewer } from '../modules/orders/views.js';
 import { startPayment } from '../modules/payments/start.js';
 
@@ -25,7 +25,7 @@ async function readViewer(c: Context, now: Date): Promise<Viewer> {
 export const customerOrders = new Hono()
   .post(
     '/orders',
-    route({ body: z.object({ dropId: z.uuid() }) }, async ({ c, body, ip, now }) => {
+    route({ body: z.object({ dropId: z.uuid(), quantity: z.unknown().optional() }) }, async ({ c, body, ip, now }) => {
       const viewer = await readViewer(c, now);
       if (!viewer.userId && !viewer.anonId) {
         viewer.anonId = randomUUID();
@@ -39,7 +39,7 @@ export const customerOrders = new Hono()
         });
       }
       const holder = viewer.userId ? { userId: viewer.userId } : { anonId: viewer.anonId };
-      const order = await reserveDrop({ dropId: body.dropId, ...holder, ip }, now);
+      const order = await reserveDrop({ dropId: body.dropId, quantity: body.quantity, ...holder, ip }, now);
       return { order: await getOrder(holder, order.id) };
     }),
   )
@@ -48,6 +48,14 @@ export const customerOrders = new Hono()
     route({ auth: 'none' }, async ({ c, params, now }) => {
       const order = await getOrder(await readViewer(c, now), params.id!);
       return { order };
+    }),
+  )
+  .patch(
+    '/orders/:id/quantity',
+    route({ auth: 'none', body: z.object({ quantity: z.unknown() }) }, async ({ c, params, body, now }) => {
+      const viewer = await readViewer(c, now);
+      await changeHoldQuantity(viewer, params.id!, body.quantity, now);
+      return { order: await getOrder(viewer, params.id!) };
     }),
   )
   .delete(

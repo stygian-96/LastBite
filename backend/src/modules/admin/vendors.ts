@@ -47,7 +47,7 @@ export type InventoryRow = {
   orders: OrderCounts;
 };
 
-/** Paid and waiting, collected, marked no-show, and cancelled. Sold is every bag paid for and not cancelled. */
+/** Bags paid and waiting, collected, marked no-show, and cancelled. Sold is every bag paid for and not cancelled. */
 export type OrderCounts = { paid: number; collected: number; noShow: number; cancelled: number; soldPaise: number };
 
 const filtersSchema = z.object({
@@ -233,10 +233,11 @@ async function orderCounts(dropIds: string[]): Promise<Map<string, OrderCounts>>
   const counts = await db
     .select({
       dropId: orders.dropId,
-      paid: sql<number>`(count(*) FILTER (WHERE ${orders.status} = 'paid'))::int`,
-      collected: sql<number>`(count(*) FILTER (WHERE ${orders.status} = 'collected'))::int`,
-      noShow: sql<number>`(count(*) FILTER (WHERE ${orders.status} = 'no_show'))::int`,
-      cancelled: sql<number>`(count(*) FILTER (WHERE ${orders.status} = 'cancelled'))::int`,
+      // Bags, not orders: one order can hold several.
+      paid: sql<number>`coalesce(sum(${orders.quantity}) FILTER (WHERE ${orders.status} = 'paid'), 0)::int`,
+      collected: sql<number>`coalesce(sum(${orders.quantity}) FILTER (WHERE ${orders.status} = 'collected'), 0)::int`,
+      noShow: sql<number>`coalesce(sum(${orders.quantity}) FILTER (WHERE ${orders.status} = 'no_show'), 0)::int`,
+      cancelled: sql<number>`coalesce(sum(${orders.quantity}) FILTER (WHERE ${orders.status} = 'cancelled'), 0)::int`,
       soldPaise: sql<number>`coalesce(sum(${orders.pricePaise}) FILTER (WHERE ${orders.status} IN ('paid', 'collected', 'no_show')), 0)::int`,
     })
     .from(orders)

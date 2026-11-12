@@ -2,7 +2,7 @@
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
-import { bagKind, MiniOrderCard } from "@/components/customer";
+import { bagKind, MiniOrderCard, QuantityPicker } from "@/components/customer";
 import { Button, Field, LinkButton, Notice, PageSkeleton, TopBar } from "@/components/ui";
 import { HOLD_SECONDS } from "@/config/brand";
 import { api, errorCode, errorDetails, errorMessage } from "@/lib/api";
@@ -34,6 +34,8 @@ export default function Checkout() {
   const [error, setError] = useState<string | null>(null);
   const [holdEnded, setHoldEnded] = useState(false);
   const [againError, setAgainError] = useState<string | null>(null);
+  const [changing, setChanging] = useState(false);
+  const [quantityError, setQuantityError] = useState<string | null>(null);
 
   const order = useQuery(() => api.getOrder(id), [id], { pollMs: phase === "pay" ? undefined : CONFIRM_POLL_MS });
   const left = useSecondsLeft(order.data?.holdExpiresAt);
@@ -71,12 +73,31 @@ export default function Checkout() {
     }
   }
 
+  async function changeQuantity(quantity: number) {
+    setChanging(true);
+    setQuantityError(null);
+    try {
+      order.setData(await api.changeQuantity(id, quantity));
+    } catch (err) {
+      if (errorCode(err) === "hold_not_active") setHoldEnded(true);
+      else setQuantityError(errorMessage(err));
+      order.reload();
+    } finally {
+      setChanging(false);
+    }
+  }
+
   async function holdAgain() {
     if (!dropId) return;
     setBusy(true);
     setAgainError(null);
     try {
-      const fresh = await api.reserve(dropId);
+      // Ask for the same number of bags; if that many have gone, fall back to one.
+      const fresh = await api.reserve(dropId, order.data?.quantity ?? 1).catch((err: unknown) => {
+        const code = errorCode(err);
+        if (code === "over_limit" || code === "not_enough_left") return api.reserve(dropId, 1);
+        throw err;
+      });
       setHoldEnded(false);
       router.replace(`/checkout/${fresh.id}?drop=${dropId}`);
     } catch (err) {
@@ -139,7 +160,9 @@ export default function Checkout() {
           <div className="flex flex-col gap-2 rounded-[22px] bg-dark p-[22px] text-white">
             <span className="text-[40px] font-black text-coral">0:00</span>
             <h2 className="text-[22px] font-medium">Your hold has ended</h2>
-            <p className="text-sm leading-normal text-dark-sub">The bag went back on sale. You haven’t been charged.</p>
+            <p className="text-sm leading-normal text-dark-sub">
+              {item.quantity > 1 ? "The bags went back on sale." : "The bag went back on sale."} You haven’t been charged.
+            </p>
           </div>
           {againError && (
             <p role="alert" className="text-[13px] text-danger">
@@ -181,7 +204,19 @@ export default function Checkout() {
           </div>
         </section>
 
-        <MiniOrderCard kind={bagKind(item)} title={`${item.name} × 1`} sub={`${item.brandName} · ${item.branchName}`} price={item.pricePaise} was={item.valuePaise} />
+        <MiniOrderCard
+          kind={bagKind(item)}
+          title={`${item.name} × ${item.quantity}`}
+          sub={`${item.brandName} · ${item.branchName}${item.quantity > 1 ? ` · ${rupees(item.unitPricePaise)} each` : ""}`}
+          price={item.pricePaise}
+          was={item.valuePaise * item.quantity}
+        />
+        <QuantityPicker value={item.quantity} max={item.maxQuantity} onChange={changeQuantity} disabled={changing || busy} />
+        {quantityError && (
+          <p role="alert" className="text-[13px] text-danger">
+            {quantityError}
+          </p>
+        )}
 
         <div className="rounded-2xl bg-fill px-3.5 py-3 text-[13px] leading-normal text-body">
           <strong className="font-medium text-ink">Collect today, {window}.</strong> In person, no delivery. Missed pickups are forfeited; if the vendor cancels you’re refunded automatically.

@@ -29,7 +29,7 @@ The design calls the product Saanjh and this folder calls it LastBite. Code uses
 |---|---|---|
 | Maps, coordinates, distance | You asked for links only | `maps_url` on each outlet opens Google Maps |
 | Waitlist | Adds a second queue and hold flow | Sold out state only |
-| Cart, more than one bag per order | Agreed in the design review | One bag per order, per outlet, per night |
+| Cart, several items per order | Agreed in the design review | One order per outlet, per night. Since 12 Nov 2026 an order can hold up to the listing's `max_per_order` bags of its one item (vendor sets 1–10, default 3), never more than are left |
 | Coupons, referrals, wallet | Not needed to prove demand | Nothing |
 | Customer cancellation after payment | Matches the agreed refund rules | Missed pickup is forfeited |
 | Native apps, push notifications | Website-only MVP | WhatsApp, then SMS |

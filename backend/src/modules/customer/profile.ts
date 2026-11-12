@@ -43,8 +43,9 @@ export async function getProfile(userId: string): Promise<Profile> {
 
   const [impact] = await db
     .select({
-      bagsCollected: sql<number>`count(*)::int`,
-      moneySavedPaise: sql<number>`coalesce(sum(${drops.valuePaise} - ${orders.pricePaise}), 0)::int`,
+      // An order can hold several bags; its price is their total, and a drop's value is per bag.
+      bagsCollected: sql<number>`coalesce(sum(${orders.quantity}), 0)::int`,
+      moneySavedPaise: sql<number>`coalesce(sum(${drops.valuePaise} * ${orders.quantity} - ${orders.pricePaise}), 0)::int`,
     })
     .from(orders)
     .innerJoin(drops, eq(drops.id, orders.dropId))

@@ -3,6 +3,10 @@ export type ErrorDetails = {
   existingOrderId?: string;
   collectedAt?: string;
   fixes?: { code: string; message: string }[];
+  /** over_limit: the vendor's limit per order. */
+  maxPerOrder?: number;
+  /** not_enough_left: the most this order can have. */
+  remaining?: number;
 };
 
 export class ApiError extends Error {

@@ -20,6 +20,8 @@ export type Drop = {
   pricePaise: number;
   valuePaise: number;
   remaining: number;
+  /** The most bags one order can take now: the vendor's limit, or what is left if that is fewer. */
+  maxQuantity: number;
   pickupStartAt: string;
   pickupEndAt: string;
   brandName: string;
@@ -82,8 +84,15 @@ export type Order = {
   id: string;
   number: string; // "SJ-20481"
   status: OrderStatus;
+  /** Bags in this order. */
+  quantity: number;
+  /** The order total: unitPricePaise × quantity. */
   pricePaise: number;
+  unitPricePaise: number;
+  /** The value of one bag. */
   valuePaise: number;
+  /** While on hold, the most bags the order can be changed to. */
+  maxQuantity: number;
   name: string;
   type: ListingType;
   diet: Diet;
@@ -241,6 +250,8 @@ export type Listing = {
   repeatDays: number[]; // 1 = Monday ... 7 = Sunday
   photoKey: string | null;
   archivedAt: string | null;
+  /** The most bags one customer can take in a night, 1 to 10. */
+  maxPerOrder: number;
 };
 
 export type ListingInput = Omit<Listing, "id" | "outletId" | "archivedAt" | "photoKey"> & { photoKey?: string | null };
@@ -272,6 +283,7 @@ export type VendorOrder = {
   status: "paid" | "collected" | "no_show";
   customerLabel: string;
   dropName: string;
+  quantity: number;
   pricePaise: number;
   pickupStartAt: string;
   pickupEndAt: string;

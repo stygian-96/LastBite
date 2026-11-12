@@ -65,6 +65,7 @@ export async function listOutletOrders(
       status: orders.status,
       name: users.name,
       dropName: drops.name,
+      quantity: orders.quantity,
       pricePaise: orders.pricePaise,
       pickupStartAt: drops.pickupStartAt,
       pickupEndAt: drops.pickupEndAt,

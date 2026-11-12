@@ -13,7 +13,7 @@ export async function expireHolds(now: Date): Promise<number> {
   for (;;) {
     const count = await withTx(async (tx) => {
       const holds = await tx
-        .select({ id: orders.id, dropId: orders.dropId })
+        .select({ id: orders.id, dropId: orders.dropId, quantity: orders.quantity })
         .from(orders)
         .where(and(eq(orders.status, 'held'), lt(orders.holdExpiresAt, cutoff)))
         .orderBy(asc(orders.holdExpiresAt))
@@ -23,8 +23,8 @@ export async function expireHolds(now: Date): Promise<number> {
 
       // Every drop row first, in one fixed order, then every order row. Parallel batches cannot
       // cross, and a reserve waiting on a changed order row never holds a drop this batch still needs.
-      const dropIds = holds.map((h) => h.dropId).sort((a, b) => a.localeCompare(b));
-      for (const dropId of dropIds) await releaseStock(tx, dropId);
+      const byDrop = [...holds].sort((a, b) => a.dropId.localeCompare(b.dropId));
+      for (const hold of byDrop) await releaseStock(tx, hold.dropId, hold.quantity);
       await tx
         .update(orders)
         .set({ status: 'expired' })

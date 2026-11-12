@@ -266,6 +266,7 @@ export const listings = pgTable("listings", {
 	pickupStart: time("pickup_start").notNull(),
 	pickupEnd: time("pickup_end").notNull(),
 	repeatDays: smallint("repeat_days").array().default([]).notNull(),
+	maxPerOrder: smallint("max_per_order").default(3).notNull(),
 	photoKey: text("photo_key"),
 	archivedAt: timestamp("archived_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
@@ -282,6 +283,7 @@ export const listings = pgTable("listings", {
 	check("listings_price_paise_check", sql`price_paise > 0`),
 	check("listings_default_quantity_check", sql`default_quantity > 0`),
 	check("listings_check", sql`price_paise <= value_paise`),
+	check("listings_max_per_order_check", sql`(max_per_order >= 1) AND (max_per_order <= 10)`),
 ]);
 
 export const drops = pgTable("drops", {
@@ -334,6 +336,7 @@ export const orders = pgTable("orders", {
 	outletId: uuid("outlet_id").notNull(),
 	serviceDate: date("service_date").notNull(),
 	status: text().default('held').notNull(),
+	quantity: smallint().default(1).notNull(),
 	pricePaise: integer("price_paise").notNull(),
 	commissionBps: integer("commission_bps").notNull(),
 	commissionPaise: integer("commission_paise").notNull(),
@@ -395,6 +398,7 @@ export const orders = pgTable("orders", {
 			name: "orders_payout_account_id_fkey"
 		}),
 	unique("orders_number_key").on(table.number),
+	check("orders_quantity_check", sql`(quantity >= 1) AND (quantity <= 10)`),
 	check("orders_status_check", sql`status = ANY (ARRAY['held'::text, 'expired'::text, 'paid'::text, 'collected'::text, 'no_show'::text, 'cancelled'::text])`),
 	check("orders_rating_check", sql`(rating >= 1) AND (rating <= 5)`),
 ]);

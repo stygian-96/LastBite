@@ -10,6 +10,9 @@ import { rupees, shortDate, timeRange } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 
+/** The item, with the number of bags when there is more than one. */
+const orderTitle = (order: Order) => (order.quantity > 1 ? `${order.name} × ${order.quantity}` : order.name);
+
 const REASONS: { id: IssueReason; label: string }[] = [
   { id: "bag_not_ready", label: "Bag not ready" },
   { id: "quality", label: "Food quality" },
@@ -26,7 +29,7 @@ function ActiveCard({ order }: { order: Order }) {
           <StatusChip tone="wait">On hold · not paid</StatusChip>
           <span className="text-xs text-muted">#{order.number}</span>
         </div>
-        <span className="text-[15px] font-medium">{order.name}</span>
+        <span className="text-[15px] font-medium">{orderTitle(order)}</span>
         <span className="text-[13px] font-medium">Finish paying ›</span>
       </Link>
     );
@@ -42,7 +45,7 @@ function ActiveCard({ order }: { order: Order }) {
           <Illo kind={bagKind(order)} size={44} />
         </span>
         <span className="flex flex-1 flex-col gap-0.5">
-          <span className="text-[15px] font-medium">{order.name}</span>
+          <span className="text-[15px] font-medium">{orderTitle(order)}</span>
           <span className="text-xs text-dark-sub">
             {order.brandName} · today {timeRange(order.pickupStartAt, order.pickupEndAt)}
           </span>
@@ -65,7 +68,7 @@ function RefundCard({ order }: { order: Order }) {
         <span className="text-xs text-muted">#{order.number}</span>
       </div>
       <span className="text-[15px] font-medium">
-        {order.name} · {order.brandName}
+        {orderTitle(order)} · {order.brandName}
       </span>
       <span className="text-[13px] leading-normal text-body">
         {order.brandName} cancelled. {rupees(order.refund!.amountPaise)} is on its way back to you, usually within 5–7 working days.
@@ -75,7 +78,7 @@ function RefundCard({ order }: { order: Order }) {
 }
 
 function pastStatus(order: Order) {
-  if (order.status === "collected") return { label: "Collected", tone: "info" as const, note: `You saved ${rupees(order.valuePaise - order.pricePaise)}.` };
+  if (order.status === "collected") return { label: "Collected", tone: "info" as const, note: `You saved ${rupees(order.valuePaise * order.quantity - order.pricePaise)}.` };
   if (order.status === "no_show") {
     return { label: "No-show", tone: "warn" as const, note: "Not collected in time, so it was forfeited. No refund for missed pickups." };
   }
@@ -132,7 +135,7 @@ function PastCard({ order, onReport }: { order: Order; onReport: () => void }) {
           <Illo kind={bagKind(order)} size={42} />
         </span>
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="text-[15px] font-medium">{order.name}</span>
+          <span className="text-[15px] font-medium">{orderTitle(order)}</span>
           <span className="text-xs text-muted">
             {order.brandName} · {shortDate(order.pickupStartAt)}
           </span>
@@ -190,7 +193,7 @@ function ReportSheet({ order, onClose }: { order: Order; onClose: () => void }) 
       ) : (
         <>
           <span className="text-[13px] text-muted">
-            {order.name} · {order.brandName} · {shortDate(order.pickupStartAt)}
+            {orderTitle(order)} · {order.brandName} · {shortDate(order.pickupStartAt)}
           </span>
           <div className="flex flex-wrap gap-2">
             {REASONS.map((option) => (

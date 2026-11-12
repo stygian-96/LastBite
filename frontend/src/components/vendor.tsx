@@ -226,7 +226,7 @@ export function OrderList({ orders, onChanged }: { orders: VendorOrder[]; onChan
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span className="text-[15px] font-medium">{order.customerLabel}</span>
                 <span className="truncate text-xs text-muted">
-                  {order.dropName} × 1 · #{order.number}
+                  {order.dropName} × {order.quantity > 1 ? <strong className="font-bold text-ink">{order.quantity}</strong> : 1} · #{order.number}
                 </span>
               </span>
               <StatusChip tone={status.tone}>

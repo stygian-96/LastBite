@@ -94,7 +94,7 @@ function cancelLocked(orderId: string, cancel: Cancel): Promise<void> {
   return withTx(async (tx) => {
     const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).for('update');
     if (order?.status !== 'paid') throw new ApiError('not_cancellable', 409, 'Only a paid order can be cancelled');
-    await releaseStock(tx, order.dropId);
+    await releaseStock(tx, order.dropId, order.quantity);
     await cancelPaidOrder(tx, order, cancel);
   });
 }
@@ -148,7 +148,7 @@ function tryCancelDrop(dropId: string, cancel: Cancel): Promise<boolean> {
     const paid = locked.filter((o) => o.status === 'paid');
     for (const hold of held) await endHold(tx, hold, cancel.now.toISOString());
     for (const order of paid) {
-      await releaseStock(tx, dropId);
+      await releaseStock(tx, dropId, order.quantity);
       await cancelPaidOrder(tx, order, cancel);
     }
     await audit(tx, {

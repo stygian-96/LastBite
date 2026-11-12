@@ -66,7 +66,7 @@ function PickupCode({ order, offline }: { order: Order; offline: boolean }) {
           <span className="tabular text-[92px] font-black leading-none tracking-[0.04em]">{order.pickupCode}</span>
           <span className="text-center text-base font-medium">
             {name ? `${name} · ` : ""}
-            {order.name} × 1
+            {order.name} × {order.quantity}
           </span>
         </div>
         <div className="grid grid-cols-2 gap-2.5">
@@ -127,7 +127,7 @@ function OrderState({ order }: { order: Order }) {
     return (
       <Notice big={order.pickupCode ?? "✓"} band="collected" tone="ok" title="You picked this up">
         <p className="text-[13px] leading-normal text-body">
-          {order.name} from {order.brandName}. You saved {rupees(order.valuePaise - order.pricePaise)}.
+          {order.name} from {order.brandName}. You saved {rupees(order.valuePaise * order.quantity - order.pricePaise)}.
         </p>
         <LinkButton href="/browse" size="md">
           See tonight’s bags

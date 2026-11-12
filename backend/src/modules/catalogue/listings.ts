@@ -45,6 +45,8 @@ const fields = {
   // 1 = Monday ... 7 = Sunday
   repeatDays: z.array(z.number().int().min(1).max(7)).max(7),
   photoKey: z.string().min(1).max(300).nullable(),
+  // The most bags one customer can take in a night. The orders table caps any order at 10.
+  maxPerOrder: z.number().int().min(1).max(10),
 };
 
 const createSchema = z.strictObject({
@@ -52,6 +54,7 @@ const createSchema = z.strictObject({
   allergens: fields.allergens.default([]),
   repeatDays: fields.repeatDays.default([]),
   photoKey: fields.photoKey.optional(),
+  maxPerOrder: fields.maxPerOrder.default(3),
 });
 const patchSchema = z.strictObject(fields).partial();
 

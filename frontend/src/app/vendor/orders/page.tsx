@@ -62,8 +62,10 @@ function Counter({ outlet }: { outlet: VendorOutlet }) {
         <span className="text-xs text-dark-sub">This marks the order collected if the code matches.</span>
         {done && (
           <div role="status" className="rounded-2xl bg-ok-bg p-3 text-[13px] text-ok-fg">
-            <strong className="block text-sm font-medium">Valid · hand it over</strong>
-            {done.name} × 1 · #{done.number}
+            <strong className="block text-sm font-medium">
+              Valid · {done.quantity > 1 ? `hand over ${done.quantity} bags` : "hand it over"}
+            </strong>
+            {done.name} × {done.quantity} · #{done.number}
           </div>
         )}
         {problem && (

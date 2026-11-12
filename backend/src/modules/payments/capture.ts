@@ -77,7 +77,7 @@ async function customerDeleted(tx: Tx, userId: string): Promise<boolean> {
 async function retakeBag(tx: Tx, order: Order, now: Date): Promise<boolean> {
   if (order.userId && (await customerDeleted(tx, order.userId))) return false;
   if (order.userId && (await findNightOrder(tx, order.userId, order.outletId, order.serviceDate))) return false;
-  const drop = await takeStock(tx, order.dropId, now.toISOString());
+  const drop = await takeStock(tx, order.dropId, now.toISOString(), order.quantity);
   if (!drop) return false;
   try {
     // This is a new sale, by whoever holds the outlet now.
@@ -87,7 +87,7 @@ async function retakeBag(tx: Tx, order: Order, now: Date): Promise<boolean> {
   } catch (e) {
     // A reserve by the same customer committed while this capture waited for the drop.
     if (!isUniqueViolation(e, 'one_order_per_outlet_night')) throw e;
-    await releaseStock(tx, order.dropId);
+    await releaseStock(tx, order.dropId, order.quantity);
     return false;
   }
 }

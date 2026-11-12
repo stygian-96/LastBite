@@ -311,3 +311,41 @@ function Tick() {
     </svg>
   );
 }
+
+/**
+ * How many bags, from 1 up to `max`: the smaller of the vendor's limit and what is left. Hidden when
+ * only one can be had, so single-bag listings look as they always did.
+ */
+export function QuantityPicker({
+  value,
+  max,
+  onChange,
+  disabled = false,
+  note,
+}: {
+  value: number;
+  max: number;
+  onChange: (value: number) => void;
+  disabled?: boolean;
+  note?: string;
+}) {
+  if (max <= 1 && value <= 1) return null;
+  const round = "flex size-11 flex-none items-center justify-center rounded-full border-[1.5px] border-line bg-white text-xl font-medium disabled:opacity-40";
+  return (
+    <div className="flex items-center gap-3 rounded-2xl bg-fill-2 px-3.5 py-2.5">
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="text-sm font-medium">Bags</span>
+        <span className="text-xs text-muted">{note ?? `Up to ${max} per order`}</span>
+      </span>
+      <button type="button" aria-label="One bag fewer" disabled={disabled || value <= 1} onClick={() => onChange(value - 1)} className={round}>
+        −
+      </button>
+      <span aria-live="polite" className="tabular w-6 text-center text-xl font-bold">
+        {value}
+      </span>
+      <button type="button" aria-label="One bag more" disabled={disabled || value >= max} onClick={() => onChange(value + 1)} className={round}>
+        +
+      </button>
+    </div>
+  );
+}

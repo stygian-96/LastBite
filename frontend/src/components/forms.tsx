@@ -64,11 +64,13 @@ export function Stepper({
   value,
   onChange,
   min = 1,
+  max,
   children,
 }: {
   value: number;
   onChange: (value: number) => void;
   min?: number;
+  max?: number;
   children?: ReactNode;
 }) {
   const round = "flex size-14 flex-none items-center justify-center rounded-full bg-fill text-2xl font-medium disabled:opacity-40";
@@ -83,7 +85,7 @@ export function Stepper({
         </span>
         {children}
       </span>
-      <button type="button" aria-label="One more" onClick={() => onChange(value + 1)} className={round}>
+      <button type="button" aria-label="One more" disabled={max !== undefined && value >= max} onClick={() => onChange(value + 1)} className={round}>
         +
       </button>
     </div>
@@ -130,6 +132,7 @@ export function ListingForm({
   const [value, setValue] = useState(listing ? String(listing.valuePaise / 100) : "");
   const [price, setPrice] = useState(listing ? String(listing.pricePaise / 100) : "");
   const [quantity, setQuantity] = useState(listing?.defaultQuantity ?? 6);
+  const [maxPerOrder, setMaxPerOrder] = useState(listing?.maxPerOrder ?? 3);
   const [start, setStart] = useState(listing?.pickupStart.slice(0, 5) ?? "20:30");
   const [end, setEnd] = useState(listing?.pickupEnd.slice(0, 5) ?? "21:30");
   const [photo, setPhoto] = useState<File | null>(null);
@@ -156,6 +159,7 @@ export function ListingForm({
         valuePaise: Math.round(valueRupees * 100),
         pricePaise: Math.round(priceRupees * 100),
         defaultQuantity: quantity,
+        maxPerOrder,
         pickupStart: start,
         pickupEnd: end,
         repeatDays: listing?.repeatDays ?? ALL_DAYS,
@@ -245,6 +249,14 @@ export function ListingForm({
           <span className="text-xs text-muted">You confirm the real number daily</span>
         </span>
         <Stepper value={quantity} onChange={setQuantity} />
+      </div>
+
+      <div className="flex flex-col gap-2 rounded-2xl bg-fill p-3.5">
+        <span className="flex flex-col">
+          <span className="text-[15px] font-medium">Most bags one customer can take</span>
+          <span className="text-xs text-muted">Keeps a few customers from taking everything. Up to 10.</span>
+        </span>
+        <Stepper value={maxPerOrder} onChange={setMaxPerOrder} max={10} />
       </div>
 
       <div className="grid grid-cols-2 gap-2.5">
