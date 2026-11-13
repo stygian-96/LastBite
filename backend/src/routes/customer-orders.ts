@@ -6,7 +6,7 @@ import { ApiError } from '../lib/errors.js';
 import { signAnonId, verifyAnonId } from '../lib/crypto.js';
 import { cookieDomain, route } from '../lib/http.js';
 import { getSessionUser } from '../modules/auth/session.js';
-import { changeHoldQuantity, releaseHold, reserveDrop } from '../modules/orders/reserve.js';
+import { changeHoldQuantity, changeItemQuantity, releaseHold, reserveDrop } from '../modules/orders/reserve.js';
 import { getOrder, listMyOrders, type Viewer } from '../modules/orders/views.js';
 import { startPayment } from '../modules/payments/start.js';
 
@@ -55,6 +55,15 @@ export const customerOrders = new Hono()
     route({ auth: 'none', body: z.object({ quantity: z.unknown() }) }, async ({ c, params, body, now }) => {
       const viewer = await readViewer(c, now);
       await changeHoldQuantity(viewer, params.id!, body.quantity, now);
+      return { order: await getOrder(viewer, params.id!) };
+    }),
+  )
+  .patch(
+    '/orders/:id/items/:dropId',
+    // How many of one bag the hold has; 0 takes it out (not the last one).
+    route({ auth: 'none', body: z.object({ quantity: z.unknown() }) }, async ({ c, params, body, now }) => {
+      const viewer = await readViewer(c, now);
+      await changeItemQuantity(viewer, params.id!, params.dropId!, body.quantity, now);
       return { order: await getOrder(viewer, params.id!) };
     }),
   )

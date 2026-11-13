@@ -6,12 +6,12 @@ import { bagKind, CustomerShell, outletHref } from "@/components/customer";
 import { Illo } from "@/components/Illo";
 import { Button, Chip, ErrorState, LinkButton, Notice, Sheet, Skeleton, SlowBanner, StatusChip, Tabs } from "@/components/ui";
 import { api, errorMessage, type IssueReason, type Order } from "@/lib/api";
-import { rupees, shortDate, timeRange } from "@/lib/format";
+import { bagsText, rupees, shortDate, timeRange } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 
 /** The item, with the number of bags when there is more than one. */
-const orderTitle = (order: Order) => (order.quantity > 1 ? `${order.name} × ${order.quantity}` : order.name);
+const orderTitle = (order: Order) => bagsText(order.items);
 
 const REASONS: { id: IssueReason; label: string }[] = [
   { id: "bag_not_ready", label: "Bag not ready" },
@@ -78,7 +78,7 @@ function RefundCard({ order }: { order: Order }) {
 }
 
 function pastStatus(order: Order) {
-  if (order.status === "collected") return { label: "Collected", tone: "info" as const, note: `You saved ${rupees(order.valuePaise * order.quantity - order.pricePaise)}.` };
+  if (order.status === "collected") return { label: "Collected", tone: "info" as const, note: `You saved ${rupees(order.totalValuePaise - order.pricePaise)}.` };
   if (order.status === "no_show") {
     return { label: "No-show", tone: "warn" as const, note: "Not collected in time, so it was forfeited. No refund for missed pickups." };
   }

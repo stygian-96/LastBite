@@ -1,12 +1,12 @@
 import { and, asc, eq, inArray, ne, notExists, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
-import { drops, orders, payments, refunds } from '../../db/schema.js';
+import { drops, orderItems, orders, payments, refunds } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { requireOutlet, type Role } from '../auth/access.js';
-import { queueVendorCancelled } from '../notifications/events.js';
-import { endHold, releaseStock, type Order } from '../orders/reserve.js';
+import { queueItemCancelled, queueVendorCancelled } from '../notifications/events.js';
+import { activeItems, endHold, recomputeOrder, releaseItems, releaseStock, type Order, type OrderItem } from '../orders/reserve.js';
 import { createRefund } from './create.js';
 
 const CANCEL_ROLES: Role[] = ['owner', 'manager', 'counter'];
@@ -94,7 +94,7 @@ function cancelLocked(orderId: string, cancel: Cancel): Promise<void> {
   return withTx(async (tx) => {
     const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).for('update');
     if (order?.status !== 'paid') throw new ApiError('not_cancellable', 409, 'Only a paid order can be cancelled');
-    await releaseStock(tx, order.dropId, order.quantity);
+    await releaseItems(tx, order.id);
     await cancelPaidOrder(tx, order, cancel);
   });
 }
@@ -126,6 +126,51 @@ export async function adminCancelOrder(
   await cancelLocked(orderId, { actorId: adminId, reason, now, chargedTo });
 }
 
+/** The orders with an active line of this drop. */
+const ordersWithLine = (dropId: string) =>
+  db.select({ id: orderItems.orderId }).from(orderItems).where(and(eq(orderItems.dropId, dropId), eq(orderItems.status, 'active')));
+
+/**
+ * Takes one line out of an order the caller has locked, while the rest of it goes ahead. Its stock
+ * goes back. A hold just loses the line and its price. A paid order keeps what was paid; the line is
+ * marked cancelled and refunded on its own (no more than is still unrefunded), and the customer is
+ * told the rest is still on.
+ */
+async function cancelLine(tx: Tx, order: Order, line: OrderItem, cancel: Cancel): Promise<void> {
+  await releaseStock(tx, line.dropId, line.quantity);
+  if (order.status === 'held') {
+    await tx.delete(orderItems).where(eq(orderItems.id, line.id));
+    await recomputeOrder(tx, order.id, true);
+    return;
+  }
+  await tx.update(orderItems).set({ status: 'cancelled', cancelledAt: cancel.now.toISOString() }).where(eq(orderItems.id, line.id));
+  await recomputeOrder(tx, order.id, false);
+  const payment = await bagPayment(tx, order.id);
+  const amount = payment ? Math.min(line.quantity * line.unitPricePaise, await unrefundedPaise(tx, payment)) : 0;
+  const chargedTo = cancel.chargedTo ?? 'vendor';
+  if (payment && amount > 0) {
+    await createRefund(tx, {
+      orderId: order.id,
+      paymentId: payment.id,
+      amountPaise: amount,
+      reason: 'item_cancelled',
+      orderItemId: line.id,
+      chargedTo,
+      createdBy: cancel.actorId,
+    });
+  }
+  const [drop] = await tx.select({ name: drops.name }).from(drops).where(eq(drops.id, line.dropId));
+  const item = line.quantity > 1 ? `${line.quantity} × ${drop!.name}` : drop!.name;
+  await queueItemCancelled(tx, order.id, line.id, item, cancel.reason, Math.max(amount, 0));
+  await audit(tx, {
+    actorId: cancel.actorId,
+    action: 'order.cancel_item',
+    entity: 'order',
+    entityId: order.id,
+    detail: { itemId: line.id, dropId: line.dropId, reason: cancel.reason, chargedTo, refundPaise: Math.max(amount, 0) },
+  });
+}
+
 /**
  * One try at a drop cancel. Every live order is locked, then the drop, so this meets capture and
  * expireHolds in the order they use. Holding the drop, it never waits for an order: one that landed
@@ -133,7 +178,9 @@ export async function adminCancelOrder(
  * (returns false). Once the drop is held no order can land, so the set it cancels is complete.
  */
 function tryCancelDrop(dropId: string, cancel: Cancel): Promise<boolean> {
-  const live = and(eq(orders.dropId, dropId), inArray(orders.status, LIVE_STATUSES));
+  // Every live order with a line of this drop, not only those it is the first line of.
+  const withLine = ordersWithLine(dropId);
+  const live = and(inArray(orders.id, withLine), inArray(orders.status, LIVE_STATUSES));
   return withTx(async (tx) => {
     const locked = await tx.select().from(orders).where(live).orderBy(asc(orders.id)).for('update');
     const [drop] = await tx.select({ status: drops.status }).from(drops).where(eq(drops.id, dropId)).for('update');
@@ -146,17 +193,28 @@ function tryCancelDrop(dropId: string, cancel: Cancel): Promise<boolean> {
     await tx.update(drops).set({ status: 'cancelled' }).where(eq(drops.id, dropId));
     const held = locked.filter((o) => o.status === 'held');
     const paid = locked.filter((o) => o.status === 'paid');
-    for (const hold of held) await endHold(tx, hold, cancel.now.toISOString());
-    for (const order of paid) {
-      await releaseStock(tx, dropId, order.quantity);
-      await cancelPaidOrder(tx, order, cancel);
+    let partly = 0;
+    for (const order of [...held, ...paid]) {
+      const lines = await activeItems(tx, order.id);
+      const line = lines.find((l) => l.dropId === dropId)!;
+      // The only line: the whole order ends, as it always has. Otherwise just this line goes.
+      if (lines.length === 1) {
+        if (order.status === 'held') await endHold(tx, order, cancel.now.toISOString());
+        else {
+          await releaseStock(tx, dropId, line.quantity);
+          await cancelPaidOrder(tx, order, cancel);
+        }
+      } else {
+        await cancelLine(tx, order, line, cancel);
+        partly++;
+      }
     }
     await audit(tx, {
       actorId: cancel.actorId,
       action: 'drop.cancel',
       entity: 'drop',
       entityId: dropId,
-      detail: { reason: cancel.reason, cancelled: paid.length, expired: held.length },
+      detail: { reason: cancel.reason, cancelled: paid.length, expired: held.length, linesOnly: partly },
     });
     return true;
   });

@@ -10,7 +10,13 @@ import { api, errorCode, errorDetails, errorMessage, errorStatus, type DropDetai
 import { rupees, timeRange } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 
-type Problem = { kind: "sold_out" } | { kind: "already"; orderId?: string } | { kind: "hold"; orderId?: string } | { kind: "other"; message: string };
+type Problem =
+  | { kind: "sold_out" }
+  | { kind: "already"; orderId?: string }
+  | { kind: "hold"; orderId?: string }
+  /** This bag couldn't join the order already held at this outlet. */
+  | { kind: "in_order"; orderId: string; message: string }
+  | { kind: "other"; message: string };
 
 function Hero({ drop }: { drop: DropDetail }) {
   const kind = illoFor(drop.foodCategory);
@@ -67,7 +73,11 @@ export default function Listing() {
     } catch (err) {
       const code = errorCode(err);
       const orderId = errorDetails(err).existingOrderId;
-      if (code === "sold_out" || code === "not_on_sale") {
+      if (orderId && code !== "already_ordered" && code !== "hold_exists") {
+        // Adding to the bags already held here didn't work: say why, and lead back to that order.
+        setProblem({ kind: "in_order", orderId, message: errorMessage(err) });
+        drop.reload();
+      } else if (code === "sold_out" || code === "not_on_sale") {
         setProblem({ kind: "sold_out" });
         drop.reload();
       } else if (code === "already_ordered") {
@@ -182,7 +192,7 @@ export default function Listing() {
       {problem?.kind === "already" && (
         <div role="alert" className="flex flex-col gap-2 rounded-2xl bg-wait-bg p-3.5 text-[13px] leading-normal text-wait-fg">
           <strong className="text-sm font-medium">You already have a bag from {item.brandName} tonight</strong>
-          It’s one order per outlet each night.
+          It’s one order per outlet each night, and it’s already paid.
           <LinkButton href={problem.orderId ? `/orders/${problem.orderId}` : "/orders"} size="md" variant="dark">
             Show my order
           </LinkButton>
@@ -194,6 +204,15 @@ export default function Listing() {
           Finish that one first, or let it go.
           <LinkButton href={problem.orderId ? `/checkout/${problem.orderId}` : "/orders"} size="md" variant="dark">
             Go to my held bag
+          </LinkButton>
+        </div>
+      )}
+      {problem?.kind === "in_order" && (
+        <div role="alert" className="flex flex-col gap-2 rounded-2xl bg-wait-bg p-3.5 text-[13px] leading-normal text-wait-fg">
+          <strong className="text-sm font-medium">Couldn’t add this to your order</strong>
+          {problem.message}. The bags you already have are still held.
+          <LinkButton href={`/checkout/${problem.orderId}?drop=${id}`} size="md" variant="dark">
+            Go to your order
           </LinkButton>
         </div>
       )}

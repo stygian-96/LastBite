@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
-import { drops, orders, payouts } from '../../db/schema.js';
+import { orders, payouts } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { ApiError } from '../../lib/errors.js';
 import { checkRateLimit, countRateLimit } from '../../lib/rate-limit.js';
@@ -77,16 +77,15 @@ export async function collectByCode(staffId: string, outletId: string, rawCode: 
     ? await db
         .select({ id: orders.id, status: orders.status, collectedAt: orders.collectedAt })
         .from(orders)
-        .innerJoin(drops, eq(drops.id, orders.dropId))
         .where(
           and(
             eq(orders.outletId, outletId),
             eq(orders.pickupCode, code),
             inArray(orders.status, ['paid', 'no_show', 'collected']),
-            sql`${drops.pickupEndAt} + make_interval(mins => ${NO_SHOW_GRACE_MINUTES}) > ${now.toISOString()}::timestamptz`,
+            sql`${orders.pickupEndAt} + make_interval(mins => ${NO_SHOW_GRACE_MINUTES}) > ${now.toISOString()}::timestamptz`,
           ),
         )
-        .orderBy(sql`${orders.status} = 'collected' asc`, desc(drops.pickupEndAt))
+        .orderBy(sql`${orders.status} = 'collected' asc`, desc(orders.pickupEndAt))
         .limit(1)
     : [];
   if (!found) {

@@ -15,7 +15,7 @@ import { startPayment } from '../../src/modules/payments/start.js';
 import { handleWebhook } from '../../src/modules/payments/webhook.js';
 import { createRefund } from '../../src/modules/refunds/create.js';
 import { app } from '../../src/app.js';
-import { makeDrop, makeOrder, makePaidOrder, makePayment, makeUser } from '../helpers/factories.js';
+import { insertOrders, makeDrop, makeOrder, makePaidOrder, makePayment, makeUser } from '../helpers/factories.js';
 import { getDropRow, getOrderRow, refundsFor, resetDb } from '../helpers/db.js';
 
 // 15:30 IST on 2026-11-02. Default drops stop selling at 20:45 IST.
@@ -772,9 +772,7 @@ describe('reconcilePayments', () => {
 
   test('checks at most 100 orders in a run', async () => {
     const drop = await makeDrop({ quantity: 110, reservedCount: 110 });
-    const rows = await db
-      .insert(orders)
-      .values(
+    const rows = await insertOrders(
         Array.from({ length: 101 }, (_, i) => ({
           anonId: `a${i}`,
           dropId: drop.id,
@@ -785,8 +783,7 @@ describe('reconcilePayments', () => {
           commissionPaise: 2000,
           holdExpiresAt: now.toISOString(),
         })),
-      )
-      .returning({ id: orders.id });
+      );
     await db.insert(payments).values(
       rows.map((r, i) => ({ orderId: r.id, razorpayOrderId: `order_batch_${i}`, amountPaise: 10000 })),
     );
@@ -823,9 +820,7 @@ describe('reconcilePayments', () => {
 
     const expiredRows = async (count: number, prefix: string) => {
       const drop = await makeDrop({ quantity: 10 });
-      const rows = await db
-        .insert(orders)
-        .values(
+      const rows = await insertOrders(
           Array.from({ length: count }, (_, i) => ({
             anonId: `${prefix}${i}`,
             status: 'expired',
@@ -837,8 +832,7 @@ describe('reconcilePayments', () => {
             commissionPaise: 2000,
             holdExpiresAt: now.toISOString(),
           })),
-        )
-        .returning({ id: orders.id });
+        );
       await db.insert(payments).values(
         rows.map((r, i) => ({
           orderId: r.id,
@@ -937,9 +931,7 @@ describe('reconcilePayments', () => {
     test('holds near their end go first, and one run makes at most 100 checks', async () => {
       const swept = await expiredRows(5, 'swept');
       const drop = await makeDrop({ quantity: 110, reservedCount: 110 });
-      const held = await db
-        .insert(orders)
-        .values(
+      const held = await insertOrders(
           Array.from({ length: 98 }, (_, i) => ({
             anonId: `h${i}`,
             dropId: drop.id,
@@ -950,8 +942,7 @@ describe('reconcilePayments', () => {
             commissionPaise: 2000,
             holdExpiresAt: now.toISOString(),
           })),
-        )
-        .returning({ id: orders.id });
+        );
       await db
         .insert(payments)
         .values(held.map((r, i) => ({ orderId: r.id, razorpayOrderId: `order_h_${i}`, amountPaise: 10000 })));
@@ -1009,9 +1000,11 @@ describe('capture against the other writers', () => {
 
       // A capture that had changed the order first would block this insert while waiting on the drop.
       await client.query(
-        `INSERT INTO orders (user_id, drop_id, outlet_id, service_date, price_paise, commission_bps,
-                             commission_paise, hold_expires_at)
-         VALUES ($1, $2, $3, $4, 1, 1, 1, $5)`,
+        `WITH o AS (INSERT INTO orders (user_id, drop_id, outlet_id, service_date, price_paise, commission_bps,
+                             commission_paise, hold_expires_at, pickup_start_at, pickup_end_at)
+         SELECT $1, $2, $3, $4, 1, 1, 1, $5, pickup_start_at, pickup_end_at FROM drops WHERE id = $2
+         RETURNING id, drop_id)
+         INSERT INTO order_items (order_id, drop_id, quantity, unit_price_paise) SELECT id, drop_id, 1, 1 FROM o`,
         [user.id, drop.id, drop.outletId, drop.serviceDate, later.toISOString()],
       );
       await client.query('COMMIT');

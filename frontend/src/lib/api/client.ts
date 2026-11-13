@@ -57,6 +57,8 @@ export type Api = {
   reserve(dropId: string, quantity?: number): Promise<Order>;
   /** Changes how many bags a hold is for, until payment starts. */
   changeQuantity(orderId: string, quantity: number): Promise<Order>;
+  /** Sets how many of one bag a hold has, until payment starts; 0 takes it out (not the last one). */
+  changeItemQuantity(orderId: string, dropId: string, quantity: number): Promise<Order>;
   getOrder(id: string): Promise<Order>;
   payOrder(id: string, body: { allergenAck: true }): Promise<PayInfo>;
   releaseHold(id: string): Promise<void>;
@@ -196,6 +198,8 @@ export const httpApi: Api = {
 
   reserve: async (dropId, quantity = 1) => (await request<{ order: Order }>("POST", "/orders", { dropId, quantity })).order,
   changeQuantity: async (orderId, quantity) => (await request<{ order: Order }>("PATCH", `/orders/${orderId}/quantity`, { quantity })).order,
+  changeItemQuantity: async (orderId, dropId, quantity) =>
+    (await request<{ order: Order }>("PATCH", `/orders/${orderId}/items/${dropId}`, { quantity })).order,
   getOrder: async (id) => (await request<{ order: Order }>("GET", `/orders/${id}`)).order,
   payOrder: (id, body) => request("POST", `/orders/${id}/pay`, body),
   releaseHold: async (id) => {

@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, gt, gte, ilike, inArray, isNull, lt, ne, or, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { areas, brands, drops, listings, memberships, orders, outlets, users } from '../../db/schema.js';
+import { areas, brands, drops, listings, memberships, orderItems, orders, outlets, users } from '../../db/schema.js';
 import { ApiError } from '../../lib/errors.js';
 import { serviceDate } from '../../lib/time.js';
 import { getOutletStats } from './support.js';
@@ -230,19 +230,21 @@ function dropView(d: typeof drops.$inferSelect): InventoryRow['drop'] {
 
 async function orderCounts(dropIds: string[]): Promise<Map<string, OrderCounts>> {
   if (dropIds.length === 0) return new Map();
+  // Bags per drop from the order lines: one order can hold several kinds, and a line can be cancelled alone.
+  const live = sql`${orderItems.status} = 'active'`;
   const counts = await db
     .select({
-      dropId: orders.dropId,
-      // Bags, not orders: one order can hold several.
-      paid: sql<number>`coalesce(sum(${orders.quantity}) FILTER (WHERE ${orders.status} = 'paid'), 0)::int`,
-      collected: sql<number>`coalesce(sum(${orders.quantity}) FILTER (WHERE ${orders.status} = 'collected'), 0)::int`,
-      noShow: sql<number>`coalesce(sum(${orders.quantity}) FILTER (WHERE ${orders.status} = 'no_show'), 0)::int`,
-      cancelled: sql<number>`coalesce(sum(${orders.quantity}) FILTER (WHERE ${orders.status} = 'cancelled'), 0)::int`,
-      soldPaise: sql<number>`coalesce(sum(${orders.pricePaise}) FILTER (WHERE ${orders.status} IN ('paid', 'collected', 'no_show')), 0)::int`,
+      dropId: orderItems.dropId,
+      paid: sql<number>`coalesce(sum(${orderItems.quantity}) FILTER (WHERE ${live} AND ${orders.status} = 'paid'), 0)::int`,
+      collected: sql<number>`coalesce(sum(${orderItems.quantity}) FILTER (WHERE ${live} AND ${orders.status} = 'collected'), 0)::int`,
+      noShow: sql<number>`coalesce(sum(${orderItems.quantity}) FILTER (WHERE ${live} AND ${orders.status} = 'no_show'), 0)::int`,
+      cancelled: sql<number>`coalesce(sum(${orderItems.quantity}) FILTER (WHERE NOT ${live} OR ${orders.status} = 'cancelled'), 0)::int`,
+      soldPaise: sql<number>`coalesce(sum(${orderItems.quantity} * ${orderItems.unitPricePaise}) FILTER (WHERE ${live} AND ${orders.status} IN ('paid', 'collected', 'no_show')), 0)::int`,
     })
-    .from(orders)
-    .where(inArray(orders.dropId, dropIds))
-    .groupBy(orders.dropId);
+    .from(orderItems)
+    .innerJoin(orders, eq(orders.id, orderItems.orderId))
+    .where(inArray(orderItems.dropId, dropIds))
+    .groupBy(orderItems.dropId);
   return new Map(counts.map(({ dropId, ...c }) => [dropId, c]));
 }
 

@@ -1,7 +1,7 @@
-import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, ne } from 'drizzle-orm';
 import { toIso as iso } from '../../lib/time.js';
 import type { Tx } from '../../db/client.js';
-import { areas, brands, drops, follows, memberships, orders, outlets, payments, refunds, users } from '../../db/schema.js';
+import { areas, brands, drops, follows, memberships, orderItems, orders, outlets, payments, refunds, users } from '../../db/schema.js';
 import { env } from '../../lib/env.js';
 import { enqueueMany, type NewNotification } from './enqueue.js';
 import type { TemplateName, Vars } from './templates.js';
@@ -98,25 +98,29 @@ async function orderContext(tx: Tx, orderId: string): Promise<OrderContext | nul
       pricePaise: orders.pricePaise,
       phone: users.phone,
       userName: users.name,
-      item: drops.name,
-      quantity: orders.quantity,
-      startAt: drops.pickupStartAt,
-      endAt: drops.pickupEndAt,
+      startAt: orders.pickupStartAt,
+      endAt: orders.pickupEndAt,
       outletId: orders.outletId,
     })
     .from(orders)
-    .innerJoin(drops, eq(drops.id, orders.dropId))
     .innerJoin(users, eq(users.id, orders.userId))
     .where(eq(orders.id, orderId));
   if (!r) return null;
   const outlet = await outletInfo(tx, r.outletId);
+  // "2 × Bread bag, Cake box": every kind of bag still in the order.
+  const lines = await tx
+    .select({ name: drops.name, quantity: orderItems.quantity })
+    .from(orderItems)
+    .innerJoin(drops, eq(drops.id, orderItems.dropId))
+    .where(and(eq(orderItems.orderId, orderId), eq(orderItems.status, 'active')))
+    .orderBy(asc(orderItems.createdAt), asc(orderItems.id));
   return {
     orderId: r.orderId,
     code: r.code,
     pricePaise: r.pricePaise,
     phone: r.phone,
     name: firstName(r.userName),
-    item: r.quantity > 1 ? `${r.quantity} × ${r.item}` : r.item,
+    item: lines.map((l) => (l.quantity > 1 ? `${l.quantity} × ${l.name}` : l.name)).join(', '),
     startAt: iso(r.startAt),
     endAt: iso(r.endAt),
     vendor: outlet.vendor,
@@ -180,6 +184,27 @@ export async function queueVendorCancelled(tx: Tx, orderId: string, reason: stri
         vendor: o.vendor,
         reason: CANCEL_REASONS[reason] ?? 'a problem at their end',
         amountPaise: Math.max(refundPaise, 0),
+      },
+    },
+  ]);
+}
+
+/** One line of a paid order was cancelled and refunded; the rest of the order goes ahead. */
+export async function queueItemCancelled(tx: Tx, orderId: string, itemId: string, item: string, reason: string, refundPaise: number): Promise<void> {
+  const o = await orderContext(tx, orderId);
+  if (!o) return;
+  await enqueueMany(tx, [
+    {
+      dedupeKey: `cancel-item:${itemId}`,
+      phone: o.phone,
+      template: 'item_cancelled',
+      variables: {
+        name: o.name,
+        vendor: o.vendor,
+        item,
+        reason: CANCEL_REASONS[reason] ?? 'a problem at their end',
+        amountPaise: refundPaise,
+        code: o.code ?? '',
       },
     },
   ]);

@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { ErrorState, Skeleton, SlowBanner } from "@/components/ui";
 import { codeError, OrderList, VendorShell } from "@/components/vendor";
 import { api, errorMessage, type Order, type VendorOutlet } from "@/lib/api";
+import { bagsText } from "@/lib/format";
 import { useDebounced, useQuery } from "@/lib/hooks";
 
 function Counter({ outlet }: { outlet: VendorOutlet }) {
@@ -65,7 +66,7 @@ function Counter({ outlet }: { outlet: VendorOutlet }) {
             <strong className="block text-sm font-medium">
               Valid · {done.quantity > 1 ? `hand over ${done.quantity} bags` : "hand it over"}
             </strong>
-            {done.name} × {done.quantity} · #{done.number}
+            {bagsText(done.items)} · #{done.number}
           </div>
         )}
         {problem && (

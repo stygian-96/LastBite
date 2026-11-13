@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { db } from '../../src/db/client.js';
-import { areas, brands, drops, listings, orders, outlets, payments, payoutAccounts, users } from '../../src/db/schema.js';
+import { areas, brands, drops, listings, orderItems, orders, outlets, payments, payoutAccounts, users } from '../../src/db/schema.js';
 
 type Overrides<T extends { $inferInsert: unknown }> = Partial<T['$inferInsert']>;
 
@@ -143,7 +143,8 @@ export async function makeOrder(o: Overrides<typeof orders> = {}) {
   const pricePaise = o.pricePaise ?? drop?.pricePaise ?? 10000;
   const commissionBps = o.commissionBps ?? 2000;
   const [outlet] = await db.select({ payoutAccountId: outlets.payoutAccountId }).from(outlets).where(eq(outlets.id, outletId));
-  return insertOne(
+  const [window] = await db.select({ start: drops.pickupStartAt, end: drops.pickupEndAt }).from(drops).where(eq(drops.id, dropId));
+  const order = await insertOne(
     db
       .insert(orders)
       .values({
@@ -156,10 +157,20 @@ export async function makeOrder(o: Overrides<typeof orders> = {}) {
         commissionPaise: Math.round((pricePaise * commissionBps) / 10000),
         payoutAccountId: outlet?.payoutAccountId,
         holdExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        pickupStartAt: window?.start ?? '2026-11-02T19:00:00+05:30',
+        pickupEndAt: window?.end ?? '2026-11-02T21:00:00+05:30',
         ...o,
       })
       .returning(),
   );
+  // Every order has its lines; a test-made one has the single line its columns describe.
+  await db.insert(orderItems).values({
+    orderId: order.id,
+    dropId: order.dropId,
+    quantity: order.quantity,
+    unitPricePaise: Math.max(1, Math.round(order.pricePaise / order.quantity)),
+  });
+  return order;
 }
 
 export async function makePayment(o: Overrides<typeof payments> = {}) {
@@ -194,4 +205,23 @@ export async function makePaidOrder(o: Overrides<typeof orders> = {}) {
     amountPaise: order.pricePaise,
   });
   return order;
+}
+
+/**
+ * Inserts many orders at once, each with its pickup window taken from its drop and the single line
+ * its columns describe, as a real reserve would leave them.
+ */
+export async function insertOrders(values: Omit<typeof orders.$inferInsert, 'pickupStartAt' | 'pickupEndAt'>[]) {
+  const dropIds = [...new Set(values.map((v) => v.dropId))];
+  const windows = new Map(
+    (await db.select({ id: drops.id, start: drops.pickupStartAt, end: drops.pickupEndAt }).from(drops)).filter((d) => dropIds.includes(d.id)).map((d) => [d.id, d]),
+  );
+  const rows = await db
+    .insert(orders)
+    .values(values.map((v) => ({ ...v, pickupStartAt: windows.get(v.dropId)!.start, pickupEndAt: windows.get(v.dropId)!.end })))
+    .returning();
+  await db.insert(orderItems).values(
+    rows.map((o) => ({ orderId: o.id, dropId: o.dropId, quantity: o.quantity, unitPricePaise: Math.max(1, Math.round(o.pricePaise / o.quantity)) })),
+  );
+  return rows;
 }

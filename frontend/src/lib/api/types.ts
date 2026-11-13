@@ -80,10 +80,32 @@ export type OutletPage = {
 
 export type Refund = { status: "pending" | "processed" | "failed"; amountPaise: number };
 
+/** One kind of bag in an order. A cancelled line was taken off by the vendor and refunded on its own. */
+export type OrderLine = {
+  dropId: string;
+  name: string;
+  type: ListingType;
+  diet: Diet;
+  allergens: string[];
+  quantity: number;
+  unitPricePaise: number;
+  /** The value of one bag. */
+  valuePaise: number;
+  pickupStartAt: string;
+  pickupEndAt: string;
+  status: "active" | "cancelled";
+  /** While on hold, the most this line can be changed to. */
+  maxQuantity: number;
+};
+
 export type Order = {
   id: string;
   number: string; // "SJ-20481"
   status: OrderStatus;
+  /** Every kind of bag in the order. name, type and diet below describe the first. */
+  items: OrderLine[];
+  /** What all the active bags are worth together. */
+  totalValuePaise: number;
   /** Bags in this order. */
   quantity: number;
   /** The order total: unitPricePaise × quantity. */
@@ -295,6 +317,8 @@ export type VendorOrder = {
   customerLabel: string;
   /** Shown to staff, to match the code the customer holds up. */
   pickupCode: string | null;
+  /** Every kind of bag to hand over, and any the vendor took off. */
+  items: { name: string; quantity: number; status: "active" | "cancelled" }[];
   dropName: string;
   quantity: number;
   pricePaise: number;

@@ -63,7 +63,7 @@ type DropRow = Omit<Drop, "brandName" | "branchName" | "area" | "city" | "brandS
 
 type OrderRow = Omit<
   Order,
-  "brandName" | "branchName" | "address" | "mapsUrl" | "pickupInstructions" | "city" | "brandSlug" | "outletSlug" | "quantity" | "unitPricePaise" | "maxQuantity"
+  "brandName" | "branchName" | "address" | "mapsUrl" | "pickupInstructions" | "city" | "brandSlug" | "outletSlug" | "quantity" | "unitPricePaise" | "maxQuantity" | "items" | "totalValuePaise"
 > & {
   /** Seeded rows have none, meaning one bag. */
   quantity?: number;
@@ -729,11 +729,29 @@ function orderView(db: Db, row: OrderRow): Order {
   const o = outletOf(db, outletId);
   const quantity = row.quantity ?? 1;
   const drop = db.drops.find((d) => d.id === dropId);
-  return {
-    ...rest,
+  const maxQuantity = row.status === "held" && drop ? Math.min(capOf(db, drop), drop.remaining + quantity) : quantity;
+  // The mock keeps one kind of bag per order.
+  const line = {
+    dropId,
+    name: row.name,
+    type: row.type,
+    diet: row.diet,
+    allergens: row.allergens,
     quantity,
     unitPricePaise: row.pricePaise / quantity,
-    maxQuantity: row.status === "held" && drop ? Math.min(capOf(db, drop), drop.remaining + quantity) : quantity,
+    valuePaise: row.valuePaise,
+    pickupStartAt: row.pickupStartAt,
+    pickupEndAt: row.pickupEndAt,
+    status: "active" as const,
+    maxQuantity,
+  };
+  return {
+    ...rest,
+    items: [line],
+    totalValuePaise: row.valuePaise * quantity,
+    quantity,
+    unitPricePaise: row.pricePaise / quantity,
+    maxQuantity,
     brandName: o.brandName,
     branchName: o.branchName,
     address: o.address,
@@ -1039,6 +1057,12 @@ export const mockApi: Api = {
     await wait();
     const db = load();
     return orderView(db, orderRow(db, id));
+  },
+
+  async changeItemQuantity(id, dropId, quantity) {
+    if (orderRow(load(), id).dropId !== dropId) fail("not_found", "That bag isn’t in this order", 404);
+    if (quantity === 0) fail("last_item", "This is the only bag in the order. Cancel the order instead", 409);
+    return mockApi.changeQuantity(id, quantity);
   },
 
   async changeQuantity(id, quantity) {
@@ -1479,6 +1503,7 @@ export const mockApi: Api = {
           status: o.status as VendorOrder["status"],
           customerLabel: o.customerLabel || "Customer",
           pickupCode: o.pickupCode,
+          items: [{ name: o.name, quantity: o.quantity ?? 1, status: "active" as const }],
           dropName: o.name,
           quantity: o.quantity ?? 1,
           pricePaise: o.pricePaise,

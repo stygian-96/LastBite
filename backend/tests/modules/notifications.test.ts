@@ -126,6 +126,7 @@ describe('templates', () => {
       pickupEndAt: '2026-11-02T16:00:00Z',
     },
     vendor_cancelled: { name: 'Priya', vendor: 'Kaapi Corner Koramangala', reason: 'they ran out', amountPaise: 12900 },
+    item_cancelled: { name: 'Priya', vendor: 'Kaapi Corner Koramangala', item: '2 × Cake slice box', reason: 'they ran out', amountPaise: 12900, code: 'K472' },
     refund_issued: { name: 'Priya', amountPaise: 12900, method: 'upi', ref: 'RF-88213AB1' },
     late_payment_refunded: { name: 'Priya', vendor: 'Kaapi Corner Koramangala', amountPaise: 12900 },
     application_approved: {

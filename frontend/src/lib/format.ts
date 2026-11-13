@@ -111,3 +111,11 @@ export function hoursToday(hours: Partial<Record<(typeof DAY_KEYS)[number], stri
   if (!slots?.length) return null;
   return slots.map(([open, close]) => `${hourText(open)}–${hourText(close)}`).join(", ");
 }
+
+/** "2 × Bread bag, Cake box": the bags still in an order, leaving out any the vendor took off. */
+export function bagsText(items: { name: string; quantity: number; status?: string }[]): string {
+  return items
+    .filter((l) => l.status !== "cancelled")
+    .map((l) => (l.quantity > 1 ? `${l.quantity} × ${l.name}` : l.name))
+    .join(", ");
+}

@@ -1,6 +1,6 @@
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { db, withTx } from '../../db/client.js';
-import { drops, orders } from '../../db/schema.js';
+import { orders } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { ApiError } from '../../lib/errors.js';
 import { requireOutlet } from '../auth/access.js';
@@ -18,9 +18,8 @@ export async function markNoShow(staffId: string, orderId: string, now: Date): P
 
   await withTx(async (tx) => {
     const [order] = await tx
-      .select({ status: orders.status, pickupEndAt: drops.pickupEndAt })
+      .select({ status: orders.status, pickupEndAt: orders.pickupEndAt })
       .from(orders)
-      .innerJoin(drops, eq(drops.id, orders.dropId))
       .where(eq(orders.id, orderId))
       .for('update', { of: orders });
     if (order?.status !== 'paid') throw new ApiError('not_paid', 409, 'Only a paid order can be marked no-show');
@@ -40,14 +39,13 @@ export async function autoMarkNoShows(now: Date): Promise<number> {
       const due = await tx
         .select({ id: orders.id })
         .from(orders)
-        .innerJoin(drops, eq(drops.id, orders.dropId))
         .where(
           and(
             eq(orders.status, 'paid'),
-            sql`${drops.pickupEndAt} + make_interval(mins => ${NO_SHOW_GRACE_MINUTES}) < ${now.toISOString()}::timestamptz`,
+            sql`${orders.pickupEndAt} + make_interval(mins => ${NO_SHOW_GRACE_MINUTES}) < ${now.toISOString()}::timestamptz`,
           ),
         )
-        .orderBy(asc(drops.pickupEndAt), asc(orders.id))
+        .orderBy(asc(orders.pickupEndAt), asc(orders.id))
         .limit(BATCH_SIZE)
         .for('update', { of: orders, skipLocked: true });
       for (const { id } of due) {

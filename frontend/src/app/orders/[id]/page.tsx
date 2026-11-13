@@ -6,7 +6,7 @@ import { bagKind, CustomerShell } from "@/components/customer";
 import { Illo } from "@/components/Illo";
 import { ErrorState, ExternalButton, LinkButton, Notice, PageSkeleton, TopBar } from "@/components/ui";
 import { api, errorMessage, type Order } from "@/lib/api";
-import { rupees, shortName, time, timeRange, toDate } from "@/lib/format";
+import { bagsText, rupees, shortName, time, timeRange, toDate } from "@/lib/format";
 import { useNow, useQuery } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 import { readJson, writeJson } from "@/lib/storage";
@@ -66,7 +66,7 @@ function PickupCode({ order, offline }: { order: Order; offline: boolean }) {
           <span className="tabular text-[92px] font-black leading-none tracking-[0.04em]">{order.pickupCode}</span>
           <span className="text-center text-base font-medium">
             {name ? `${name} · ` : ""}
-            {order.name} × {order.quantity}
+            {bagsText(order.items)}
           </span>
         </div>
         <div className="grid grid-cols-2 gap-2.5">
@@ -127,7 +127,7 @@ function OrderState({ order }: { order: Order }) {
     return (
       <Notice big={order.pickupCode ?? "✓"} band="collected" tone="ok" title="You picked this up">
         <p className="text-[13px] leading-normal text-body">
-          {order.name} from {order.brandName}. You saved {rupees(order.valuePaise * order.quantity - order.pricePaise)}.
+          {bagsText(order.items)} from {order.brandName}. You saved {rupees(order.totalValuePaise - order.pricePaise)}.
         </p>
         <LinkButton href="/browse" size="md">
           See tonight’s bags

@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Chip, ErrorState, LinkButton, Logo, PageSkeleton, Sheet, StatusChip } from "@/components/ui";
 import { api, errorCode, errorDetails, errorMessage, type CancelReason, type VendorOrder, type VendorOutlet } from "@/lib/api";
-import { phoneDisplay, rupees, time } from "@/lib/format";
+import { bagsText, phoneDisplay, rupees, time } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 import { readJson, writeJson } from "@/lib/storage";
@@ -306,7 +306,7 @@ export function OrderList({ orders, onChanged }: { orders: VendorOrder[]; onChan
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span className="text-[15px] font-medium">{order.customerLabel}</span>
                 <span className="truncate text-xs text-muted">
-                  {order.dropName} × {order.quantity > 1 ? <strong className="font-bold text-ink">{order.quantity}</strong> : 1} · #{order.number}
+                  {bagsText(order.items)} · #{order.number}
                 </span>
               </span>
               <StatusChip tone={status.tone}>

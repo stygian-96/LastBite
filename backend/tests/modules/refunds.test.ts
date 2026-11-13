@@ -13,7 +13,7 @@ import { handleWebhook } from '../../src/modules/payments/webhook.js';
 import { cancelDrop, cancelOrder } from '../../src/modules/refunds/cancel.js';
 import { processRefunds } from '../../src/modules/refunds/process.js';
 import { app } from '../../src/app.js';
-import { makeDrop, makeLiveOutlet, makePayment, makeUser } from '../helpers/factories.js';
+import { insertOrders, makeDrop, makeLiveOutlet, makePayment, makeUser } from '../helpers/factories.js';
 import { getDropRow, getOrderRow, refundsFor, resetDb } from '../helpers/db.js';
 
 // 15:30 IST on 2026-11-02. Default drops stop selling at 20:45 IST.
@@ -105,9 +105,7 @@ const earlierRefund = (orderId: string, paymentId: string, amountPaise: number, 
 /** Many refunds on cancelled orders, unsent unless the overrides say otherwise. */
 async function manyRefunds(count: number, prefix: string, o: Partial<typeof refunds.$inferInsert> = {}) {
   const drop = await makeDrop({ quantity: count + 5, reservedCount: count + 5 });
-  const rows = await db
-    .insert(orders)
-    .values(
+  const rows = await insertOrders(
       Array.from({ length: count }, (_, i) => ({
         anonId: `${prefix}${i}`,
         status: 'cancelled',
@@ -119,8 +117,7 @@ async function manyRefunds(count: number, prefix: string, o: Partial<typeof refu
         commissionPaise: 2000,
         holdExpiresAt: now.toISOString(),
       })),
-    )
-    .returning({ id: orders.id });
+    );
   const paid = await db
     .insert(payments)
     .values(
@@ -574,9 +571,11 @@ describe('cancel against the other writers', () => {
       const cancel = cancelDrop(owner.id, drop.id, 'ran_out', now);
       await lockWaiters(1);
       await client.query(
-        `INSERT INTO orders (user_id, drop_id, outlet_id, service_date, price_paise, commission_bps,
-                             commission_paise, hold_expires_at)
-         VALUES ($1, $2, $3, $4, 1, 1, 1, $5)`,
+        `WITH o AS (INSERT INTO orders (user_id, drop_id, outlet_id, service_date, price_paise, commission_bps,
+                             commission_paise, hold_expires_at, pickup_start_at, pickup_end_at)
+         SELECT $1, $2, $3, $4, 1, 1, 1, $5, pickup_start_at, pickup_end_at FROM drops WHERE id = $2
+         RETURNING id, drop_id)
+         INSERT INTO order_items (order_id, drop_id, quantity, unit_price_paise) SELECT id, drop_id, 1, 1 FROM o`,
         [newcomer.id, drop.id, drop.outletId, drop.serviceDate, later.toISOString()],
       );
       await client.query('COMMIT');
@@ -633,9 +632,11 @@ describe('cancel against the other writers', () => {
       // A cancel that had changed the order first would block this insert while waiting on the drop.
       await expect(
         client.query(
-          `INSERT INTO orders (user_id, drop_id, outlet_id, service_date, price_paise, commission_bps,
-                               commission_paise, hold_expires_at)
-           VALUES ($1, $2, $3, $4, 1, 1, 1, $5)`,
+          `WITH o AS (INSERT INTO orders (user_id, drop_id, outlet_id, service_date, price_paise, commission_bps,
+                               commission_paise, hold_expires_at, pickup_start_at, pickup_end_at)
+           SELECT $1, $2, $3, $4, 1, 1, 1, $5, pickup_start_at, pickup_end_at FROM drops WHERE id = $2
+           RETURNING id, drop_id)
+           INSERT INTO order_items (order_id, drop_id, quantity, unit_price_paise) SELECT id, drop_id, 1, 1 FROM o`,
           [user.id, drop.id, drop.outletId, drop.serviceDate, later.toISOString()],
         ),
       ).rejects.toThrow(/one_order_per_outlet_night/);

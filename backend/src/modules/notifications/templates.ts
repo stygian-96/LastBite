@@ -4,6 +4,7 @@ export type TemplateName =
   | 'order_confirmed'
   | 'pickup_reminder'
   | 'vendor_cancelled'
+  | 'item_cancelled'
   | 'refund_issued'
   | 'late_payment_refunded'
   | 'application_approved'
@@ -99,6 +100,14 @@ export const TEMPLATES: Record<TemplateName, Template> = {
       `${s(v.name)}, your pickup opens at ${time(v.pickupStartAt, true)}.\n\n${s(v.vendor)}, ${s(v.address)}\nCode: *${s(v.code)}*\n\nMissed pickups can’t be refunded, so please go before ${time(v.pickupEndAt, true)}.`,
     sms: (v) =>
       `${brand()}: Pickup opens ${time(v.pickupStartAt, false)} at ${s(v.vendor)}, ${s(v.address)}. Code ${s(v.code)}. Collect by ${time(v.pickupEndAt, false)}; missed pickups are not refunded.`,
+  },
+  item_cancelled: {
+    audience: 'customer',
+    marketing: false,
+    whatsapp: (v) =>
+      `Sorry ${s(v.name)}, ${s(v.vendor)} had to take *${s(v.item)}* off your order tonight (${s(v.reason)}).\n\n` +
+      `Your refund of *₹${rupees(v.amountPaise)}* for it has started automatically. The rest of your order is still on: show code *${s(v.code)}* at the counter.`,
+    sms: (v) => `${brand()}: Rs${rupees(v.amountPaise)} refund started for a bag ${s(v.vendor)} took off your order. The rest is still on, code ${s(v.code)}.`,
   },
   vendor_cancelled: {
     audience: 'customer',

@@ -1,6 +1,6 @@
 import { and, asc, eq, gt, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { withTx } from '../../db/client.js';
-import { drops, listings, orders, outlets, users } from '../../db/schema.js';
+import { listings, orders, outlets, users } from '../../db/schema.js';
 import { addDays, isoWeekday, istMinuteOfDay, serviceDate } from '../../lib/time.js';
 import { enqueueMany, type NewNotification } from './enqueue.js';
 import { firstName, origin, outletInfo, staffOf } from './events.js';
@@ -27,15 +27,14 @@ export function queuePickupReminders(now: Date): Promise<number> {
         orderId: orders.id,
         code: orders.pickupCode,
         outletId: orders.outletId,
-        startAt: drops.pickupStartAt,
-        endAt: drops.pickupEndAt,
+        startAt: orders.pickupStartAt,
+        endAt: orders.pickupEndAt,
         phone: users.phone,
         userName: users.name,
       })
       .from(orders)
-      .innerJoin(drops, eq(drops.id, orders.dropId))
       .innerJoin(users, eq(users.id, orders.userId))
-      .where(and(eq(orders.status, 'paid'), gt(drops.pickupStartAt, from), lte(drops.pickupStartAt, until)));
+      .where(and(eq(orders.status, 'paid'), gt(orders.pickupStartAt, from), lte(orders.pickupStartAt, until)));
 
     const infos = new Map<string, Awaited<ReturnType<typeof outletInfo>>>();
     const list: NewNotification[] = [];

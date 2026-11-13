@@ -2,11 +2,12 @@
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
-import { bagKind, MiniOrderCard, QuantityPicker } from "@/components/customer";
+import Link from "next/link";
+import { outletHref } from "@/components/customer";
 import { PhoneSignIn } from "@/components/signin";
 import { Button, Field, LinkButton, Notice, PageSkeleton, TopBar } from "@/components/ui";
 import { HOLD_SECONDS } from "@/config/brand";
-import { api, errorCode, errorDetails, errorMessage, type VerifyResult } from "@/lib/api";
+import { api, errorCode, errorDetails, errorMessage, type Order, type VerifyResult } from "@/lib/api";
 import { clock, rupees, timeRange } from "@/lib/format";
 import { useQuery, useSecondsLeft } from "@/lib/hooks";
 import { completePayment, isTestPayment } from "@/lib/payment";
@@ -20,6 +21,73 @@ const METHODS = [
 
 const CONFIRM_POLL_MS = 2000;
 const CONFIRM_PATIENCE_MS = 60_000;
+
+const step = "flex size-9 flex-none items-center justify-center rounded-full border-[1.5px] border-line bg-white text-lg font-medium disabled:opacity-40";
+
+/** Every kind of bag in the hold, each with its own count, the total, and a way back for more. */
+function OrderLines({ order, busy, onChange }: { order: Order; busy: boolean; onChange: (dropId: string, quantity: number) => void }) {
+  const lines = order.items.filter((l) => l.status === "active");
+  const more = outletHref(order);
+  return (
+    <section aria-label="Your order" className="flex flex-col gap-3 rounded-[18px] p-3.5 shadow-card">
+      <span className="text-[13px] text-muted">
+        {order.brandName} · {order.branchName}
+      </span>
+      <ul className="flex flex-col divide-y divide-[#f0f0f0]">
+        {lines.map((line) => (
+          <li key={line.dropId} className="flex flex-col gap-2 py-2.5 first:pt-0">
+            <div className="flex items-start gap-3">
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <strong className="text-[15px] font-medium">{line.name}</strong>
+                <span className="text-xs text-muted">
+                  {rupees(line.unitPricePaise)} each · pickup {timeRange(line.pickupStartAt, line.pickupEndAt)}
+                </span>
+              </span>
+              <span className="tabular text-[15px] font-medium">{rupees(line.unitPricePaise * line.quantity)}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button type="button" aria-label={`One fewer ${line.name}`} disabled={busy || line.quantity <= 1} onClick={() => onChange(line.dropId, line.quantity - 1)} className={step}>
+                −
+              </button>
+              <span aria-live="polite" className="tabular w-6 text-center font-bold">
+                {line.quantity}
+              </span>
+              <button
+                type="button"
+                aria-label={`One more ${line.name}`}
+                disabled={busy || line.quantity >= line.maxQuantity}
+                onClick={() => onChange(line.dropId, line.quantity + 1)}
+                className={step}
+              >
+                +
+              </button>
+              {line.quantity >= line.maxQuantity && line.maxQuantity > 1 && <span className="text-xs text-muted">Most you can take</span>}
+              {lines.length > 1 && (
+                <button type="button" disabled={busy} onClick={() => onChange(line.dropId, 0)} className="ml-auto min-h-9 text-[13px] font-medium text-danger underline">
+                  Remove
+                </button>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <div className="flex items-baseline justify-between border-t border-[#f0f0f0] pt-2.5">
+        <span className="text-sm font-medium">
+          {order.quantity} {order.quantity === 1 ? "bag" : "bags"}
+        </span>
+        <span className="tabular flex items-baseline gap-2">
+          <s className="text-xs text-faint">{rupees(order.totalValuePaise)}</s>
+          <span className="text-[17px] font-bold">{rupees(order.pricePaise)}</span>
+        </span>
+      </div>
+      {more && (
+        <Link href={more} className="self-start text-[13px] font-medium text-ink underline">
+          + Add another bag from {order.brandName}
+        </Link>
+      )}
+    </section>
+  );
+}
 
 export default function Checkout() {
   const { id } = useParams<{ id: string }>();
@@ -78,11 +146,11 @@ export default function Checkout() {
     }
   }
 
-  async function changeQuantity(quantity: number) {
+  async function changeLine(dropId: string, quantity: number) {
     setChanging(true);
     setQuantityError(null);
     try {
-      order.setData(await api.changeQuantity(id, quantity));
+      order.setData(await api.changeItemQuantity(id, dropId, quantity));
     } catch (err) {
       if (errorCode(err) === "hold_not_active") setHoldEnded(true);
       else setQuantityError(errorMessage(err));
@@ -210,14 +278,7 @@ export default function Checkout() {
           </div>
         </section>
 
-        <MiniOrderCard
-          kind={bagKind(item)}
-          title={`${item.name} × ${item.quantity}`}
-          sub={`${item.brandName} · ${item.branchName}${item.quantity > 1 ? ` · ${rupees(item.unitPricePaise)} each` : ""}`}
-          price={item.pricePaise}
-          was={item.valuePaise * item.quantity}
-        />
-        <QuantityPicker value={item.quantity} max={item.maxQuantity} onChange={changeQuantity} disabled={changing || busy} />
+        <OrderLines order={item} busy={changing || busy} onChange={changeLine} />
         {quantityError && (
           <p role="alert" className="text-[13px] text-danger">
             {quantityError}

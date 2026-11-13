@@ -356,6 +356,8 @@ export const orders = pgTable("orders", {
 	payoutId: uuid("payout_id"),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	payoutAccountId: uuid("payout_account_id"),
+	pickupStartAt: timestamp("pickup_start_at", { withTimezone: true, mode: 'string' }).notNull(),
+	pickupEndAt: timestamp("pickup_end_at", { withTimezone: true, mode: 'string' }).notNull(),
 }, (table) => [
 	index("orders_unpaid_by_account_idx").using("btree", table.payoutAccountId.asc().nullsLast().op("uuid_ops")).where(sql`(payout_id IS NULL)`),
 	uniqueIndex("one_order_per_outlet_night").using("btree", table.userId.asc().nullsLast().op("date_ops"), table.outletId.asc().nullsLast().op("uuid_ops"), table.serviceDate.asc().nullsLast().op("uuid_ops")).where(sql`((user_id IS NOT NULL) AND (status = ANY (ARRAY['held'::text, 'paid'::text, 'collected'::text, 'no_show'::text])))`),
@@ -562,6 +564,7 @@ export const refunds = pgTable("refunds", {
 	lastCheckedAt: timestamp("last_checked_at", { withTimezone: true, mode: 'string' }),
 	reverseTransfer: boolean("reverse_transfer").default(false).notNull(),
 	retryAt: timestamp("retry_at", { withTimezone: true, mode: 'string' }),
+	orderItemId: uuid("order_item_id"),
 }, (table) => [
 	index("refunds_to_send_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((status = 'pending'::text) AND (razorpay_refund_id IS NULL))`),
 	index("refunds_to_check_idx").using("btree", table.lastCheckedAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((status = 'pending'::text) AND (razorpay_refund_id IS NOT NULL))`),
@@ -585,10 +588,12 @@ export const refunds = pgTable("refunds", {
 			foreignColumns: [payouts.id],
 			name: "refunds_adjusted_payout_id_fkey"
 		}),
-	unique("refunds_payment_id_reason_key").on(table.paymentId, table.reason),
+	uniqueIndex("refunds_payment_id_reason_key").using("btree", table.paymentId.asc().nullsLast().op("uuid_ops"), table.reason.asc().nullsLast().op("text_ops")).where(sql`(order_item_id IS NULL)`),
+	uniqueIndex("refunds_order_item_id_key").using("btree", table.orderItemId.asc().nullsLast().op("uuid_ops")).where(sql`(order_item_id IS NOT NULL)`),
 	unique("refunds_razorpay_refund_id_key").on(table.razorpayRefundId),
 	check("refunds_amount_paise_check", sql`amount_paise > 0`),
-	check("refunds_reason_check", sql`reason = ANY (ARRAY['vendor_cancelled'::text, 'late_payment'::text, 'duplicate_payment'::text, 'issue_resolution'::text])`),
+	check("refunds_reason_check", sql`reason = ANY (ARRAY['vendor_cancelled'::text, 'late_payment'::text, 'duplicate_payment'::text, 'issue_resolution'::text, 'item_cancelled'::text])`),
+	check("refunds_item_reason_check", sql`(reason = 'item_cancelled'::text) = (order_item_id IS NOT NULL)`),
 	check("refunds_status_check", sql`status = ANY (ARRAY['pending'::text, 'processed'::text, 'failed'::text])`),
 	check("refunds_charged_to_check", sql`charged_to = ANY (ARRAY['vendor'::text, 'platform'::text])`),
 ]);
@@ -623,4 +628,31 @@ export const rateLimits = pgTable("rate_limits", {
 	count: integer().default(0).notNull(),
 }, (table) => [
 	primaryKey({ columns: [table.key, table.windowStart], name: "rate_limits_pkey"}),
+]);
+
+export const orderItems = pgTable("order_items", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	orderId: uuid("order_id").notNull(),
+	dropId: uuid("drop_id").notNull(),
+	quantity: smallint().notNull(),
+	unitPricePaise: integer("unit_price_paise").notNull(),
+	status: text().default('active').notNull(),
+	cancelledAt: timestamp("cancelled_at", { withTimezone: true, mode: 'string' }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("order_items_drop_id_idx").using("btree", table.dropId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.orderId],
+			foreignColumns: [orders.id],
+			name: "order_items_order_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.dropId],
+			foreignColumns: [drops.id],
+			name: "order_items_drop_id_fkey"
+		}),
+	unique("order_items_order_id_drop_id_key").on(table.orderId, table.dropId),
+	check("order_items_quantity_check", sql`(quantity >= 1) AND (quantity <= 10)`),
+	check("order_items_unit_price_paise_check", sql`unit_price_paise > 0`),
+	check("order_items_status_check", sql`status = ANY (ARRAY['active'::text, 'cancelled'::text])`),
 ]);

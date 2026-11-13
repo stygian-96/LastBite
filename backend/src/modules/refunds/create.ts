@@ -13,7 +13,9 @@ export type NewRefund = {
   orderId: string;
   paymentId: string;
   amountPaise: number;
-  reason: 'vendor_cancelled' | 'late_payment' | 'duplicate_payment' | 'issue_resolution';
+  reason: 'vendor_cancelled' | 'late_payment' | 'duplicate_payment' | 'issue_resolution' | 'item_cancelled';
+  /** For item_cancelled: the line refunded. Each line is refunded at most once. */
+  orderItemId?: string;
   chargedTo: 'vendor' | 'platform';
   createdBy?: string;
   /**
@@ -33,7 +35,11 @@ export async function createRefund(tx: Tx, r: NewRefund): Promise<string | undef
   const [created] = await tx
     .insert(refunds)
     .values(r)
-    .onConflictDoNothing({ target: [refunds.paymentId, refunds.reason] })
+    .onConflictDoNothing(
+      r.orderItemId
+        ? { target: refunds.orderItemId, where: sql`${refunds.orderItemId} IS NOT NULL` }
+        : { target: [refunds.paymentId, refunds.reason], where: sql`${refunds.orderItemId} IS NULL` },
+    )
     .returning({ id: refunds.id });
   return created?.id;
 }

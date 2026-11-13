@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { drops, orders, users } from '../../db/schema.js';
+import { drops, orderItems, orders, users } from '../../db/schema.js';
 import { parseInput } from '../../lib/errors.js';
 import { serviceDate } from '../../lib/time.js';
 import { NO_SHOW_GRACE_MINUTES, requirePickupStaff } from './collect.js';
@@ -16,6 +16,8 @@ export type VendorOrderRow = {
   status: string;
   pickupCode: string | null;
   quantity: number;
+  /** Every kind of bag to hand over, and any the vendor took off. */
+  items: { name: string; quantity: number; status: string }[];
   customerLabel: string;
   dropName: string;
   pricePaise: number;
@@ -54,7 +56,7 @@ export async function listOutletOrders(
     ? eq(orders.serviceDate, date)
     : or(
         eq(orders.serviceDate, serviceDate(now)),
-        sql`${drops.pickupEndAt} + make_interval(mins => ${NO_SHOW_GRACE_MINUTES}) > ${now.toISOString()}::timestamptz`,
+        sql`${orders.pickupEndAt} + make_interval(mins => ${NO_SHOW_GRACE_MINUTES}) > ${now.toISOString()}::timestamptz`,
       )!;
   const filters = [eq(orders.outletId, outletId), inArray(orders.status, ['paid', 'collected', 'no_show']), day];
   const needle = q?.trim();
@@ -75,18 +77,27 @@ export async function listOutletOrders(
       pickupCode: orders.pickupCode,
       quantity: orders.quantity,
       pricePaise: orders.pricePaise,
-      pickupStartAt: drops.pickupStartAt,
-      pickupEndAt: drops.pickupEndAt,
+      pickupStartAt: orders.pickupStartAt,
+      pickupEndAt: orders.pickupEndAt,
       collectedAt: orders.collectedAt,
     })
     .from(orders)
     .innerJoin(drops, eq(drops.id, orders.dropId))
     .leftJoin(users, eq(users.id, orders.userId))
     .where(and(...filters))
-    .orderBy(asc(drops.pickupEndAt), asc(orders.number));
+    .orderBy(asc(orders.pickupEndAt), asc(orders.number));
+  const lines = rows.length
+    ? await db
+        .select({ orderId: orderItems.orderId, name: drops.name, quantity: orderItems.quantity, status: orderItems.status })
+        .from(orderItems)
+        .innerJoin(drops, eq(drops.id, orderItems.dropId))
+        .where(inArray(orderItems.orderId, rows.map((r) => r.id)))
+        .orderBy(asc(orderItems.createdAt), asc(orderItems.id))
+    : [];
   return rows.map(({ name, number, ...r }) => ({
     ...r,
     number: `SJ-${number.toString()}`,
     customerLabel: customerLabel(name),
+    items: lines.filter((l) => l.orderId === r.id).map((l) => ({ name: l.name, quantity: l.quantity, status: l.status })),
   }));
 }

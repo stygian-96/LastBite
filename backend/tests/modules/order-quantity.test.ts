@@ -93,11 +93,11 @@ describe('reserving several bags', () => {
     expect(await reserveDrop({ dropId: drop.id, userId: user.id, ip: '1.1.1.1' }, now)).toMatchObject({ quantity: 1, pricePaise: 10000 });
   });
 
-  test('still one order per outlet a night', async () => {
-    const { drop, user } = await hold(2);
-    expect(await failure(reserveDrop({ dropId: drop.id, userId: user.id, ip: '1.1.1.1', quantity: 1 }, now))).toMatchObject({
-      code: 'already_ordered',
-    });
+  test('reserving again while holding adds to the same order', async () => {
+    const { drop, user, order } = await hold(2);
+    const again = await reserveDrop({ dropId: drop.id, userId: user.id, ip: '1.1.1.1', quantity: 1 }, now);
+    expect(again).toMatchObject({ id: order.id, quantity: 3, pricePaise: 30000 });
+    expect((await getDropRow(drop.id)).reservedCount).toBe(3);
   });
 
   test('parallel reserves of 3 on 10 bags never oversell', async () => {

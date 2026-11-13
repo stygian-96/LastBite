@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx } from '../../db/client.js';
-import { drops, follows, orders, otpCodes, sessions, users } from '../../db/schema.js';
+import { drops, follows, orderItems, orders, otpCodes, sessions, users } from '../../db/schema.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { cancelPendingFor, scrubPhone } from '../notifications/enqueue.js';
 
@@ -43,12 +43,13 @@ export async function getProfile(userId: string): Promise<Profile> {
 
   const [impact] = await db
     .select({
-      // An order can hold several bags; its price is their total, and a drop's value is per bag.
-      bagsCollected: sql<number>`coalesce(sum(${orders.quantity}), 0)::int`,
-      moneySavedPaise: sql<number>`coalesce(sum(${drops.valuePaise} * ${orders.quantity} - ${orders.pricePaise}), 0)::int`,
+      // Every bag collected, line by line: a line saves its bags' value less what they cost.
+      bagsCollected: sql<number>`coalesce(sum(${orderItems.quantity}), 0)::int`,
+      moneySavedPaise: sql<number>`coalesce(sum(${orderItems.quantity} * (${drops.valuePaise} - ${orderItems.unitPricePaise})), 0)::int`,
     })
     .from(orders)
-    .innerJoin(drops, eq(drops.id, orders.dropId))
+    .innerJoin(orderItems, and(eq(orderItems.orderId, orders.id), eq(orderItems.status, 'active')))
+    .innerJoin(drops, eq(drops.id, orderItems.dropId))
     .where(and(eq(orders.userId, userId), eq(orders.status, 'collected')));
   return { ...user, impact: impact! };
 }

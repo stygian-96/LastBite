@@ -12,7 +12,7 @@ import { expireHolds } from '../../src/modules/orders/expire.js';
 import { attachHolds, releaseHold, releaseStock, reserveDrop } from '../../src/modules/orders/reserve.js';
 import { getOrder } from '../../src/modules/orders/views.js';
 import { app } from '../../src/app.js';
-import { makeDrop, makeLiveOutlet, makeOrder, makePaidOrder, makeUser } from '../helpers/factories.js';
+import { insertOrders, makeDrop, makeLiveOutlet, makeOrder, makePaidOrder, makeUser } from '../helpers/factories.js';
 import { getDropRow, getOrderRow, resetDb } from '../helpers/db.js';
 
 // 15:30 IST on 2026-11-02. Default drops stop selling at 20:45 IST.
@@ -218,13 +218,13 @@ describe('reserveDrop', () => {
     expect((await getDropRow(second.id)).reservedCount).toBe(0);
   });
 
-  test('a customer holding the last bag is shown it rather than sold_out', async () => {
+  test('a customer holding the last bag is told it is gone and pointed at their hold', async () => {
     const user = await makeUser();
     const drop = await makeDrop({ quantity: 1 });
     const held = await reserveDrop({ dropId: drop.id, userId: user.id, ip: '1.1.1.1' }, now);
     expect(await failure(reserveDrop({ dropId: drop.id, userId: user.id, ip: '1.1.1.1' }, now))).toMatchObject({
-      code: 'already_ordered',
-      details: { existingOrderId: held.id },
+      code: 'not_enough_left',
+      details: { remaining: 1, existingOrderId: held.id },
     });
   });
 
@@ -266,7 +266,7 @@ describe('expireHolds', () => {
     const drop = await makeDrop({ quantity: 130 });
     const expired = seconds(now, -120).toISOString();
     await db.update(drops).set({ reservedCount: 130 }).where(eq(drops.id, drop.id));
-    await db.insert(orders).values(
+    await insertOrders(
       Array.from({ length: 130 }, (_, i) => ({
         anonId: `a${i}`,
         dropId: drop.id,
@@ -288,7 +288,7 @@ describe('expireHolds', () => {
     const b = await makeDrop({ quantity: 100, reservedCount: 100 });
     // By expiry: 50 on a, 100 on b, 50 on a. The first batch meets a then b, the second b then a.
     const dropAt = (i: number) => (i < 50 || i >= 150 ? a : b);
-    await db.insert(orders).values(
+    await insertOrders(
       Array.from({ length: 200 }, (_, i) => ({
         anonId: `a${i}`,
         dropId: dropAt(i).id,
@@ -334,9 +334,11 @@ describe('expireHolds', () => {
 
       const insert = await client
         .query(
-          `INSERT INTO orders (user_id, drop_id, outlet_id, service_date, price_paise, commission_bps,
-                               commission_paise, hold_expires_at)
-           VALUES ($1, $2, $3, $4, 1, 1, 1, $5)`,
+          `WITH o AS (INSERT INTO orders (user_id, drop_id, outlet_id, service_date, price_paise, commission_bps,
+                               commission_paise, hold_expires_at, pickup_start_at, pickup_end_at)
+           SELECT $1, $2, $3, $4, 1, 1, 1, $5, pickup_start_at, pickup_end_at FROM drops WHERE id = $2
+           RETURNING id, drop_id)
+           INSERT INTO order_items (order_id, drop_id, quantity, unit_price_paise) SELECT id, drop_id, 1, 1 FROM o`,
           [user.id, second!.id, outlet.id, first!.serviceDate, now.toISOString()],
         )
         .catch((e: { code?: string }) => e.code);

@@ -1,16 +1,38 @@
 import { and, desc, eq, gt, inArray, isNull, not, or, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
-import { brands, drops, listings, orders, outlets, refunds } from '../../db/schema.js';
+import { areas, brands, drops, listings, orderItems, orders, outlets, refunds } from '../../db/schema.js';
 import { ApiError } from '../../lib/errors.js';
 import { toIso } from '../../lib/time.js';
 
 export type RefundSummary = { status: string; amountPaise: number };
+
+/** One kind of bag in an order. A cancelled line was taken off by the vendor and refunded on its own. */
+export type OrderLine = {
+  dropId: string;
+  name: string;
+  type: string;
+  diet: string;
+  allergens: string[];
+  quantity: number;
+  unitPricePaise: number;
+  /** The value of one bag. */
+  valuePaise: number;
+  pickupStartAt: string;
+  pickupEndAt: string;
+  status: 'active' | 'cancelled';
+  /** While on hold, the most this line can be changed to: its listing's limit, or what is left. */
+  maxQuantity: number;
+};
 
 /** What a customer sees of an order. Never carries commission or payout data. */
 export type OrderView = {
   id: string;
   number: string;
   status: string;
+  /** Every kind of bag in the order. The fields below name, type and diet describe the first. */
+  items: OrderLine[];
+  /** What all the active bags are worth together. */
+  totalValuePaise: number;
   /** Bags in this order. */
   quantity: number;
   /** The order total: unitPricePaise × quantity. */
@@ -26,6 +48,10 @@ export type OrderView = {
   allergens: string[];
   brandName: string;
   branchName: string;
+  /** Where the outlet's page is: /{city}/{brandSlug}/{outletSlug}. */
+  city: string | null;
+  brandSlug: string;
+  outletSlug: string;
   address: string | null;
   mapsUrl: string | null;
   pickupInstructions: string | null;
@@ -58,9 +84,12 @@ const columns = {
   type: drops.type,
   diet: drops.diet,
   allergens: drops.allergens,
-  pickupStartAt: drops.pickupStartAt,
-  pickupEndAt: drops.pickupEndAt,
+  pickupStartAt: orders.pickupStartAt,
+  pickupEndAt: orders.pickupEndAt,
   brandName: brands.name,
+  brandSlug: brands.slug,
+  outletSlug: outlets.slug,
+  city: areas.city,
   branchName: outlets.branchName,
   address: outlets.address,
   mapsUrl: outlets.mapsUrl,
@@ -75,7 +104,43 @@ function selectOrders(where: SQL | undefined) {
     .innerJoin(listings, eq(listings.id, drops.listingId))
     .innerJoin(outlets, eq(outlets.id, orders.outletId))
     .innerJoin(brands, eq(brands.id, outlets.brandId))
+    .leftJoin(areas, eq(areas.id, outlets.areaId))
     .where(where);
+}
+
+/** Each order's lines, oldest first. */
+async function linesByOrder(orderIds: string[]): Promise<Map<string, OrderLine[]>> {
+  const map = new Map<string, OrderLine[]>();
+  if (orderIds.length === 0) return map;
+  const rows = await db
+    .select({ item: orderItems, drop: drops, maxPerOrder: listings.maxPerOrder, orderStatus: orders.status })
+    .from(orderItems)
+    .innerJoin(drops, eq(drops.id, orderItems.dropId))
+    .innerJoin(listings, eq(listings.id, drops.listingId))
+    .innerJoin(orders, eq(orders.id, orderItems.orderId))
+    .where(inArray(orderItems.orderId, orderIds))
+    .orderBy(orderItems.createdAt, orderItems.id);
+  for (const { item, drop, maxPerOrder, orderStatus } of rows) {
+    const line: OrderLine = {
+      dropId: item.dropId,
+      name: drop.name,
+      type: drop.type,
+      diet: drop.diet,
+      allergens: drop.allergens.filter((a) => a !== ''),
+      quantity: item.quantity,
+      unitPricePaise: item.unitPricePaise,
+      valuePaise: drop.valuePaise,
+      pickupStartAt: toIso(drop.pickupStartAt),
+      pickupEndAt: toIso(drop.pickupEndAt),
+      status: item.status as OrderLine['status'],
+      maxQuantity:
+        orderStatus === 'held' && item.status === 'active'
+          ? Math.min(maxPerOrder, drop.quantity - drop.reservedCount + item.quantity)
+          : item.quantity,
+    };
+    map.set(item.orderId, [...(map.get(item.orderId) ?? []), line]);
+  }
+  return map;
 }
 
 /** The newest refund of each order. */
@@ -93,11 +158,14 @@ async function refundsByOrder(orderIds: string[]): Promise<Map<string, RefundSum
 
 type Row = Awaited<ReturnType<typeof selectOrders>>[number];
 
-function toView(row: Row, refund: RefundSummary | null): OrderView {
+function toView(row: Row, refund: RefundSummary | null, items: OrderLine[]): OrderView {
+  const active = items.filter((l) => l.status === 'active');
   return {
     id: row.id,
     number: `SJ-${row.number.toString()}`,
     status: row.status,
+    items,
+    totalValuePaise: active.reduce((n, l) => n + l.valuePaise * l.quantity, 0),
     quantity: row.quantity,
     pricePaise: row.pricePaise,
     unitPricePaise: row.pricePaise / row.quantity,
@@ -108,9 +176,13 @@ function toView(row: Row, refund: RefundSummary | null): OrderView {
     name: row.name,
     type: row.type,
     diet: row.diet,
-    allergens: row.allergens.filter((a) => a !== ''),
+    // Anything any bag in the order may contain.
+    allergens: [...new Set(active.flatMap((l) => l.allergens))],
     brandName: row.brandName,
     branchName: row.branchName,
+    city: row.city,
+    brandSlug: row.brandSlug,
+    outletSlug: row.outletSlug,
     address: row.address,
     mapsUrl: row.mapsUrl,
     pickupInstructions: row.pickupInstructions,
@@ -123,8 +195,9 @@ function toView(row: Row, refund: RefundSummary | null): OrderView {
 }
 
 async function toViews(rows: Row[]): Promise<OrderView[]> {
-  const refundMap = await refundsByOrder(rows.map((r) => r.id));
-  return rows.map((r) => toView(r, refundMap.get(r.id) ?? null));
+  const ids = rows.map((r) => r.id);
+  const [refundMap, lineMap] = await Promise.all([refundsByOrder(ids), linesByOrder(ids)]);
+  return rows.map((r) => toView(r, refundMap.get(r.id) ?? null, lineMap.get(r.id) ?? []));
 }
 
 /**
