@@ -1342,7 +1342,8 @@ export const mockApi: Api = {
 
   async getListings(outletId) {
     await wait();
-    return load().listings.filter((l) => l.outletId === outletId && !l.archivedAt);
+    // Inactive ones too, as the backend returns them: the vendor switches them back on from Listings.
+    return load().listings.filter((l) => l.outletId === outletId);
   },
 
   async createListing(outletId, body) {
@@ -1358,7 +1359,10 @@ export const mockApi: Api = {
     await wait();
     const db = load();
     const row = listingRow(db, id);
-    Object.assign(row, patch);
+    const { active, ...fields } = patch;
+    Object.assign(row, fields);
+    if (active === true) row.archivedAt = null;
+    if (active === false && !row.archivedAt) row.archivedAt = new Date().toISOString();
     save(db);
     return row;
   },

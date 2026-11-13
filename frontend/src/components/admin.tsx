@@ -558,7 +558,7 @@ function ListingCard({ listing }: { listing: Listing }) {
     <li className={`flex flex-col gap-1 rounded-2xl border-[1.5px] border-line p-3 ${listing.archivedAt ? "opacity-60" : ""}`}>
       <div className="flex items-start gap-2">
         <strong className="flex-1 text-sm font-medium">{listing.name}</strong>
-        {listing.archivedAt && <StatusChip tone="info">Archived</StatusChip>}
+        {listing.archivedAt && <StatusChip tone="info">Inactive</StatusChip>}
       </div>
       <span className="text-xs text-muted">
         {listing.type === "surprise_bag" ? "Surprise bag" : "Fixed box"} · {listing.diet} · {rupees(listing.pricePaise)} (worth {rupees(listing.valuePaise)})
@@ -637,11 +637,11 @@ function ListingsTab({ listings }: { listings: Listing[] }) {
           Active ({listings.length - archivedCount})
         </Chip>
         <Chip on={archived} onClick={() => setArchived(true)}>
-          Archived ({archivedCount})
+          Inactive ({archivedCount})
         </Chip>
       </div>
       {shown.length === 0 ? (
-        <p className="text-sm text-muted">{needle ? "No listings match." : archived ? "Nothing archived." : "No active listings."}</p>
+        <p className="text-sm text-muted">{needle ? "No listings match." : archived ? "No inactive listings." : "No active listings."}</p>
       ) : (
         <ul className="grid gap-2 lg:grid-cols-2">
           {shown.map((listing) => (

@@ -83,9 +83,30 @@ describe('listings', () => {
     expect(u).toMatchObject({ name: 'Renamed', pricePaise: 12000, valuePaise: 30000 });
     const a = await archiveListing(owner.id, l.id, T0);
     expect(a.archivedAt).not.toBeNull();
-    expect(await failure(updateListing(owner.id, l.id, { name: 'x' }))).toMatchObject({ status: 409 });
+    // An inactive listing can still be edited.
+    expect(await updateListing(owner.id, l.id, { name: 'Still editable' })).toMatchObject({ name: 'Still editable' });
     const actions = (await db.select().from(auditLog)).map((r) => r.action);
     expect(actions).toEqual(expect.arrayContaining(['listing.create', 'listing.update', 'listing.archive']));
+  });
+
+  test('a listing switches off and back on, and only an active one goes on sale', async () => {
+    const { owner, outlet } = await setup();
+    const l = await createListing(owner.id, outlet.id, LISTING);
+    const off = await updateListing(owner.id, l.id, { active: false }, T0);
+    expect(off.archivedAt).not.toBeNull();
+    expect(await failure(publishDrop(owner.id, l.id, 3, T0))).toMatchObject({ code: 'listing_archived', message: expect.stringContaining('inactive') });
+    // Switching off again keeps when it first went off.
+    expect((await updateListing(owner.id, l.id, { active: false }, new Date(T0.getTime() + 60_000))).archivedAt).toBe(off.archivedAt);
+    expect((await updateListing(owner.id, l.id, { active: true }, T0)).archivedAt).toBeNull();
+    expect(await publishDrop(owner.id, l.id, 3, T0)).toMatchObject({ quantity: 3 });
+    expect(await failure(updateListing(owner.id, l.id, { active: 'yes' }))).toMatchObject({ status: 400 });
+  });
+
+  test('a copy keeps the limit per customer and starts active', async () => {
+    const { owner, outlet } = await setup();
+    const l = await createListing(owner.id, outlet.id, { ...LISTING, maxPerOrder: 1 });
+    await updateListing(owner.id, l.id, { active: false }, T0);
+    expect(await copyListing(owner.id, l.id, outlet.id)).toMatchObject({ maxPerOrder: 1, archivedAt: null });
   });
 
   test('counter role cannot edit listings', async () => {

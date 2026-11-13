@@ -56,7 +56,8 @@ const createSchema = z.strictObject({
   photoKey: fields.photoKey.optional(),
   maxPerOrder: fields.maxPerOrder.default(3),
 });
-const patchSchema = z.strictObject(fields).partial();
+// `active` switches a listing on or off for new nights; off is stored as archived_at.
+const patchSchema = z.strictObject({ ...fields, active: z.boolean() }).partial();
 
 /** Callers pass untrusted JSON; the schemas above check it. */
 export type ListingInput = Record<string, unknown>;
@@ -116,7 +117,11 @@ export async function createListing(userId: string, outletId: string, raw: Listi
   });
 }
 
-export async function updateListing(userId: string, listingId: string, raw: ListingPatch): Promise<Listing> {
+/**
+ * Changes a listing, active or not, and switches it on or off. An inactive listing can't go on sale
+ * for a new night; a drop already on sale tonight keeps selling.
+ */
+export async function updateListing(userId: string, listingId: string, raw: ListingPatch, now: Date = new Date()): Promise<Listing> {
   const current = await loadManagedListing(userId, listingId);
   const patch = parseInput(patchSchema, raw);
   if (patch.photoKey && patch.photoKey !== current.photoKey && !patch.photoKey.startsWith(`photos/${userId}/`)) {
@@ -128,12 +133,17 @@ export async function updateListing(userId: string, listingId: string, raw: List
   return withTx(async (tx) => {
     const [locked] = await tx.select().from(listings).where(eq(listings.id, listingId)).for('update');
     if (!locked) throw new ApiError('not_found', 404, 'Listing not found');
-    if (locked.archivedAt) throw new ApiError('archived', 409, 'This listing is archived');
     // Re-check against the locked row in case it changed since the read above.
     assertPrice(patch.pricePaise ?? locked.pricePaise, patch.valuePaise ?? locked.valuePaise);
     assertWindow(patch.pickupStart ?? toHhmm(locked.pickupStart), patch.pickupEnd ?? toHhmm(locked.pickupEnd));
 
-    const set = { ...patch, ...(patch.repeatDays ? { repeatDays: uniqueDays(patch.repeatDays) } : {}) };
+    const { active, ...fields } = patch;
+    const set: Partial<typeof listings.$inferInsert> = {
+      ...fields,
+      ...(fields.repeatDays ? { repeatDays: uniqueDays(fields.repeatDays) } : {}),
+      // Switching on clears archived_at; switching off keeps the first time it went off.
+      ...(active === true ? { archivedAt: null } : active === false && !locked.archivedAt ? { archivedAt: now.toISOString() } : {}),
+    };
     const [row] =
       Object.keys(set).length > 0
         ? await tx.update(listings).set(set).where(eq(listings.id, listingId)).returning()
@@ -149,7 +159,7 @@ export async function updateListing(userId: string, listingId: string, raw: List
   });
 }
 
-/** Archiving hides the listing from new drops. Drops already published keep selling. */
+/** Switches a listing off, as updateListing with active false does. Drops already published keep selling. */
 export async function archiveListing(userId: string, listingId: string, now: Date = new Date()): Promise<Listing> {
   await loadManagedListing(userId, listingId);
   return withTx(async (tx) => {
@@ -194,6 +204,7 @@ export async function copyListing(userId: string, listingId: string, targetOutle
         pickupEnd: source.pickupEnd,
         repeatDays: source.repeatDays,
         photoKey: source.photoKey,
+        maxPerOrder: source.maxPerOrder,
       })
       .returning();
     await audit(tx, {

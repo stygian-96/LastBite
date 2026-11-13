@@ -31,8 +31,8 @@ export const vendorCatalogue = new Hono()
   )
   .patch(
     '/listings/:id',
-    route({ auth: 'user', body: anyObject }, async ({ user, params, body }) => ({
-      listing: await updateListing(user!.id, params.id!, body),
+    route({ auth: 'user', body: anyObject }, async ({ user, params, body, now }) => ({
+      listing: await updateListing(user!.id, params.id!, body, now),
     })),
   )
   .delete(

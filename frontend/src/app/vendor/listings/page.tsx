@@ -1,154 +1,125 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { FormError } from "@/components/forms";
-import { Illo, illoFor } from "@/components/Illo";
-import { ErrorState, LinkButton, Sheet, Skeleton } from "@/components/ui";
+import { ListingForm } from "@/components/forms";
+import { isActive, ListingPanel, ListingRow } from "@/components/listings";
+import { Button, ErrorState, LinkButton, Skeleton } from "@/components/ui";
 import { VendorShell } from "@/components/vendor";
 import { api, errorMessage, type Listing, type VendorOutlet } from "@/lib/api";
-import { rupees, timeRange } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 
-const DAYS = [
-  [1, "M", "Monday"],
-  [2, "T", "Tuesday"],
-  [3, "W", "Wednesday"],
-  [4, "T", "Thursday"],
-  [5, "F", "Friday"],
-  [6, "S", "Saturday"],
-  [7, "S", "Sunday"],
-] as const;
+const DESKTOP = "(min-width: 1024px)";
 
-function hhmmRange(start: string, end: string) {
-  const iso = (value: string) => `2026-01-01T${value.slice(0, 5)}:00+05:30`;
-  return timeRange(iso(start), iso(end));
-}
+// Active first, then by name, so the ones being sold are at the top.
+const byActiveThenName = (a: Listing, b: Listing) => Number(isActive(b)) - Number(isActive(a)) || a.name.localeCompare(b.name);
 
-function Row({ listing, outlets, onChanged }: { listing: Listing; outlets: VendorOutlet[]; onChanged: () => void }) {
-  const [days, setDays] = useState(listing.repeatDays);
-  const [copying, setCopying] = useState(false);
+/**
+ * The outlet's listings as a list. On desktop the selected one opens beside it, editable in place;
+ * on a phone a listing opens on its own page.
+ */
+function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOutlet[] }) {
+  const router = useRouter();
+  const listings = useQuery(() => api.getListings(outlet.id), [outlet.id]);
+  const [selected, setSelected] = useState<string | "new" | null>(null);
+  const [toggling, setToggling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function toggle(day: number) {
-    const next = days.includes(day) ? days.filter((d) => d !== day) : [...days, day].sort();
-    const before = days;
-    setDays(next);
-    setError(null);
-    try {
-      await api.updateListing(listing.id, { repeatDays: next });
-    } catch (err) {
-      setDays(before);
-      setError(errorMessage(err));
-    }
-  }
+  if (listings.error && !listings.data) return <ErrorState message={errorMessage(listings.error)} onRetry={listings.reload} />;
+  if (!listings.data) return <Skeleton className="h-64 rounded-[22px]" />;
 
-  async function run(action: () => Promise<unknown>) {
-    setError(null);
-    try {
-      await action();
-      onChanged();
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
+  const all = [...listings.data].sort(byActiveThenName);
+  const inactive = all.filter((l) => !isActive(l)).length;
+  const current = selected === "new" ? null : (all.find((l) => l.id === selected) ?? all[0] ?? null);
+  const showNew = selected === "new" || all.length === 0;
 
-  const duplicate = () => {
-    if (outlets.length > 1) setCopying(true);
-    else run(() => api.copyListing(listing.id, listing.outletId));
+  const open = (id: string) => {
+    if (window.matchMedia(DESKTOP).matches) setSelected(id);
+    else router.push(`/vendor/listings/${id}`);
+  };
+  const startNew = () => {
+    if (window.matchMedia(DESKTOP).matches) setSelected("new");
+    else router.push("/vendor/listings/new");
+  };
+  const replace = (updated: Listing) => {
+    listings.setData(listings.data!.map((l) => (l.id === updated.id ? updated : l)));
+  };
+  const added = (listing: Listing) => {
+    listings.setData([...listings.data!, listing]);
+    setSelected(listing.id);
   };
 
-  const pill = "flex h-11 flex-1 items-center justify-center rounded-full bg-fill text-sm font-medium no-underline";
+  async function toggle(listing: Listing, on: boolean) {
+    setToggling(listing.id);
+    setError(null);
+    try {
+      replace(await api.updateListing(listing.id, { active: on }));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setToggling(null);
+    }
+  }
 
   return (
-    <section className="flex flex-col gap-3 rounded-[22px] p-4 shadow-card">
-      <div className="flex items-center gap-3">
-        <span className="flex size-14 flex-none items-center justify-center rounded-[14px] bg-fill-2">
-          <Illo kind={illoFor(listing.foodCategory)} size={44} />
-        </span>
-        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="text-[15px] font-medium">{listing.name}</span>
-          <span className="tabular text-xs text-muted">
-            {listing.type === "surprise_bag" ? "Surprise Bag" : "Fixed box"} · {rupees(listing.pricePaise)} · worth {rupees(listing.valuePaise)}
+    <div className="grid gap-4 lg:grid-cols-[minmax(300px,380px)_minmax(0,1fr)] lg:items-start">
+      <section aria-label="Your listings" className="flex flex-col gap-2.5 lg:sticky lg:top-4">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[13px] text-muted">
+            {all.length - inactive} active{inactive ? `, ${inactive} inactive` : ""}
           </span>
-          <span className="tabular text-xs text-muted">Pickup {hhmmRange(listing.pickupStart, listing.pickupEnd)}</span>
-        </span>
-      </div>
-      <div role="group" aria-label="Repeats on" className="flex justify-between gap-1">
-        {DAYS.map(([day, letter, full]) => {
-          const on = days.includes(day);
-          return (
-            <button
-              key={day}
-              type="button"
-              aria-pressed={on}
-              aria-label={full}
-              onClick={() => toggle(day)}
-              className={`flex size-10 items-center justify-center rounded-full text-[13px] font-medium ${on ? "bg-dark text-white" : "bg-[#f0f0f0] text-muted"}`}
-            >
-              {letter}
-            </button>
-          );
-        })}
-      </div>
-      <div className="flex gap-2">
-        <LinkButton href={`/vendor/listings/${listing.id}`} variant="quiet" size="md" className="flex-1">
-          Edit
-        </LinkButton>
-        <button type="button" onClick={duplicate} className={pill}>
-          Duplicate
-        </button>
-        <button type="button" onClick={() => run(() => api.archiveListing(listing.id))} className={`${pill} text-danger`}>
-          Remove
-        </button>
-      </div>
-      <FormError message={error} />
-      {copying && (
-        <Sheet title="Copy to which outlet?" onClose={() => setCopying(false)}>
-          {outlets.map((outlet) => (
-            <button
-              key={outlet.id}
-              type="button"
-              onClick={() => {
-                setCopying(false);
-                run(() => api.copyListing(listing.id, outlet.id));
-              }}
-              className="flex min-h-[52px] items-center border-b border-[#f0f0f0] text-left text-[15px]"
-            >
-              {outlet.branchName}
-            </button>
-          ))}
-        </Sheet>
-      )}
-    </section>
-  );
-}
-
-function List({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOutlet[] }) {
-  const listings = useQuery(() => api.getListings(outlet.id), [outlet.id]);
-  return (
-    <>
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[13px] text-muted">What you sell and which days it repeats</span>
-        <LinkButton href="/vendor/listings/new" size="md" className="flex-none">
-          New listing
-        </LinkButton>
-      </div>
-      {listings.loading ? (
-        <Skeleton className="h-44 rounded-[22px]" />
-      ) : listings.error ? (
-        <ErrorState message={errorMessage(listings.error)} onRetry={listings.reload} />
-      ) : (
-        <div className="grid gap-3 lg:grid-cols-2">
-          {listings.data!.map((listing) => (
-            <Row key={listing.id} listing={listing} outlets={outlets} onChanged={listings.reload} />
-          ))}
+          <Button size="md" className="flex-none" onClick={startNew}>
+            New listing
+          </Button>
         </div>
-      )}
-      <span className="text-xs text-muted">Set tonight’s quantities on Today.</span>
-    </>
+        {all.length > 0 && (
+          <ul className="divide-y divide-[#f0f0f0] overflow-hidden rounded-[18px] border-[1.5px] border-line">
+            {all.map((listing) => (
+              <ListingRow
+                key={listing.id}
+                listing={listing}
+                selected={selected !== "new" && current?.id === listing.id}
+                onOpen={() => open(listing.id)}
+                onToggle={(on) => toggle(listing, on)}
+                busy={toggling === listing.id}
+              />
+            ))}
+          </ul>
+        )}
+        {error && (
+          <p role="alert" className="text-[13px] text-danger">
+            {error}
+          </p>
+        )}
+        <span className="text-xs text-muted">The switch turns a listing on or off for Today. Set tonight’s quantities on Today.</span>
+        {all.length === 0 && (
+          <div className="flex flex-col gap-2 rounded-[18px] bg-fill p-4 text-[13px] text-muted lg:hidden">
+            No listings yet. Add the bag you sell most evenings.
+            <LinkButton href="/vendor/listings/new" size="md">
+              Add a listing
+            </LinkButton>
+          </div>
+        )}
+      </section>
+
+      {/* Desktop only: the selected listing, editable in place. */}
+      <section aria-label="Listing details" className="hidden min-w-0 flex-col gap-3 lg:flex">
+        {showNew ? (
+          <>
+            <h2 className="text-lg font-medium">New listing</h2>
+            <ListingForm outletId={outlet.id} submitLabel="Add listing" onSaved={added} />
+          </>
+        ) : current ? (
+          <>
+            <h2 className="text-lg font-medium">{current.name}</h2>
+            <ListingPanel key={current.id} listing={current} outlets={outlets} onChanged={replace} onCopied={added} />
+          </>
+        ) : null}
+      </section>
+    </div>
   );
 }
 
 export default function VendorListings() {
-  return <VendorShell title="Listings">{(outlet, outlets) => <List key={outlet.id} outlet={outlet} outlets={outlets} />}</VendorShell>;
+  return <VendorShell title="Listings">{(outlet, outlets) => <Listings key={outlet.id} outlet={outlet} outlets={outlets} />}</VendorShell>;
 }

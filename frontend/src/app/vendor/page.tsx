@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { FormError, Stepper } from "@/components/forms";
 import { ErrorState, LinkButton, Skeleton, Switch } from "@/components/ui";
@@ -114,6 +115,10 @@ function Tonight({ outlet }: { outlet: VendorOutlet }) {
   }
 
   const list = orders.data ?? [];
+  const drops = today.data!.drops;
+  // Inactive listings stay off Today, unless one is already on sale tonight and needs managing.
+  const shown = listings.data!.filter((l) => !l.archivedAt || drops.some((d) => d.listingId === l.id));
+  const hidden = listings.data!.length - shown.length;
   const revenue = list.reduce((sum, order) => sum + order.pricePaise, 0);
   const toCollect = list.filter((order) => order.status === "paid").length;
   const refresh = () => {
@@ -137,21 +142,33 @@ function Tonight({ outlet }: { outlet: VendorOutlet }) {
         ))}
       </section>
 
-      {listings.data!.length === 0 ? (
+      {shown.length === 0 ? (
         <div className="flex flex-col gap-2 rounded-[18px] bg-fill p-4 text-[13px] text-muted">
-          Add a listing to start selling.
-          <LinkButton href="/vendor/listings/new" size="md">
-            New listing
+          {hidden > 0 ? "All your listings are switched off. Turn one on in Listings to sell tonight." : "Add a listing to start selling."}
+          <LinkButton href={hidden > 0 ? "/vendor/listings" : "/vendor/listings/new"} size="md">
+            {hidden > 0 ? "Open Listings" : "New listing"}
           </LinkButton>
         </div>
       ) : (
         <div className="grid gap-3 lg:grid-cols-2">
-          {listings.data!.map((listing) => (
+          {shown.map((listing) => (
             <ListingRow key={listing.id} listing={listing} drop={today.data!.drops.find((d) => d.listingId === listing.id)} onChanged={refresh} />
           ))}
         </div>
       )}
-      <span className="text-xs text-muted">Changes go live instantly. You can’t go below what’s already sold.</span>
+      <span className="text-xs text-muted">
+        Changes go live instantly. You can’t go below what’s already sold.
+        {hidden > 0 && (
+          <>
+            {" "}
+            {hidden} inactive {hidden === 1 ? "listing is" : "listings are"} hidden;{" "}
+            <Link href="/vendor/listings" className="text-ink underline">
+              manage in Listings
+            </Link>
+            .
+          </>
+        )}
+      </span>
 
       <section className="hidden flex-col gap-2 lg:flex">
         <h2 className="text-lg font-medium">Tonight’s orders</h2>

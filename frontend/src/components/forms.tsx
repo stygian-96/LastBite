@@ -135,6 +135,7 @@ export function ListingForm({
   const [photo, setPhoto] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
 
   const valueRupees = Number(value) || 0;
   const priceRupees = Number(price) || 0;
@@ -163,8 +164,11 @@ export function ListingForm({
         ...(photoKey ? { photoKey } : {}),
       };
       onSaved(listing ? await api.updateListing(listing.id, body) : await api.createListing(outletId, body));
+      // The form may stay on screen (the listing panel), so it shows it saved and can save again.
+      setSaved(true);
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
       setBusy(false);
     }
   }
@@ -260,7 +264,18 @@ export function ListingForm({
       <FilePick label="Take or upload a photo" hint="Optional. We’ll show an illustration if you skip it." accept="image/jpeg,image/png,image/webp,image/heic" file={photo} onPick={setPhoto} />
 
       <FormError message={error} />
-      <Button onClick={save} disabled={!ready || busy}>
+      {saved && !busy && !error && (
+        <p role="status" className="text-[13px] text-ok-fg">
+          Saved.
+        </p>
+      )}
+      <Button
+        onClick={() => {
+          setSaved(false);
+          void save();
+        }}
+        disabled={!ready || busy}
+      >
         {busy ? "Saving…" : submitLabel}
       </Button>
     </div>

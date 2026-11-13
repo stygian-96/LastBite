@@ -97,7 +97,8 @@ export type Api = {
   getVendorOutlets(): Promise<VendorOutlet[]>;
   getListings(outletId: string): Promise<Listing[]>;
   createListing(outletId: string, body: ListingInput): Promise<Listing>;
-  updateListing(id: string, patch: Partial<ListingInput>): Promise<Listing>;
+  /** `active` switches the listing on or off for new nights. */
+  updateListing(id: string, patch: Partial<ListingInput> & { active?: boolean }): Promise<Listing>;
   archiveListing(id: string): Promise<void>;
   copyListing(id: string, targetOutletId: string): Promise<Listing>;
   getToday(outletId: string): Promise<Today>;

@@ -53,7 +53,7 @@ export async function publishDrop(
     // Locking the listing serialises two publishes of the same listing.
     const [listing] = await tx.select().from(listings).where(eq(listings.id, listingId)).for('update');
     if (!listing) throw new ApiError('not_found', 404, 'Listing not found');
-    if (listing.archivedAt) throw conflict('listing_archived', 'This listing is archived');
+    if (listing.archivedAt) throw conflict('listing_archived', 'This listing is inactive. Turn it on in Listings first');
 
     const [outlet] = await tx.select().from(outlets).where(eq(outlets.id, listing.outletId));
     if (!outlet) throw new ApiError('not_found', 404, 'Outlet not found');
