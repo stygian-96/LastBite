@@ -1,9 +1,9 @@
 "use client";
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { outletHref } from "@/components/customer";
+import { CustomerShell, outletHref } from "@/components/customer";
 import { PhoneSignIn } from "@/components/signin";
 import { Button, Field, LinkButton, Notice, PageSkeleton, TopBar } from "@/components/ui";
 import { HOLD_SECONDS } from "@/config/brand";
@@ -12,6 +12,21 @@ import { clock, rupees, timeRange } from "@/lib/format";
 import { useQuery, useSecondsLeft } from "@/lib/hooks";
 import { completePayment, isTestPayment } from "@/lib/payment";
 import { useSession } from "@/lib/session";
+
+/**
+ * The site header on desktop, as on every customer page, but no bottom nav: checkout is a focused
+ * flow. The phone's top bar (back or close) shows on phones only.
+ */
+function Frame({ bar, wide, children }: { bar: ReactNode; wide?: boolean; children: ReactNode }) {
+  return (
+    <CustomerShell nav={false}>
+      <div className={`mx-auto flex w-full flex-1 flex-col ${wide ? "max-w-md lg:max-w-5xl" : "max-w-md"}`}>
+        <div className="lg:hidden">{bar}</div>
+        {children}
+      </div>
+    </CustomerShell>
+  );
+}
 
 const METHODS = [
   { id: "upi", label: "UPI", hint: "Any UPI app" },
@@ -189,14 +204,16 @@ export default function Checkout() {
   if (order.loading || sessionLoading) return <PageSkeleton />;
   if (!order.data) {
     return (
-      <div className="mx-auto flex max-w-md flex-col gap-3 p-4 pt-10">
-        <Notice big="—" band="not found" title="We can’t find this order">
-          <p className="text-[13px] text-body">{errorMessage(order.error)}</p>
-          <LinkButton href="/browse" size="md">
-            See tonight’s bags
-          </LinkButton>
-        </Notice>
-      </div>
+      <Frame bar={null}>
+        <div className="flex flex-col gap-3 p-4 pt-10">
+          <Notice big="—" band="not found" title="We can’t find this order">
+            <p className="text-[13px] text-body">{errorMessage(order.error)}</p>
+            <LinkButton href="/browse" size="md">
+              See tonight’s bags
+            </LinkButton>
+          </Notice>
+        </div>
+      </Frame>
     );
   }
 
@@ -205,9 +222,8 @@ export default function Checkout() {
 
   if (phase !== "pay" && status === "held") {
     return (
-      <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col">
-        <TopBar title="Checkout" />
-        <div className="flex flex-col gap-3.5 px-4 pt-6">
+      <Frame bar={<TopBar title="Checkout" />}>
+        <div className="flex flex-col gap-3.5 px-4 pt-6 lg:pt-12">
           <Notice big="…" band="waiting for your bank" tone="wait" title="Waiting for confirmation">
             <p className="text-[13px] leading-normal text-body">
               Don’t pay again. Most banks confirm in under a minute. If it fails, any money taken returns in 5–7 working days.
@@ -219,15 +235,14 @@ export default function Checkout() {
             )}
           </Notice>
         </div>
-      </div>
+      </Frame>
     );
   }
 
   if (expired) {
     return (
-      <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col">
-        <TopBar title="Checkout" back="/browse" icon="close" backLabel="Back to browsing" />
-        <div className="flex flex-col gap-3.5 px-5 pt-[30px]">
+      <Frame bar={<TopBar title="Checkout" back="/browse" icon="close" backLabel="Back to browsing" />}>
+        <div className="flex flex-col gap-3.5 px-5 pt-[30px] lg:pt-12">
           <div className="flex flex-col gap-2 rounded-[22px] bg-dark p-[22px] text-white">
             <span className="text-[40px] font-black text-coral">0:00</span>
             <h2 className="text-[22px] font-medium">Your hold has ended</h2>
@@ -249,7 +264,7 @@ export default function Checkout() {
             Back to browsing
           </LinkButton>
         </div>
-      </div>
+      </Frame>
     );
   }
 
@@ -274,8 +289,8 @@ export default function Checkout() {
   // Phones: one column with Pay pinned to the bottom. Desktop: the order on the left, and paying in a
   // card on the right that stays in view.
   return (
-    <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col lg:max-w-5xl">
-      <TopBar title="Checkout" onBack={cancel} icon="close" backLabel="Cancel and go back" />
+    <Frame wide bar={<TopBar title="Checkout" onBack={cancel} icon="close" backLabel="Cancel and go back" />}>
+      <h1 className="hidden px-8 pt-8 text-[28px] font-medium lg:block">Checkout</h1>
       <div className="flex flex-1 flex-col gap-3.5 px-4 pb-4 pt-1 lg:grid lg:grid-cols-[minmax(0,1fr)_400px] lg:items-start lg:gap-8 lg:px-8 lg:pb-10 lg:pt-4">
         <div className="flex flex-col gap-3.5">
         <section role="timer" aria-label={`Hold ends in ${clock(secondsLeft)}`} className="flex flex-col gap-2.5 rounded-[22px] bg-dark p-[18px] text-white">
@@ -350,10 +365,15 @@ export default function Checkout() {
           </div>
         )}
           {!signedOut && <div className="hidden lg:block">{payButton}</div>}
+          <div className="hidden lg:block">
+            <Button className="w-full" variant="outline" disabled={busy} onClick={cancel}>
+              Cancel and go back
+            </Button>
+          </div>
         </div>
       </div>
 
       {!signedOut && <div className="sticky bottom-0 bg-white px-4 pb-6 pt-3 lg:hidden">{payButton}</div>}
-    </div>
+    </Frame>
   );
 }
