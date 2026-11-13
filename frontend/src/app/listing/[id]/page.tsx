@@ -9,7 +9,6 @@ import { BackIcon, DietMark, dietLong, ErrorState, ExternalButton, LinkButton, N
 import { api, errorCode, errorDetails, errorMessage, errorStatus, type DropDetail } from "@/lib/api";
 import { rupees, timeRange } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
-import { useSession } from "@/lib/session";
 
 type Problem = { kind: "sold_out" } | { kind: "already"; orderId?: string } | { kind: "hold"; orderId?: string } | { kind: "other"; message: string };
 
@@ -50,7 +49,6 @@ function Hero({ drop }: { drop: DropDetail }) {
 export default function Listing() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const { me } = useSession();
   const drop = useQuery(() => api.getDrop(id), [id]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
@@ -64,8 +62,8 @@ export default function Listing() {
     setProblem(null);
     try {
       const order = await api.reserve(id, bags);
-      const params = `order=${order.id}&drop=${id}`;
-      router.push(me ? `/checkout/${order.id}?drop=${id}` : `/signin?${params}`);
+      // Signed out too: checkout asks for the number itself, with the hold running.
+      router.push(`/checkout/${order.id}?drop=${id}`);
     } catch (err) {
       const code = errorCode(err);
       const orderId = errorDetails(err).existingOrderId;
@@ -194,7 +192,7 @@ export default function Listing() {
         <div role="alert" className="flex flex-col gap-2 rounded-2xl bg-wait-bg p-3.5 text-[13px] leading-normal text-wait-fg">
           <strong className="text-sm font-medium">You already have a bag on hold</strong>
           Finish that one first, or let it go.
-          <LinkButton href={problem.orderId ? `/signin?order=${problem.orderId}` : "/orders"} size="md" variant="dark">
+          <LinkButton href={problem.orderId ? `/checkout/${problem.orderId}` : "/orders"} size="md" variant="dark">
             Go to my held bag
           </LinkButton>
         </div>

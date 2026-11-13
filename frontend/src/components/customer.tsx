@@ -119,13 +119,15 @@ export function SiteHeader({ children }: { children?: ReactNode }) {
       <Link href="/orders" className="flex min-h-11 items-center px-3.5 text-sm no-underline">
         Orders
       </Link>
-      <Link
-        href="/profile"
-        aria-label="Profile"
-        className="flex size-11 items-center justify-center rounded-full bg-coral font-bold text-on-coral no-underline"
-      >
-        {me ? initials(me.name) : <ProfileIcon on={false} />}
-      </Link>
+      {me ? (
+        <Link href="/profile" aria-label="Profile" className="flex size-11 items-center justify-center rounded-full bg-coral font-bold text-on-coral no-underline">
+          {initials(me.name)}
+        </Link>
+      ) : (
+        <Link href="/signin" className="flex min-h-11 items-center rounded-full border border-line px-3.5 text-sm font-medium text-ink no-underline">
+          Sign in
+        </Link>
+      )}
     </header>
   );
 }

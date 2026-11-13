@@ -8,9 +8,10 @@ import { Illo } from "@/components/Illo";
 import { LinkButton, Logo } from "@/components/ui";
 import { brand } from "@/config/brand";
 import { api, type City } from "@/lib/api";
-import { rupees } from "@/lib/format";
+import { initials, rupees } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 import { usePlace } from "@/lib/location";
+import { useSession } from "@/lib/session";
 
 const STEPS = [
   { title: "Reserve a bag", short: "We hold it for 5 minutes while you pay.", long: "Pick a bag from tonight’s listings. We hold it for 5 minutes while you pay." },
@@ -36,6 +37,32 @@ function useCityBags(cities: City[] | undefined) {
   );
 }
 
+/** Sign in for someone signed out; their profile once signed in. */
+function AccountLink() {
+  const { me, loading } = useSession();
+  if (loading) return <span className="w-11" />;
+  return me ? (
+    <Link href="/profile" aria-label="Profile" className="flex size-11 flex-none items-center justify-center rounded-full bg-coral font-bold text-on-coral no-underline">
+      {initials(me.name)}
+    </Link>
+  ) : (
+    <Link href="/signin" className="flex min-h-11 flex-none items-center rounded-full border border-line px-3.5 text-[13px] font-medium text-ink no-underline">
+      Sign in
+    </Link>
+  );
+}
+
+/** On a phone the header has no room, so signing in sits beside the partner link. */
+function MobileSignIn() {
+  const { me, loading } = useSession();
+  if (loading || me) return null;
+  return (
+    <Link href="/signin" className="flex min-h-10 items-center text-sm text-muted no-underline">
+      Ordered before?&nbsp;<strong className="font-medium text-ink underline">Sign in</strong>
+    </Link>
+  );
+}
+
 export default function Landing() {
   const cities = useCities();
   const bags = useCityBags(cities.data);
@@ -53,8 +80,9 @@ export default function Landing() {
     <>
       {/* Mobile welcome */}
       <div className="flex min-h-dvh flex-col lg:hidden">
-        <div className="flex items-center justify-between px-4 pb-2.5 pt-[18px]">
+        <div className="flex items-center justify-between gap-2 px-4 pb-2.5 pt-[18px]">
           <Logo />
+          <div className="flex items-center gap-2">
           <div role="group" aria-label="City" className="flex rounded-full border border-line p-1">
             {cities.data?.map((city) => (
               <button
@@ -67,6 +95,7 @@ export default function Landing() {
                 {city.name}
               </button>
             ))}
+          </div>
           </div>
         </div>
 
@@ -103,6 +132,7 @@ export default function Landing() {
             <span className="text-base font-medium">See what’s left tonight</span>
             <span className="text-[11px]">No account needed to browse</span>
           </Link>
+          <MobileSignIn />
           <Link href="/partner" className="flex min-h-10 items-center text-sm text-muted no-underline">
             Own a bakery or café?&nbsp;<strong className="font-medium text-ink underline">Become a partner</strong>
           </Link>
@@ -126,6 +156,7 @@ export default function Landing() {
             <LinkButton href="/browse" size="md">
               See tonight’s bags
             </LinkButton>
+            <AccountLink />
           </nav>
         </header>
 

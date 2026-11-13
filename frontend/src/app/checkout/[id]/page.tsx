@@ -3,9 +3,10 @@
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { bagKind, MiniOrderCard, QuantityPicker } from "@/components/customer";
+import { PhoneSignIn } from "@/components/signin";
 import { Button, Field, LinkButton, Notice, PageSkeleton, TopBar } from "@/components/ui";
 import { HOLD_SECONDS } from "@/config/brand";
-import { api, errorCode, errorDetails, errorMessage } from "@/lib/api";
+import { api, errorCode, errorDetails, errorMessage, type VerifyResult } from "@/lib/api";
 import { clock, rupees, timeRange } from "@/lib/format";
 import { useQuery, useSecondsLeft } from "@/lib/hooks";
 import { completePayment, isTestPayment } from "@/lib/payment";
@@ -42,9 +43,13 @@ export default function Checkout() {
   const status = order.data?.status;
   const expired = holdEnded || status === "expired" || (phase === "pay" && left === 0);
 
-  useEffect(() => {
-    if (!sessionLoading && !me) router.replace(`/signin?order=${id}${dropId ? `&drop=${dropId}` : ""}`);
-  }, [sessionLoading, me, id, dropId, router]);
+  // Signing in happens on this page, so the hold timer and the bag stay in view.
+  async function signedIn(result: VerifyResult) {
+    if (result.existingOrderId) router.replace(`/orders/${result.existingOrderId}?already=1`);
+    else if (result.attachedOrderId && result.attachedOrderId !== id) router.replace(`/checkout/${result.attachedOrderId}${dropId ? `?drop=${dropId}` : ""}`);
+    // Attached, or the hold ran out meanwhile: the order shows which, and expiry offers to hold it again.
+    else await order.reload();
+  }
 
   useEffect(() => {
     if (status === "paid" || status === "collected") router.replace(`/orders/${id}`);
@@ -182,6 +187,7 @@ export default function Checkout() {
     );
   }
 
+  const signedOut = !me;
   const needsName = !!me && !me.name;
   const ready = ack && (!needsName || name.trim().length > 1);
   const secondsLeft = left ?? HOLD_SECONDS;
@@ -222,6 +228,8 @@ export default function Checkout() {
           <strong className="font-medium text-ink">Collect today, {window}.</strong> In person, no delivery. Missed pickups are forfeited; if the vendor cancels you’re refunded automatically.
         </div>
 
+        {signedOut && <PhoneSignIn onSignedIn={signedIn} hint="We’ll text a 6-digit code. Your bag stays held while you sign in, and your pickup code comes to this number." />}
+
         {needsName && (
           <Field
             id="name"
@@ -233,6 +241,7 @@ export default function Checkout() {
           />
         )}
 
+        {!signedOut && (
         <label className="flex min-h-11 cursor-pointer items-start gap-3 text-[13px] leading-normal">
           <input type="checkbox" checked={ack} onChange={() => setAck(!ack)} className="m-0 size-[22px] flex-none accent-coral" />
           <span>
@@ -240,7 +249,9 @@ export default function Checkout() {
             {item.allergens.length > 0 ? `, and it may contain ${item.allergens.join(", ")}` : ""}.
           </span>
         </label>
+        )}
 
+        {!signedOut && (
         <fieldset className="flex flex-col gap-2.5">
           <legend className="mb-2.5 text-base font-medium">Pay with</legend>
           <div className="grid grid-cols-3 gap-2">
@@ -259,6 +270,7 @@ export default function Checkout() {
           </div>
           <span className="text-xs text-muted">{isTestPayment ? "Test mode: payment always succeeds and no money moves." : "Processed securely by Razorpay."}</span>
         </fieldset>
+        )}
 
         {error && (
           <div role="alert" className="flex flex-col gap-1 rounded-2xl bg-warn-bg p-3.5 text-[13px] leading-normal text-warn-fg">
@@ -268,6 +280,7 @@ export default function Checkout() {
         )}
       </div>
 
+      {!signedOut && (
       <div className="sticky bottom-0 bg-white px-4 pb-6 pt-3">
         <Button className="w-full" disabled={!ready || busy} onClick={pay}>
           {!ready
@@ -279,6 +292,7 @@ export default function Checkout() {
               : `Pay ${rupees(item.pricePaise)} with ${METHODS.find((m) => m.id === method)!.label}`}
         </Button>
       </div>
+      )}
     </div>
   );
 }
