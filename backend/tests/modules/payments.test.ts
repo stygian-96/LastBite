@@ -630,11 +630,12 @@ describe('applyCapture', () => {
     await expectLateRefund(order.id, payment.id, 0);
   });
 
-  test('late capture after a newer order at that outlet refunds', async () => {
-    const { user, order, payment, drop, gp } = await expiredOrder();
+  test('late capture after a newer order at that outlet still sells the bag', async () => {
+    const { user, order, drop, gp } = await expiredOrder();
     await reserveDrop({ dropId: drop.id, userId: user.id, ip: '1.1.1.1' }, later);
     await applyCapture(gp, later);
-    await expectLateRefund(order.id, payment.id, 1);
+    expect((await getOrderRow(order.id)).status).toBe('paid');
+    expect(await refundsFor(order.id)).toEqual([]);
   });
 
   test('a late payment refunded once stays refunded when stock comes back', async () => {
@@ -989,7 +990,7 @@ describe('capture against the other writers', () => {
   });
 
   test('a capture waiting for stock leaves a re-reserve free to finish, then refunds', async () => {
-    const { user, order, payment, drop, gp } = await expiredOrder();
+    const { user, order, payment, drop, gp } = await expiredOrder({ quantity: 1 });
     const client = await pool.connect();
     try {
       // Stands in for a reserve by the same customer: it has the drop's row, and has yet to insert.

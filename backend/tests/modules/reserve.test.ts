@@ -56,26 +56,25 @@ describe('reserveDrop', () => {
     expect((await getDropRow(drop.id)).reservedCount).toBe(1);
   });
 
-  test('parallel reserves from one anon ID give one hold and take one bag', async () => {
-    const drop = await makeDrop({ quantity: 5 });
+  test('parallel reserves from one anon ID stop at the vendor limit', async () => {
+    const drop = await makeDrop({ quantity: 8 });
     const results = await Promise.allSettled(
       Array.from({ length: 6 }, (_, i) => reserveDrop({ dropId: drop.id, anonId: 'same', ip: `1.1.1.${i}` }, now)),
     );
     const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-    expect(rejected.map((r) => (r.reason as ApiError).code)).toEqual(Array(5).fill('hold_exists'));
-    expect((await getDropRow(drop.id)).reservedCount).toBe(1);
-    expect(await heldCount(drop.id)).toBe(1);
+    expect(rejected.map((r) => (r.reason as ApiError).code)).toEqual(Array(3).fill('over_limit'));
+    expect((await getDropRow(drop.id)).reservedCount).toBe(3);
   });
 
-  test('parallel reserves from one customer give one order and take one bag', async () => {
+  test('parallel reserves from one customer stop at the vendor limit', async () => {
     const user = await makeUser();
-    const drop = await makeDrop({ quantity: 5 });
+    const drop = await makeDrop({ quantity: 8 });
     const results = await Promise.allSettled(
       Array.from({ length: 6 }, (_, i) => reserveDrop({ dropId: drop.id, userId: user.id, ip: `1.1.1.${i}` }, now)),
     );
     const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-    expect(rejected.map((r) => (r.reason as ApiError).code)).toEqual(Array(5).fill('already_ordered'));
-    expect((await getDropRow(drop.id)).reservedCount).toBe(1);
+    expect(rejected.map((r) => (r.reason as ApiError).code)).toEqual(Array(3).fill('over_limit'));
+    expect((await getDropRow(drop.id)).reservedCount).toBe(3);
   });
 
   test('commission and price are snapshotted on the order', async () => {
@@ -150,13 +149,12 @@ describe('reserveDrop', () => {
     expect(await failure(unknown)).toMatchObject({ code: 'not_found', status: 404 });
   });
 
-  test('second active hold for one anon ID returns 409 hold_exists', async () => {
+  test('one anon ID can hold at several outlets at once', async () => {
     const first = await reserveDrop({ dropId: (await makeDrop()).id, anonId: 'a', ip: '1.1.1.1' }, now);
     const other = await makeDrop();
-    const err = await failure(reserveDrop({ dropId: other.id, anonId: 'a', ip: '1.1.1.1' }, now));
-    expect(err).toBeInstanceOf(ApiError);
-    expect(err).toMatchObject({ code: 'hold_exists', status: 409, details: { existingOrderId: first.id } });
-    expect((await getDropRow(other.id)).reservedCount).toBe(0);
+    const second = await reserveDrop({ dropId: other.id, anonId: 'a', ip: '1.1.1.1' }, now);
+    expect(second.id).not.toBe(first.id);
+    expect((await getDropRow(other.id)).reservedCount).toBe(1);
   });
 
   test('sixth signed-out hold in an hour from one IP returns 429', async () => {
@@ -182,9 +180,6 @@ describe('reserveDrop', () => {
       expect(await failure(reserveDrop({ dropId: paused.id, anonId: `t${i}`, ip: '9.9.9.9' }, now))).toMatchObject({
         code: 'not_on_sale',
       });
-      expect(await failure(reserveDrop({ dropId: paused.id, anonId: 'holder', ip: '9.9.9.9' }, now))).toMatchObject({
-        code: 'hold_exists',
-      });
     }
     const open = await makeDrop({ quantity: 10 });
     for (let i = 0; i < 4; i++) await reserveDrop({ dropId: open.id, anonId: `b${i}`, ip: '9.9.9.9' }, now);
@@ -202,20 +197,23 @@ describe('reserveDrop', () => {
     await reserveDrop({ dropId: (await makeDrop()).id, userId: user.id, ip: '9.9.9.9' }, now);
   });
 
-  test('signed-in customer with an order at that outlet gets 409 already_ordered', async () => {
+  test('a customer with a paid order at that outlet can order again, up to the vendor limit per bag', async () => {
     const user = await makeUser();
     const outlet = await makeLiveOutlet();
-    const first = await makeDrop({ outletId: outlet.id });
+    const first = await makeDrop({ outletId: outlet.id, quantity: 10 });
     const second = await makeDrop({ outletId: outlet.id });
-    const paid = await makePaidOrder({
-      userId: user.id,
-      dropId: first.id,
-      outletId: outlet.id,
-      serviceDate: first.serviceDate,
+    await makePaidOrder({ userId: user.id, dropId: first.id, outletId: outlet.id, serviceDate: first.serviceDate });
+
+    await reserveDrop({ dropId: second.id, userId: user.id, ip: '1.1.1.1' }, now);
+    expect((await getDropRow(second.id)).reservedCount).toBe(1);
+
+    const user2 = await makeUser();
+    await makePaidOrder({ userId: user2.id, dropId: first.id, outletId: outlet.id, serviceDate: first.serviceDate });
+    expect(await failure(reserveDrop({ dropId: first.id, userId: user2.id, ip: '1.1.1.1', quantity: 3 }, now))).toMatchObject({
+      code: 'over_limit',
+      details: { maxPerOrder: 3, alreadyHave: 1 },
     });
-    const err = await failure(reserveDrop({ dropId: second.id, userId: user.id, ip: '1.1.1.1' }, now));
-    expect(err).toMatchObject({ code: 'already_ordered', status: 409, details: { existingOrderId: paid.id } });
-    expect((await getDropRow(second.id)).reservedCount).toBe(0);
+    await reserveDrop({ dropId: first.id, userId: user2.id, ip: '1.1.1.1', quantity: 2 }, now);
   });
 
   test('a customer holding the last bag is told it is gone and pointed at their hold', async () => {
@@ -342,7 +340,7 @@ describe('expireHolds', () => {
           [user.id, second!.id, outlet.id, first!.serviceDate, now.toISOString()],
         )
         .catch((e: { code?: string }) => e.code);
-      expect(insert).toBe('23505');
+      expect(insert).not.toBeTypeOf('string');
       await client.query('ROLLBACK');
       expect(await job).toBe(2);
     } finally {
@@ -504,30 +502,15 @@ describe('attachHolds', () => {
     expect((await getOrderRow(order.id)).userId).toBeNull();
   });
 
-  test('two devices, same phone, same outlet keep one order', async () => {
+  test('two devices, same phone, same outlet keep both holds', async () => {
     const user = await makeUser();
     const drop = await makeDrop({ quantity: 5 });
     const first = await reserveDrop({ dropId: drop.id, anonId: 'anonA', ip: '1.1.1.1' }, now);
     const second = await reserveDrop({ dropId: drop.id, anonId: 'anonB', ip: '1.1.1.1' }, now);
     expect(await attachHolds('anonA', user.id, now)).toEqual({ attachedOrderId: first.id });
+    expect(await attachHolds('anonB', user.id, now)).toEqual({ attachedOrderId: second.id });
+    expect((await getOrderRow(second.id)).status).toBe('held');
     expect((await getDropRow(drop.id)).reservedCount).toBe(2);
-
-    expect(await attachHolds('anonB', user.id, now)).toEqual({ existingOrderId: first.id });
-    expect((await getOrderRow(second.id)).status).toBe('expired');
-    expect((await getOrderRow(first.id)).status).toBe('held');
-    expect((await getDropRow(drop.id)).reservedCount).toBe(1);
-  });
-
-  test('both devices verifying at once still keep one order', async () => {
-    const user = await makeUser();
-    const drop = await makeDrop({ quantity: 5 });
-    await reserveDrop({ dropId: drop.id, anonId: 'anonA', ip: '1.1.1.1' }, now);
-    await reserveDrop({ dropId: drop.id, anonId: 'anonB', ip: '1.1.1.1' }, now);
-    const results = await Promise.all([attachHolds('anonA', user.id, now), attachHolds('anonB', user.id, now)]);
-    expect(results.filter((r) => r.attachedOrderId)).toHaveLength(1);
-    expect(results.filter((r) => r.existingOrderId)).toHaveLength(1);
-    expect((await getDropRow(drop.id)).reservedCount).toBe(1);
-    expect(await heldCount(drop.id)).toBe(1);
   });
 
   test('a hold at another outlet attaches alongside an existing order', async () => {
@@ -609,11 +592,12 @@ describe('hold routes', () => {
 
     const cookie = `anon_id=${encodeURIComponent(signAnonId('mine'))}`;
     const headers = { cookie, origin: env().FRONTEND_ORIGIN };
-    const first = (await (await post((await onSaleDrop()).id, headers)).json()) as Body;
-    const res = await post((await onSaleDrop()).id, headers);
+    const drop = await onSaleDrop(1);
+    const first = (await (await post(drop.id, headers)).json()) as Body;
+    const res = await post(drop.id, headers);
     expect(res.status).toBe(409);
     expect(((await res.json()) as Failure).error).toMatchObject({
-      code: 'hold_exists',
+      code: 'not_enough_left',
       existingOrderId: first.order.id,
     });
   });
@@ -664,21 +648,16 @@ describe('hold routes', () => {
       expect((await getOrderRow(order.id)).userId).toBe(body.user.id);
     });
 
-    test('verify reports the existing order when the hold is released', async () => {
+    test('verify attaches the hold beside a paid order at that outlet', async () => {
       const user = await makeUser({ phone: PHONE });
       const drop = await onSaleDrop();
-      const paid = await makePaidOrder({
-        userId: user.id,
-        dropId: drop.id,
-        outletId: drop.outletId,
-        serviceDate: drop.serviceDate,
-      });
+      await makePaidOrder({ userId: user.id, dropId: drop.id, outletId: drop.outletId, serviceDate: drop.serviceDate });
       const held = await post(drop.id);
       const { order } = (await held.json()) as Body;
       const res = await verify(`anon_id=${encodeURIComponent(anonFrom(held))}`);
       expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ existingOrderId: paid.id });
-      expect((await getOrderRow(order.id)).status).toBe('expired');
+      expect(await res.json()).toMatchObject({ attachedOrderId: order.id });
+      expect((await getOrderRow(order.id)).status).toBe('held');
     });
 
     test('a failed attach never fails sign-in', async () => {

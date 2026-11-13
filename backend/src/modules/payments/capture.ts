@@ -6,7 +6,7 @@ import type { GatewayPayment } from '../../integrations/payments.js';
 import { audit } from '../../lib/audit.js';
 import { isUniqueViolation } from '../../lib/db-errors.js';
 import { generatePickupCode } from '../orders/code.js';
-import { activeItems, findNightOrder, releaseStock, takeStock, type Order } from '../orders/reserve.js';
+import { activeItems, releaseStock, takeStock, takenTonight, type Order } from '../orders/reserve.js';
 import { queueLatePaymentRefunded, queueOrderConfirmed } from '../notifications/events.js';
 import { createRefund } from '../refunds/create.js';
 
@@ -76,13 +76,13 @@ async function customerDeleted(tx: Tx, userId: string): Promise<boolean> {
  */
 async function retakeBag(tx: Tx, order: Order, now: Date): Promise<boolean> {
   if (order.userId && (await customerDeleted(tx, order.userId))) return false;
-  if (order.userId && (await findNightOrder(tx, order.userId, order.outletId, order.serviceDate))) return false;
   // Every line or none, in drop order: one that can't be had puts back the ones taken.
   const lines = await activeItems(tx, order.id);
   const taken: typeof lines = [];
   let drop: Awaited<ReturnType<typeof takeStock>> | undefined;
   for (const line of lines) {
-    const took = await takeStock(tx, line.dropId, now.toISOString(), line.quantity);
+    const already = await takenTonight(tx, order, line.dropId, order.id);
+    const took = await takeStock(tx, line.dropId, now.toISOString(), line.quantity, already + line.quantity);
     if (!took) {
       for (const back of taken) await releaseStock(tx, back.dropId, back.quantity);
       return false;
@@ -91,17 +91,10 @@ async function retakeBag(tx: Tx, order: Order, now: Date): Promise<boolean> {
     taken.push(line);
   }
   if (!drop) return false;
-  try {
-    // This is a new sale, by whoever holds the outlet now.
-    await tx.update(orders).set({ payoutAccountId: drop.payoutAccountId }).where(eq(orders.id, order.id));
-    await markPaid(tx, order.id, now);
-    return true;
-  } catch (e) {
-    // A reserve by the same customer committed while this capture waited for the drop.
-    if (!isUniqueViolation(e, 'one_order_per_outlet_night')) throw e;
-    for (const back of taken) await releaseStock(tx, back.dropId, back.quantity);
-    return false;
-  }
+  // This is a new sale, by whoever holds the outlet now.
+  await tx.update(orders).set({ payoutAccountId: drop.payoutAccountId }).where(eq(orders.id, order.id));
+  await markPaid(tx, order.id, now);
+  return true;
 }
 
 async function refundCapture(

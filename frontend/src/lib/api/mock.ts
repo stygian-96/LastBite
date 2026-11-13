@@ -970,25 +970,15 @@ export const mockApi: Api = {
     } else {
       db.following = [];
     }
-    // Attach any signed-out hold. One bag per outlet per night, so a clash releases it.
+    // Attach any signed-out holds: a customer can have several orders at one outlet.
     let attachedOrderId: string | undefined;
-    let existingOrderId: string | undefined;
-    const taken = (outletId: string) =>
-      db.orders.find((o) => o.mine && o.dropId !== "past" && o.outletId === outletId && (o.status === "held" || o.status === "paid"));
     for (const hold of db.orders.filter((o) => o.status === "held" && !o.mine && o.customerLabel === "")) {
-      const clash = taken(hold.outletId);
-      if (clash) {
-        hold.status = "expired";
-        returnStock(db, hold.dropId, hold.quantity ?? 1);
-        existingOrderId = clash.id;
-      } else {
-        hold.mine = true;
-        hold.customerLabel = name ?? "Customer";
-        attachedOrderId = hold.id;
-      }
+      hold.mine = true;
+      hold.customerLabel = name ?? "Customer";
+      attachedOrderId = hold.id;
     }
     save(db);
-    return { user: db.user, attachedOrderId, existingOrderId };
+    return { user: db.user, attachedOrderId };
   },
 
   async logout() {
@@ -1004,15 +994,6 @@ export const mockApi: Api = {
     const db = load();
     const now = Date.now();
     const drop = dropRow(db, dropId);
-    if (db.user) {
-      const clash = db.orders.find(
-        (o) => o.mine && o.dropId !== "past" && o.outletId === drop.outletId && (o.status === "held" || o.status === "paid"),
-      );
-      if (clash) fail("already_ordered", "You already have an order at this outlet tonight", 409, { existingOrderId: clash.id });
-    } else {
-      const hold = db.orders.find((o) => o.status === "held" && !o.mine && o.customerLabel === "");
-      if (hold) fail("hold_exists", "You already have a bag on hold", 409, { existingOrderId: hold.id });
-    }
     if (drop.losesRace) {
       drop.remaining = 0;
       drop.losesRace = false;

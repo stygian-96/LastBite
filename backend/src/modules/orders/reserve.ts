@@ -1,7 +1,6 @@
 import { and, asc, eq, gt, gte, inArray, isNull, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { db, withTx, type Tx } from '../../db/client.js';
 import { drops, listings, orderItems, orders, outlets, payments } from '../../db/schema.js';
-import { isUniqueViolation } from '../../lib/db-errors.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { z } from 'zod';
 import { commissionPaise } from '../../lib/money.js';
@@ -12,7 +11,7 @@ export type Order = typeof orders.$inferSelect;
 type Hold = Pick<Order, 'id'>;
 export type OrderItem = typeof orderItems.$inferSelect;
 
-/** The most bags any order can hold, whatever a listing allows. The orders table checks it too. */
+/** The highest limit a vendor can set on one bag, so the most of one bag any customer can take. */
 export const MAX_PER_ORDER = 10;
 const quantitySchema = z.number().int().min(1).max(MAX_PER_ORDER);
 
@@ -20,42 +19,43 @@ const HOLD_MS = 5 * 60_000;
 const HOLDS_PER_IP = 5;
 const HOLD_WINDOW_SECONDS = 3600;
 
-// The statuses covered by the one_order_per_outlet_night index.
+// Orders that count towards what a customer has of a bag tonight.
 const NIGHT_ORDER_STATUSES = ['held', 'paid', 'collected', 'no_show'];
 
-export async function findNightOrder(
-  q: Tx | typeof db,
-  userId: string,
-  outletId: string,
-  serviceDate: string,
-): Promise<string | undefined> {
-  const [row] = await q
-    .select({ id: orders.id })
-    .from(orders)
+/** A customer: signed in, or the anonymous holder of a cookie. */
+type Who = { userId?: string | null; anonId?: string | null };
+
+/**
+ * How many of this drop the customer already has in their other orders: the vendor's limit is per
+ * customer per night, however many orders they place. A customer can order as often as they like.
+ * It locks the customer until the transaction ends, so two of their requests at once count each
+ * other. Call it before taking stock: the lock comes before the drop's.
+ */
+export async function takenTonight(tx: Tx, who: Who, dropId: string, exceptOrderId?: string): Promise<number> {
+  const key = who.userId ?? who.anonId;
+  if (!key) return 0;
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'customer:' + key}, 0))`);
+  const [row] = await tx
+    .select({ n: sql<number>`coalesce(sum(${orderItems.quantity}), 0)::int` })
+    .from(orderItems)
+    .innerJoin(orders, eq(orders.id, orderItems.orderId))
     .where(
       and(
-        eq(orders.userId, userId),
-        eq(orders.outletId, outletId),
-        eq(orders.serviceDate, serviceDate),
+        eq(orderItems.dropId, dropId),
+        eq(orderItems.status, 'active'),
         inArray(orders.status, NIGHT_ORDER_STATUSES),
+        who.userId ? eq(orders.userId, who.userId) : and(eq(orders.anonId, who.anonId!), isNull(orders.userId)),
+        exceptOrderId ? sql`${orders.id} <> ${exceptOrderId}` : undefined,
       ),
     );
-  return row?.id;
-}
-
-async function findAnonHold(anonId: string): Promise<string | undefined> {
-  const [row] = await db
-    .select({ id: orders.id })
-    .from(orders)
-    .where(and(eq(orders.anonId, anonId), eq(orders.status, 'held'), isNull(orders.userId)));
-  return row?.id;
+  return row?.n ?? 0;
 }
 
 /**
  * Explains a reserve that was already refused. Nothing depends on this read but the wording of the
  * error: the conditional update and the unique indexes have decided the outcome.
  */
-async function refusal(r: { dropId: string; userId?: string; anonId?: string; quantity?: number }, now: Date): Promise<ApiError> {
+async function refusal(r: { dropId: string; quantity?: number; taken?: number }, now: Date): Promise<ApiError> {
   const [row] = await db
     .select({
       outletId: drops.outletId,
@@ -74,32 +74,26 @@ async function refusal(r: { dropId: string; userId?: string; anonId?: string; qu
     .where(eq(drops.id, r.dropId));
   if (!row) return new ApiError('not_found', 404, 'Drop not found');
 
-  const nightOrder = r.userId ? await findNightOrder(db, r.userId, row.outletId, row.serviceDate) : undefined;
-  if (nightOrder) {
-    return new ApiError('already_ordered', 409, 'You already have an order at this outlet tonight', {
-      existingOrderId: nightOrder,
-    });
-  }
-  const anonHold = !r.userId && r.anonId ? await findAnonHold(r.anonId) : undefined;
-  if (anonHold) {
-    return new ApiError('hold_exists', 409, 'You already have a bag on hold', { existingOrderId: anonHold });
-  }
-
   const onSale =
     row.dropStatus === 'live' &&
     row.outletStatus === 'live' &&
     (row.pausedUntil === null || new Date(row.pausedUntil) < now) &&
     new Date(row.salesEndAt) > now;
   if (!onSale) return new ApiError('not_on_sale', 409, 'This bag is not on sale');
-  return quantityRefusal(r.quantity ?? 1, row);
+  return quantityRefusal(r.quantity ?? 1, row, 0, r.taken ?? 0);
 }
 
-/** Why `wanted` bags could not be taken from a drop that is on sale. */
-function quantityRefusal(wanted: number, d: { quantity: number; reservedCount: number; maxPerOrder: number }, alreadyHeld = 0): ApiError {
+/**
+ * Why `wanted` bags could not be taken from a drop that is on sale. `alreadyHeld` is what this order
+ * has of it, `taken` what the customer's other orders tonight have.
+ */
+function quantityRefusal(wanted: number, d: { quantity: number; reservedCount: number; maxPerOrder: number }, alreadyHeld = 0, taken = 0): ApiError {
   const left = d.quantity - d.reservedCount + alreadyHeld;
   if (left <= 0) return new ApiError('sold_out', 409, 'This bag has sold out');
-  if (wanted > d.maxPerOrder) {
-    return new ApiError('over_limit', 409, `You can take up to ${d.maxPerOrder} of this bag`, { maxPerOrder: d.maxPerOrder });
+  if (wanted + taken > d.maxPerOrder) {
+    const message =
+      taken > 0 ? `You can take up to ${d.maxPerOrder} of this bag tonight, and your other orders already have ${taken}` : `You can take up to ${d.maxPerOrder} of this bag`;
+    return new ApiError('over_limit', 409, message, { maxPerOrder: d.maxPerOrder, alreadyHave: taken });
   }
   return new ApiError('not_enough_left', 409, `Only ${left} left`, { remaining: left });
 }
@@ -198,41 +192,37 @@ export async function reserveDrop(
   const ipLimitKey = r.userId || !r.ip ? undefined : `hold:ip:${r.ip}`;
   if (ipLimitKey) await checkRateLimit(ipLimitKey, HOLDS_PER_IP, HOLD_WINDOW_SECONDS, now);
   const nowIso = now.toISOString();
+  let taken = 0;
 
-  let order: Order | undefined;
-  try {
-    order = await withTx(async (tx) => {
-      const drop = await takeStock(tx, r.dropId, nowIso, quantity);
-      if (!drop) return undefined;
-      const total = drop.pricePaise * quantity;
+  const order: Order | undefined = await withTx(async (tx) => {
+    taken = await takenTonight(tx, r, r.dropId);
+    const drop = await takeStock(tx, r.dropId, nowIso, quantity, taken + quantity);
+    if (!drop) return undefined;
+    const total = drop.pricePaise * quantity;
 
-      const [row] = await tx
-        .insert(orders)
-        .values({
-          userId: r.userId,
-          anonId: r.anonId,
-          dropId: r.dropId,
-          outletId: drop.outletId,
-          payoutAccountId: drop.payoutAccountId,
-          serviceDate: drop.serviceDate,
-          quantity,
-          pricePaise: total,
-          commissionBps: drop.commissionBps,
-          commissionPaise: commissionPaise(total, drop.commissionBps),
-          pickupStartAt: drop.pickupStartAt,
-          pickupEndAt: drop.pickupEndAt,
-          holdExpiresAt: new Date(now.getTime() + HOLD_MS).toISOString(),
-          createdAt: nowIso,
-        })
-        .returning();
-      await tx.insert(orderItems).values({ orderId: row!.id, dropId: r.dropId, quantity, unitPricePaise: drop.pricePaise, createdAt: nowIso });
-      return row;
-    });
-  } catch (e) {
-    // The rollback has put the bag back.
-    if (!isUniqueViolation(e, 'one_order_per_outlet_night') && !isUniqueViolation(e, 'one_hold_per_anon')) throw e;
-  }
-  if (!order) throw await refusal({ ...r, quantity }, now);
+    const [row] = await tx
+      .insert(orders)
+      .values({
+        userId: r.userId,
+        anonId: r.anonId,
+        dropId: r.dropId,
+        outletId: drop.outletId,
+        payoutAccountId: drop.payoutAccountId,
+        serviceDate: drop.serviceDate,
+        quantity,
+        pricePaise: total,
+        commissionBps: drop.commissionBps,
+        commissionPaise: commissionPaise(total, drop.commissionBps),
+        pickupStartAt: drop.pickupStartAt,
+        pickupEndAt: drop.pickupEndAt,
+        holdExpiresAt: new Date(now.getTime() + HOLD_MS).toISOString(),
+        createdAt: nowIso,
+      })
+      .returning();
+    await tx.insert(orderItems).values({ orderId: row!.id, dropId: r.dropId, quantity, unitPricePaise: drop.pricePaise, createdAt: nowIso });
+    return row;
+  });
+  if (!order) throw await refusal({ ...r, quantity, taken }, now);
   if (ipLimitKey) await countRateLimit(ipLimitKey, HOLD_WINDOW_SECONDS, now);
   return order;
 }
@@ -282,7 +272,6 @@ async function lockOpenHold(tx: Tx, where: SQL | undefined, now: Date): Promise<
   return order;
 }
 
-const tooMany = () => new ApiError('order_full', 409, `An order can hold up to ${MAX_PER_ORDER} bags`, { maxBags: MAX_PER_ORDER });
 
 /** The viewer's running, unpaid hold at the outlet of this drop tonight, if any. */
 async function openHoldFor(r: { dropId: string; userId?: string; anonId?: string }, now: Date): Promise<string | undefined> {
@@ -313,7 +302,6 @@ async function openHoldFor(r: { dropId: string; userId?: string; anonId?: string
 async function addToHold(orderId: string, dropId: string, quantity: number, now: Date): Promise<void> {
   const failed = await withTx(async (tx) => {
     const order = await lockOpenHold(tx, eq(orders.id, orderId), now);
-    if (order.quantity + quantity > MAX_PER_ORDER) throw tooMany();
     const [drop] = await tx.select({ outletId: drops.outletId, serviceDate: drops.serviceDate }).from(drops).where(eq(drops.id, dropId));
     if (!drop || drop.outletId !== order.outletId || drop.serviceDate !== order.serviceDate) {
       throw new ApiError('other_outlet', 409, 'One order is for one outlet and one night');
@@ -323,8 +311,9 @@ async function addToHold(orderId: string, dropId: string, quantity: number, now:
       .from(orderItems)
       .where(and(eq(orderItems.orderId, orderId), eq(orderItems.dropId, dropId), eq(orderItems.status, 'active')));
     const lineTotal = (line?.quantity ?? 0) + quantity;
-    const took = await takeStock(tx, dropId, now.toISOString(), quantity, lineTotal);
-    if (!took) return { dropId, wanted: lineTotal, held: line?.quantity ?? 0 };
+    const taken = await takenTonight(tx, order, dropId, order.id);
+    const took = await takeStock(tx, dropId, now.toISOString(), quantity, taken + lineTotal);
+    if (!took) return { dropId, wanted: lineTotal, held: line?.quantity ?? 0, taken };
     if (line) await tx.update(orderItems).set({ quantity: lineTotal }).where(eq(orderItems.id, line.id));
     // Stamped by the database, so a later line sorts after the first even within one request clock.
     else await tx.insert(orderItems).values({ orderId, dropId, quantity, unitPricePaise: took.pricePaise });
@@ -335,13 +324,13 @@ async function addToHold(orderId: string, dropId: string, quantity: number, now:
 }
 
 /** Why a line could not grow to `wanted` bags. A refusal while adding to a hold points at that hold. */
-async function lineRefusal(f: { dropId: string; wanted: number; held: number }, now: Date, holdId?: string): Promise<ApiError> {
+async function lineRefusal(f: { dropId: string; wanted: number; held: number; taken: number }, now: Date, holdId?: string): Promise<ApiError> {
   const [d] = await db
     .select({ quantity: drops.quantity, reservedCount: drops.reservedCount, maxPerOrder: listings.maxPerOrder, status: drops.status, salesEndAt: drops.salesEndAt })
     .from(drops)
     .innerJoin(listings, eq(listings.id, drops.listingId))
     .where(eq(drops.id, f.dropId));
-  const e = !d || d.status !== 'live' || new Date(d.salesEndAt) <= now ? new ApiError('not_on_sale', 409, 'This bag is not on sale') : quantityRefusal(f.wanted, d, f.held);
+  const e = !d || d.status !== 'live' || new Date(d.salesEndAt) <= now ? new ApiError('not_on_sale', 409, 'This bag is not on sale') : quantityRefusal(f.wanted, d, f.held, f.taken);
   return holdId ? new ApiError(e.code, e.status, e.message, { ...e.details, existingOrderId: holdId }) : e;
 }
 
@@ -368,11 +357,10 @@ export async function changeItemQuantity(
     if (quantity === 0 && lines.length === 1) {
       throw new ApiError('last_item', 409, 'This is the only bag in the order. Cancel the order instead');
     }
-    if (order.quantity - line.quantity + quantity > MAX_PER_ORDER) throw tooMany();
-
     if (quantity > line.quantity) {
-      const took = await takeStock(tx, line.dropId, now.toISOString(), quantity - line.quantity, quantity);
-      if (!took) return { dropId: line.dropId, wanted: quantity, held: line.quantity };
+      const taken = await takenTonight(tx, order, line.dropId, order.id);
+      const took = await takeStock(tx, line.dropId, now.toISOString(), quantity - line.quantity, taken + quantity);
+      if (!took) return { dropId: line.dropId, wanted: quantity, held: line.quantity, taken };
     } else {
       await releaseStock(tx, line.dropId, line.quantity - quantity);
     }
@@ -391,42 +379,16 @@ export function changeHoldQuantity(viewer: Viewer, orderId: string, rawQuantity:
 }
 
 /**
- * Gives an anonymous hold to the customer who just signed in, keeping its original expiry. If they
- * already have an order at that outlet tonight, the hold is released and that order is returned.
+ * Gives an anonymous hold to the customer who just signed in, keeping its original expiry. A customer
+ * can have several orders at an outlet, so it always attaches.
  */
-export async function attachHolds(
-  anonId: string,
-  userId: string,
-  now: Date,
-): Promise<{ attachedOrderId?: string; existingOrderId?: string }> {
-  const nowIso = now.toISOString();
+export async function attachHolds(anonId: string, userId: string, now: Date): Promise<{ attachedOrderId?: string; existingOrderId?: string }> {
   return withTx(async (tx) => {
     const [hold] = await tx
-      .select({ id: orders.id, outletId: orders.outletId, serviceDate: orders.serviceDate })
-      .from(orders)
-      .where(
-        and(
-          eq(orders.anonId, anonId),
-          isNull(orders.userId),
-          eq(orders.status, 'held'),
-          gt(orders.holdExpiresAt, nowIso),
-        ),
-      )
-      .for('update');
-    if (!hold) return {};
-
-    try {
-      // A savepoint, so the outer transaction survives the unique violation.
-      await tx.transaction((sp) => sp.update(orders).set({ userId }).where(eq(orders.id, hold.id)));
-      return { attachedOrderId: hold.id };
-    } catch (e) {
-      if (!isUniqueViolation(e, 'one_order_per_outlet_night')) throw e;
-    }
-
-    const existingOrderId = await findNightOrder(tx, userId, hold.outletId, hold.serviceDate);
-    // The other order ended in the moment since the violation: leave this hold for a later sign-in.
-    if (!existingOrderId) return {};
-    await endHold(tx, hold, nowIso);
-    return { existingOrderId };
+      .update(orders)
+      .set({ userId })
+      .where(and(eq(orders.anonId, anonId), isNull(orders.userId), eq(orders.status, 'held'), gt(orders.holdExpiresAt, now.toISOString())))
+      .returning({ id: orders.id });
+    return hold ? { attachedOrderId: hold.id } : {};
   });
 }

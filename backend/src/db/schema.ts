@@ -360,8 +360,8 @@ export const orders = pgTable("orders", {
 	pickupEndAt: timestamp("pickup_end_at", { withTimezone: true, mode: 'string' }).notNull(),
 }, (table) => [
 	index("orders_unpaid_by_account_idx").using("btree", table.payoutAccountId.asc().nullsLast().op("uuid_ops")).where(sql`(payout_id IS NULL)`),
-	uniqueIndex("one_order_per_outlet_night").using("btree", table.userId.asc().nullsLast().op("date_ops"), table.outletId.asc().nullsLast().op("uuid_ops"), table.serviceDate.asc().nullsLast().op("uuid_ops")).where(sql`((user_id IS NOT NULL) AND (status = ANY (ARRAY['held'::text, 'paid'::text, 'collected'::text, 'no_show'::text])))`),
-	uniqueIndex("one_hold_per_anon").using("btree", table.anonId.asc().nullsLast().op("text_ops")).where(sql`((status = 'held'::text) AND (user_id IS NULL))`),
+	index("orders_user_outlet_night_idx").using("btree", table.userId.asc().nullsLast().op("uuid_ops"), table.outletId.asc().nullsLast().op("uuid_ops"), table.serviceDate.asc().nullsLast().op("date_ops")).where(sql`(user_id IS NOT NULL)`),
+	index("orders_anon_held_idx").using("btree", table.anonId.asc().nullsLast().op("text_ops")).where(sql`(user_id IS NULL)`),
 	index("orders_drop_id_status_idx").using("btree", table.dropId.asc().nullsLast().op("text_ops"), table.status.asc().nullsLast().op("uuid_ops")),
 	index("orders_status_hold_expires_at_idx").using("btree", table.status.asc().nullsLast().op("timestamptz_ops"), table.holdExpiresAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'held'::text)`),
 	index("orders_user_id_created_at_idx").using("btree", table.userId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("uuid_ops")),
@@ -402,7 +402,7 @@ export const orders = pgTable("orders", {
 			name: "orders_payout_account_id_fkey"
 		}),
 	unique("orders_number_key").on(table.number),
-	check("orders_quantity_check", sql`(quantity >= 1) AND (quantity <= 10)`),
+	check("orders_quantity_check", sql`quantity >= 1`),
 	check("orders_status_check", sql`status = ANY (ARRAY['held'::text, 'expired'::text, 'paid'::text, 'collected'::text, 'no_show'::text, 'cancelled'::text])`),
 	check("orders_rating_check", sql`(rating >= 1) AND (rating <= 5)`),
 ]);

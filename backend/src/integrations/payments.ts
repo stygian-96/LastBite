@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { devFakeProviders } from '../lib/env.js';
 import { razorpayFromEnv } from './razorpay.js';
 
@@ -91,6 +92,10 @@ export interface PaymentGateway {
 }
 
 /** Keeps everything in memory. Used by tests, and by local development that asks for it. */
+// Fresh each time the process starts, so fake IDs never repeat ones saved before a restart: the
+// database keeps gateway IDs unique, and a dev server restarts on every edit.
+const RUN = randomBytes(3).toString('hex');
+
 export class FakeGateway implements PaymentGateway {
   readonly keyId = 'rzp_test_fake';
   readonly orders: { id: string; amountPaise: number; receipt: string }[] = [];
@@ -139,7 +144,7 @@ export class FakeGateway implements PaymentGateway {
   }
 
   async createOrder(a: { amountPaise: number; receipt: string }): Promise<{ id: string }> {
-    const order = { id: `order_fake_${this.orders.length + 1}`, ...a };
+    const order = { id: `order_fake_${RUN}_${this.orders.length + 1}`, ...a };
     this.orders.push(order);
     return { id: order.id };
   }
@@ -175,7 +180,7 @@ export class FakeGateway implements PaymentGateway {
       throw new GatewayRefusedError(`Refund exceeds what is left of payment ${a.paymentId}`);
     }
 
-    const refund = { id: `rfnd_fake_${this.refunds.length + 1}`, status: this.refundStatus, ...a };
+    const refund = { id: `rfnd_fake_${RUN}_${this.refunds.length + 1}`, status: this.refundStatus, ...a };
     this.refunds.push(refund);
     if (this.timeoutsAfterAccept > 0) {
       this.timeoutsAfterAccept--;
@@ -206,7 +211,7 @@ export class FakeGateway implements PaymentGateway {
   }): Promise<{ id: string }> {
     const sent = this.transfers.find((t) => t.idempotencyKey === a.idempotencyKey);
     if (sent) return { id: sent.id };
-    const transfer = { id: `trf_fake_${this.transfers.length + 1}`, released: false, remainingPaise: a.amountPaise, ...a };
+    const transfer = { id: `trf_fake_${RUN}_${this.transfers.length + 1}`, released: false, remainingPaise: a.amountPaise, ...a };
     this.transfers.push(transfer);
     return { id: transfer.id };
   }
@@ -228,7 +233,7 @@ export class FakeGateway implements PaymentGateway {
       throw new GatewayRefusedError(`Reversal exceeds what is left of transfer ${transferId}`);
     }
     transfer.remainingPaise -= amountPaise;
-    const reversal = { id: `rvrsl_fake_${this.transferReversals.length + 1}`, transferId, amountPaise, idempotencyKey };
+    const reversal = { id: `rvrsl_fake_${RUN}_${this.transferReversals.length + 1}`, transferId, amountPaise, idempotencyKey };
     this.transferReversals.push(reversal);
     return { id: reversal.id };
   }
@@ -258,7 +263,7 @@ export class FakeGateway implements PaymentGateway {
 
     if (step === 'none') {
       await make('account');
-      accountId = `acc_fake_${this.linkedAccounts.length + 1}`;
+      accountId = `acc_fake_${RUN}_${this.linkedAccounts.length + 1}`;
       this.linkedAccounts.push({ id: accountId, ...a });
       step = 'account';
       await save({ step, accountId, productId });

@@ -27,17 +27,10 @@ describe('database constraints', () => {
     expect((await getDropRow(drop.id)).reservedCount).toBe(1);
   });
 
-  test('one active order per user, outlet and night', async () => {
+  test('a customer can have several orders at one outlet in one night', async () => {
     const drop = await makeDrop();
     const user = await makeUser();
     await makeOrder({ dropId: drop.id, outletId: drop.outletId, userId: user.id });
-    await expectPgCode(makeOrder({ dropId: drop.id, outletId: drop.outletId, userId: user.id }), '23505');
-  });
-
-  test('expired order frees the unique slot', async () => {
-    const drop = await makeDrop();
-    const user = await makeUser();
-    await makeOrder({ dropId: drop.id, outletId: drop.outletId, userId: user.id, status: 'expired' });
     const again = await makeOrder({ dropId: drop.id, outletId: drop.outletId, userId: user.id });
     expect(again.status).toBe('held');
   });

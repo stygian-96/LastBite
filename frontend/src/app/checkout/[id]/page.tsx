@@ -7,7 +7,7 @@ import { outletHref } from "@/components/customer";
 import { PhoneSignIn } from "@/components/signin";
 import { Button, Field, LinkButton, Notice, PageSkeleton, TopBar } from "@/components/ui";
 import { HOLD_SECONDS } from "@/config/brand";
-import { api, errorCode, errorDetails, errorMessage, type Order, type VerifyResult } from "@/lib/api";
+import { api, errorCode, errorMessage, type Order, type VerifyResult } from "@/lib/api";
 import { clock, rupees, timeRange } from "@/lib/format";
 import { useQuery, useSecondsLeft } from "@/lib/hooks";
 import { completePayment, isTestPayment } from "@/lib/payment";
@@ -175,9 +175,7 @@ export default function Checkout() {
       router.replace(`/checkout/${fresh.id}?drop=${dropId}`);
     } catch (err) {
       const code = errorCode(err);
-      const existing = errorDetails(err).existingOrderId;
-      if (code === "already_ordered" && existing) router.replace(`/orders/${existing}?already=1`);
-      else setAgainError(code === "sold_out" || code === "not_on_sale" ? "Someone got there first. It’s sold out now." : errorMessage(err));
+      setAgainError(code === "sold_out" || code === "not_on_sale" ? "Someone got there first. It’s sold out now." : errorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -261,10 +259,25 @@ export default function Checkout() {
   const secondsLeft = left ?? HOLD_SECONDS;
   const danger = secondsLeft <= 60;
 
+  const payButton = (
+    <Button className="w-full" disabled={!ready || busy} onClick={pay}>
+          {!ready
+            ? needsName && ack
+              ? "Add your name to pay"
+              : "Tick the box above to pay"
+            : busy
+              ? "Paying…"
+              : `Pay ${rupees(item.pricePaise)} with ${METHODS.find((m) => m.id === method)!.label}`}
+    </Button>
+  );
+
+  // Phones: one column with Pay pinned to the bottom. Desktop: the order on the left, and paying in a
+  // card on the right that stays in view.
   return (
-    <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col">
+    <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col lg:max-w-5xl">
       <TopBar title="Checkout" onBack={cancel} icon="close" backLabel="Cancel and go back" />
-      <div className="flex flex-1 flex-col gap-3.5 px-4 pb-4 pt-1">
+      <div className="flex flex-1 flex-col gap-3.5 px-4 pb-4 pt-1 lg:grid lg:grid-cols-[minmax(0,1fr)_400px] lg:items-start lg:gap-8 lg:px-8 lg:pb-10 lg:pt-4">
+        <div className="flex flex-col gap-3.5">
         <section role="timer" aria-label={`Hold ends in ${clock(secondsLeft)}`} className="flex flex-col gap-2.5 rounded-[22px] bg-dark p-[18px] text-white">
           <div className="flex items-center justify-between">
             <span className="flex flex-col gap-0.5">
@@ -277,20 +290,20 @@ export default function Checkout() {
             <div className={`h-full rounded-full ${danger ? "bg-coral" : "bg-white"}`} style={{ width: `${Math.round((secondsLeft / HOLD_SECONDS) * 100)}%` }} />
           </div>
         </section>
-
         <OrderLines order={item} busy={changing || busy} onChange={changeLine} />
         {quantityError && (
           <p role="alert" className="text-[13px] text-danger">
             {quantityError}
           </p>
         )}
-
         <div className="rounded-2xl bg-fill px-3.5 py-3 text-[13px] leading-normal text-body">
           <strong className="font-medium text-ink">Collect today, {window}.</strong> In person, no delivery. Missed pickups are forfeited; if the vendor cancels you’re refunded automatically.
         </div>
+        </div>
 
+        <div className="flex flex-col gap-3.5 lg:sticky lg:top-6 lg:rounded-[22px] lg:p-5 lg:shadow-card">
+          <h2 className="hidden text-lg font-medium lg:block">{signedOut ? "Sign in to pay" : "Pay"}</h2>
         {signedOut && <PhoneSignIn onSignedIn={signedIn} hint="We’ll text a 6-digit code. Your bag stays held while you sign in, and your pickup code comes to this number." />}
-
         {needsName && (
           <Field
             id="name"
@@ -301,7 +314,6 @@ export default function Checkout() {
             onChange={(event) => setName(event.target.value)}
           />
         )}
-
         {!signedOut && (
         <label className="flex min-h-11 cursor-pointer items-start gap-3 text-[13px] leading-normal">
           <input type="checkbox" checked={ack} onChange={() => setAck(!ack)} className="m-0 size-[22px] flex-none accent-coral" />
@@ -311,7 +323,6 @@ export default function Checkout() {
           </span>
         </label>
         )}
-
         {!signedOut && (
         <fieldset className="flex flex-col gap-2.5">
           <legend className="mb-2.5 text-base font-medium">Pay with</legend>
@@ -332,28 +343,17 @@ export default function Checkout() {
           <span className="text-xs text-muted">{isTestPayment ? "Test mode: payment always succeeds and no money moves." : "Processed securely by Razorpay."}</span>
         </fieldset>
         )}
-
         {error && (
           <div role="alert" className="flex flex-col gap-1 rounded-2xl bg-warn-bg p-3.5 text-[13px] leading-normal text-warn-fg">
             <strong className="text-sm font-medium">Payment didn’t go through</strong>
             {error} You weren’t charged. Your bag is still held for {clock(secondsLeft)}.
           </div>
         )}
+          {!signedOut && <div className="hidden lg:block">{payButton}</div>}
+        </div>
       </div>
 
-      {!signedOut && (
-      <div className="sticky bottom-0 bg-white px-4 pb-6 pt-3">
-        <Button className="w-full" disabled={!ready || busy} onClick={pay}>
-          {!ready
-            ? needsName && ack
-              ? "Add your name to pay"
-              : "Tick the box above to pay"
-            : busy
-              ? "Paying…"
-              : `Pay ${rupees(item.pricePaise)} with ${METHODS.find((m) => m.id === method)!.label}`}
-        </Button>
-      </div>
-      )}
+      {!signedOut && <div className="sticky bottom-0 bg-white px-4 pb-6 pt-3 lg:hidden">{payButton}</div>}
     </div>
   );
 }

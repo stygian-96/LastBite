@@ -12,8 +12,6 @@ import { useQuery } from "@/lib/hooks";
 
 type Problem =
   | { kind: "sold_out" }
-  | { kind: "already"; orderId?: string }
-  | { kind: "hold"; orderId?: string }
   /** This bag couldn't join the order already held at this outlet. */
   | { kind: "in_order"; orderId: string; message: string }
   | { kind: "other"; message: string };
@@ -73,17 +71,13 @@ export default function Listing() {
     } catch (err) {
       const code = errorCode(err);
       const orderId = errorDetails(err).existingOrderId;
-      if (orderId && code !== "already_ordered" && code !== "hold_exists") {
+      if (orderId) {
         // Adding to the bags already held here didn't work: say why, and lead back to that order.
         setProblem({ kind: "in_order", orderId, message: errorMessage(err) });
         drop.reload();
       } else if (code === "sold_out" || code === "not_on_sale") {
         setProblem({ kind: "sold_out" });
         drop.reload();
-      } else if (code === "already_ordered") {
-        setProblem({ kind: "already", orderId });
-      } else if (code === "hold_exists") {
-        setProblem({ kind: "hold", orderId });
       } else if (code === "over_limit" || code === "not_enough_left") {
         // Someone took bags meanwhile, or the vendor lowered the limit: show the new numbers.
         setProblem({ kind: "other", message: `${errorMessage(err)}. Pick fewer bags and try again.` });
@@ -189,24 +183,6 @@ export default function Listing() {
 
   const action = (
     <div className="flex flex-col gap-2">
-      {problem?.kind === "already" && (
-        <div role="alert" className="flex flex-col gap-2 rounded-2xl bg-wait-bg p-3.5 text-[13px] leading-normal text-wait-fg">
-          <strong className="text-sm font-medium">You already have a bag from {item.brandName} tonight</strong>
-          It’s one order per outlet each night, and it’s already paid.
-          <LinkButton href={problem.orderId ? `/orders/${problem.orderId}` : "/orders"} size="md" variant="dark">
-            Show my order
-          </LinkButton>
-        </div>
-      )}
-      {problem?.kind === "hold" && (
-        <div role="alert" className="flex flex-col gap-2 rounded-2xl bg-wait-bg p-3.5 text-[13px] leading-normal text-wait-fg">
-          <strong className="text-sm font-medium">You already have a bag on hold</strong>
-          Finish that one first, or let it go.
-          <LinkButton href={problem.orderId ? `/checkout/${problem.orderId}` : "/orders"} size="md" variant="dark">
-            Go to my held bag
-          </LinkButton>
-        </div>
-      )}
       {problem?.kind === "in_order" && (
         <div role="alert" className="flex flex-col gap-2 rounded-2xl bg-wait-bg p-3.5 text-[13px] leading-normal text-wait-fg">
           <strong className="text-sm font-medium">Couldn’t add this to your order</strong>

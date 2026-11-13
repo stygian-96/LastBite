@@ -92,14 +92,14 @@ describe('building one order from several bags', () => {
     });
   });
 
-  test('an order holds at most 10 bags', async () => {
+  test('an order has no bag cap of its own, only each bag’s limit', async () => {
     const outlet = await makeLiveOutlet();
     const user = await makeUser();
     const drop = (n: number) => makeListing({ outletId: outlet.id, maxPerOrder: 10 }).then((l) => makeDrop({ outletId: outlet.id, listingId: l.id, quantity: n }));
     const [a, b] = [await drop(20), await drop(20)];
-    await reserveDrop({ dropId: a.id, userId: user.id, ip: '1.1.1.1', quantity: 8 }, now);
-    expect(await failure(reserveDrop({ dropId: b.id, userId: user.id, ip: '1.1.1.1', quantity: 3 }, now))).toMatchObject({ code: 'order_full' });
-    expect((await getDropRow(b.id)).reservedCount).toBe(0);
+    const order = await reserveDrop({ dropId: a.id, userId: user.id, ip: '1.1.1.1', quantity: 8 }, now);
+    await reserveDrop({ dropId: b.id, userId: user.id, ip: '1.1.1.1', quantity: 10 }, now);
+    expect((await getOrderRow(order.id)).quantity).toBe(18);
   });
 
   test('a bag from another outlet starts its own order', async () => {
@@ -109,10 +109,16 @@ describe('building one order from several bags', () => {
     expect(other.id).not.toBe(orderId);
   });
 
-  test('a paid order is not added to: the outlet already has tonight’s order', async () => {
+  test('after paying, the customer starts a new order there, and the bag limit counts both', async () => {
     const { bread, user, orderId } = await basket();
     await pay(orderId, 35000);
-    expect(await failure(reserveDrop({ dropId: bread.id, userId: user.id, ip: '1.1.1.1' }, now))).toMatchObject({ code: 'already_ordered' });
+    const next = await reserveDrop({ dropId: bread.id, userId: user.id, ip: '1.1.1.1' }, now);
+    expect(next.id).not.toBe(orderId);
+    expect(await failure(changeItemQuantity({ userId: user.id }, next.id, bread.id, 2, now))).toMatchObject({
+      code: 'over_limit',
+      details: { maxPerOrder: 3, alreadyHave: 2 },
+    });
+    expect((await getDropRow(bread.id)).reservedCount).toBe(3);
   });
 });
 
