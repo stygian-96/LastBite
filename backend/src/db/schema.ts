@@ -270,6 +270,7 @@ export const listings = pgTable("listings", {
 	maxPerOrder: smallint("max_per_order").default(3).notNull(),
 	photoKey: text("photo_key"),
 	archivedAt: timestamp("archived_at", { withTimezone: true, mode: 'string' }),
+	deletedAt: timestamp("deleted_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	foreignKey({

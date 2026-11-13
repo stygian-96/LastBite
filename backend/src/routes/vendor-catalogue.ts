@@ -4,7 +4,7 @@ import { route } from '../lib/http.js';
 import { listAccessibleOutlets } from '../modules/auth/access.js';
 import { getToday, publishDrop, updateDrop } from '../modules/catalogue/drops.js';
 import {
-  archiveListing,
+  deleteListing,
   copyListing,
   createListing,
   listListings,
@@ -37,9 +37,7 @@ export const vendorCatalogue = new Hono()
   )
   .delete(
     '/listings/:id',
-    route({ auth: 'user' }, async ({ user, params, now }) => ({
-      listing: await archiveListing(user!.id, params.id!, now),
-    })),
+    route({ auth: 'user' }, async ({ user, params, now }) => deleteListing(user!.id, params.id!, now)),
   )
   .post(
     '/listings/:id/copy',

@@ -5,7 +5,7 @@ import { auditLog, drops, listings, memberships } from '../../src/db/schema.js';
 import { env } from '../../src/lib/env.js';
 import { ApiError } from '../../src/lib/errors.js';
 import { createSession } from '../../src/modules/auth/session.js';
-import { archiveListing, copyListing, createListing, updateListing } from '../../src/modules/catalogue/listings.js';
+import { archiveListing, copyListing, createListing, deleteListing, listListings, updateListing } from '../../src/modules/catalogue/listings.js';
 import { getToday, publishDrop, updateDrop } from '../../src/modules/catalogue/drops.js';
 import { getOutletStatus } from '../../src/modules/onboarding/outlets.js';
 import { app } from '../../src/app.js';
@@ -100,6 +100,45 @@ describe('listings', () => {
     expect((await updateListing(owner.id, l.id, { active: true }, T0)).archivedAt).toBeNull();
     expect(await publishDrop(owner.id, l.id, 3, T0)).toMatchObject({ quantity: 3 });
     expect(await failure(updateListing(owner.id, l.id, { active: 'yes' }))).toMatchObject({ status: 400 });
+  });
+
+  test('deleting a listing never sold removes it outright', async () => {
+    const { owner, outlet } = await setup();
+    const l = await createListing(owner.id, outlet.id, LISTING);
+    expect(await deleteListing(owner.id, l.id, T0)).toEqual({ deleted: 'erased' });
+    expect((await db.select().from(listings).where(eq(listings.id, l.id)))).toHaveLength(0);
+    expect(await failure(deleteListing(owner.id, l.id, T0))).toMatchObject({ status: 404 });
+  });
+
+  test('deleting a listing with past nights hides it but keeps those nights', async () => {
+    const { owner, outlet } = await setup();
+    const l = await createListing(owner.id, outlet.id, LISTING);
+    const drop = await makeDrop({ outletId: outlet.id, listingId: l.id, serviceDate: '2026-10-01', pickupStartAt: '2026-10-01T19:00:00+05:30', pickupEndAt: '2026-10-01T21:00:00+05:30' });
+    expect(await deleteListing(owner.id, l.id, T0)).toEqual({ deleted: 'hidden' });
+    const [row] = await db.select().from(listings).where(eq(listings.id, l.id));
+    expect(row!.deletedAt).not.toBeNull();
+    expect(row!.archivedAt).not.toBeNull();
+    expect((await db.select().from(drops).where(eq(drops.id, drop.id)))).toHaveLength(1);
+    expect(await listListings(owner.id, outlet.id)).toEqual([]);
+    expect(await failure(updateListing(owner.id, l.id, { name: 'x' }))).toMatchObject({ status: 404 });
+    expect(await failure(publishDrop(owner.id, l.id, 3, T0))).toMatchObject({ status: 404 });
+  });
+
+  test('a listing on sale tonight cannot be deleted until pickup ends or tonight is cancelled', async () => {
+    const { owner, outlet } = await setup();
+    const l = await createListing(owner.id, outlet.id, LISTING);
+    const drop = await makeDrop({ outletId: outlet.id, listingId: l.id });
+    // T0 is before tonight's pickup ends.
+    expect(await failure(deleteListing(owner.id, l.id, T0))).toMatchObject({ code: 'on_sale', status: 409 });
+    await db.update(drops).set({ status: 'cancelled' }).where(eq(drops.id, drop.id));
+    expect(await deleteListing(owner.id, l.id, T0)).toEqual({ deleted: 'hidden' });
+  });
+
+  test('only managers can delete', async () => {
+    const { brand, outlet } = await setup();
+    const counter = await staff(brand.id, outlet.id, 'counter');
+    const l = await makeListing({ outletId: outlet.id });
+    expect(await failure(deleteListing(counter.id, l.id, T0))).toMatchObject({ status: 403 });
   });
 
   test('a copy keeps the limit per customer and starts active', async () => {
@@ -441,6 +480,9 @@ describe('vendor catalogue routes', () => {
     expect((await call(owner.id, 'PUT', `/listings/${id}/drops/today`, { quantity: 'x' })).status).toBe(400);
 
     const gone = await call(owner.id, 'DELETE', `/listings/${id}`);
-    expect(gone.json.listing.archivedAt).not.toBeNull();
+    expect(gone.json).toEqual({ deleted: 'erased' });
+    expect((await call(owner.id, 'PATCH', `/listings/${id}`, { name: 'x' })).status).toBe(404);
+    // The all-day listing is on sale today, so it can't be deleted yet.
+    expect((await call(owner.id, 'DELETE', `/listings/${allDay.json.listing.id}`)).status).toBe(409);
   });
 });

@@ -278,7 +278,7 @@ export async function getVendor(outletId: string, now: Date): Promise<VendorDeta
     db
       .select()
       .from(listings)
-      .where(eq(listings.outletId, outletId))
+      .where(and(eq(listings.outletId, outletId), isNull(listings.deletedAt)))
       .orderBy(sql`${listings.archivedAt} IS NOT NULL`, asc(listings.createdAt)),
     listInventory({ outletId }, now),
   ]);

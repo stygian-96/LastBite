@@ -64,15 +64,33 @@ export function ListingRow({
   selected,
   onOpen,
   onToggle,
+  onDeleted,
   busy,
 }: {
   listing: Listing;
   selected: boolean;
   onOpen: () => void;
   onToggle: (on: boolean) => void;
+  onDeleted: () => void;
   busy: boolean;
 }) {
   const active = isActive(listing);
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function remove() {
+    setDeleting(true);
+    setError(null);
+    try {
+      await api.deleteListing(listing.id);
+      onDeleted();
+    } catch (err) {
+      setError(errorMessage(err));
+      setDeleting(false);
+    }
+  }
+
   return (
     <li>
       <div
@@ -99,7 +117,36 @@ export function ListingRow({
         </span>
         {!active && <StatusChip tone="info">Inactive</StatusChip>}
         <ActiveSwitch on={active} busy={busy} onChange={onToggle} />
+        <button
+          type="button"
+          aria-label={`Delete ${listing.name}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            setConfirming(true);
+          }}
+          className="flex size-10 flex-none items-center justify-center rounded-full text-muted hover:bg-white hover:text-danger"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" />
+          </svg>
+        </button>
       </div>
+      {confirming && (
+        <div className="flex flex-col gap-2 bg-warn-bg px-3 py-3 text-[13px] leading-normal text-warn-fg">
+          <span>
+            Delete <strong className="font-medium">{listing.name}</strong> for good? Past nights and earnings stay. To pause it instead, switch it off.
+          </span>
+          <div className="flex justify-end gap-2">
+            <button type="button" disabled={deleting} onClick={() => setConfirming(false)} className="min-h-10 rounded-full bg-white px-3.5 font-medium text-ink">
+              Keep it
+            </button>
+            <button type="button" disabled={deleting} onClick={remove} className="min-h-10 rounded-full bg-danger px-3.5 font-medium text-white">
+              {deleting ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+          {error && <span role="alert">{error}</span>}
+        </div>
+      )}
     </li>
   );
 }
@@ -113,14 +160,30 @@ export function ListingPanel({
   outlets,
   onChanged,
   onCopied,
+  onDeleted,
 }: {
   listing: Listing;
   outlets: VendorOutlet[];
   onChanged: (listing: Listing) => void;
   onCopied: (copy: Listing) => void;
+  onDeleted: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [copying, setCopying] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  async function remove() {
+    setBusy(true);
+    setDeleteError(null);
+    try {
+      await api.deleteListing(listing.id);
+      onDeleted();
+    } catch (err) {
+      setDeleteError(errorMessage(err));
+      setBusy(false);
+    }
+  }
   const [error, setError] = useState<string | null>(null);
   const active = isActive(listing);
 
@@ -187,6 +250,30 @@ export function ListingPanel({
       </div>
 
       <ListingForm key={listing.id} outletId={listing.outletId} listing={listing} submitLabel="Save changes" onSaved={onChanged} />
+
+      <div className="flex flex-col gap-2.5 border-t border-[#f0f0f0] pt-4">
+        {deleting ? (
+          <div className="flex flex-col gap-2.5 rounded-2xl border-[1.5px] border-coral p-3.5 text-[13px] leading-normal">
+            <strong className="text-sm font-medium">Delete “{listing.name}”?</strong>
+            <span className="text-muted">
+              It goes from your listings for good. Past nights, their orders and your earnings stay. To stop selling it for now instead, switch it off.
+            </span>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button type="button" disabled={busy} onClick={() => setDeleting(false)} className="min-h-10 rounded-full border border-[#dddddd] bg-white px-3.5 font-medium">
+                Keep it
+              </button>
+              <button type="button" disabled={busy} onClick={remove} className="min-h-10 rounded-full bg-warn-bg px-3.5 font-medium text-warn-fg">
+                {busy ? "Deleting…" : "Delete listing"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setDeleting(true)} className="min-h-10 self-start text-[13px] font-medium text-danger underline">
+            Delete listing
+          </button>
+        )}
+        <FormError message={deleteError} />
+      </div>
 
       {copying && (
         <Sheet title="Copy to which outlet?" onClose={() => setCopying(false)}>

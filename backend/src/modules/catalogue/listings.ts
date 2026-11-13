@@ -1,7 +1,7 @@
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq, gt, isNull, ne } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withTx, type Tx } from '../../db/client.js';
-import { listings, outlets } from '../../db/schema.js';
+import { drops, listings, outlets } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { ApiError, parseInput } from '../../lib/errors.js';
 import { requireOutlet } from '../auth/access.js';
@@ -71,7 +71,7 @@ const uniqueDays = (days: number[]) => [...new Set(days)].sort((a, b) => a - b);
 
 async function loadListing(listingId: string, executor: Pick<Tx, 'select'> = db): Promise<Listing> {
   if (!isId(listingId)) throw new ApiError('not_found', 404, 'Listing not found');
-  const [l] = await executor.select().from(listings).where(eq(listings.id, listingId));
+  const [l] = await executor.select().from(listings).where(and(eq(listings.id, listingId), isNull(listings.deletedAt)));
   if (!l) throw new ApiError('not_found', 404, 'Listing not found');
   return l;
 }
@@ -88,7 +88,7 @@ export async function listListings(userId: string, outletId: string): Promise<Li
   return db
     .select()
     .from(listings)
-    .where(eq(listings.outletId, outletId))
+    .where(and(eq(listings.outletId, outletId), isNull(listings.deletedAt)))
     .orderBy(asc(listings.createdAt), asc(listings.id));
 }
 
@@ -173,6 +173,44 @@ export async function archiveListing(userId: string, listingId: string, now: Dat
       .returning();
     await audit(tx, { actorId: userId, action: 'listing.archive', entity: 'listing', entityId: listingId });
     return row!;
+  });
+}
+
+/**
+ * Deletes a listing for the vendor. One never put on sale is removed outright. One with past nights
+ * is marked deleted instead (and switched off), so those nights, their orders and payouts keep it;
+ * it no longer appears or can be changed. Refused while it is on sale tonight, which would leave
+ * customers holding bags of a listing that is gone.
+ */
+export async function deleteListing(userId: string, listingId: string, now: Date): Promise<{ deleted: 'erased' | 'hidden' }> {
+  await loadManagedListing(userId, listingId);
+  return withTx(async (tx) => {
+    const [locked] = await tx
+      .select()
+      .from(listings)
+      .where(and(eq(listings.id, listingId), isNull(listings.deletedAt)))
+      .for('update');
+    if (!locked) throw new ApiError('not_found', 404, 'Listing not found');
+    const [tonight] = await tx
+      .select({ id: drops.id })
+      .from(drops)
+      .where(and(eq(drops.listingId, listingId), ne(drops.status, 'cancelled'), gt(drops.pickupEndAt, now.toISOString())))
+      .limit(1);
+    if (tonight) {
+      throw new ApiError('on_sale', 409, 'This listing is on sale tonight. Delete it after pickup ends, or cancel tonight’s bags first');
+    }
+    const [past] = await tx.select({ id: drops.id }).from(drops).where(eq(drops.listingId, listingId)).limit(1);
+    const deleted = past ? 'hidden' : 'erased';
+    if (past) {
+      await tx
+        .update(listings)
+        .set({ deletedAt: now.toISOString(), archivedAt: locked.archivedAt ?? now.toISOString() })
+        .where(eq(listings.id, listingId));
+    } else {
+      await tx.delete(listings).where(eq(listings.id, listingId));
+    }
+    await audit(tx, { actorId: userId, action: 'listing.delete', entity: 'listing', entityId: listingId, detail: { deleted, name: locked.name } });
+    return { deleted };
   });
 }
 

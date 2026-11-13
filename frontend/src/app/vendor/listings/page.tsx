@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { ListingForm } from "@/components/forms";
 import { isActive, ListingPanel, ListingRow, matchesListing } from "@/components/listings";
-import { Button, ErrorState, LinkButton, Skeleton } from "@/components/ui";
+import { Button, Chip, ErrorState, LinkButton, Skeleton } from "@/components/ui";
 import { VendorSearch, VendorShell } from "@/components/vendor";
 import { api, errorMessage, type Listing, type VendorOutlet } from "@/lib/api";
 import { useQuery } from "@/lib/hooks";
@@ -25,13 +25,14 @@ function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOu
   const [toggling, setToggling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
+  const [show, setShow] = useState<"all" | "active" | "inactive">("all");
 
   if (listings.error && !listings.data) return <ErrorState message={errorMessage(listings.error)} onRetry={listings.reload} />;
   if (!listings.data) return <Skeleton className="h-64 rounded-[22px]" />;
 
   const all = [...listings.data].sort(byActiveThenName);
   const inactive = all.filter((l) => !isActive(l)).length;
-  const found = all.filter((l) => matchesListing(l, q));
+  const found = all.filter((l) => matchesListing(l, q) && (show === "all" || isActive(l) === (show === "active")));
   const current = selected === "new" ? null : (all.find((l) => l.id === selected) ?? all[0] ?? null);
   const showNew = selected === "new" || all.length === 0;
 
@@ -45,6 +46,10 @@ function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOu
   };
   const replace = (updated: Listing) => {
     listings.setData(listings.data!.map((l) => (l.id === updated.id ? updated : l)));
+  };
+  const deleted = (id: string) => {
+    listings.setData(listings.data!.filter((l) => l.id !== id));
+    setSelected(null);
   };
   const added = (listing: Listing) => {
     listings.setData([...listings.data!, listing]);
@@ -75,7 +80,26 @@ function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOu
           </Button>
         </div>
         {all.length > 0 && <VendorSearch label="Search listings" value={q} onChange={setQ} />}
-        {q.trim() && found.length === 0 && <p className="py-2 text-sm text-muted">No listing matches “{q.trim()}”.</p>}
+        {all.length > 0 && (
+          <div role="group" aria-label="Show" className="flex gap-1.5">
+            {(
+              [
+                ["all", "All", all.length],
+                ["active", "Active", all.length - inactive],
+                ["inactive", "Inactive", inactive],
+              ] as const
+            ).map(([id, label, count]) => (
+              <Chip key={id} on={show === id} onClick={() => setShow(id)}>
+                {label} {count}
+              </Chip>
+            ))}
+          </div>
+        )}
+        {all.length > 0 && found.length === 0 && (
+          <p className="py-2 text-sm text-muted">
+            {q.trim() ? `No listing matches “${q.trim()}”.` : show === "inactive" ? "Nothing is switched off." : "Nothing is switched on."}
+          </p>
+        )}
         {found.length > 0 && (
           <ul className="divide-y divide-[#f0f0f0] overflow-hidden rounded-[18px] border-[1.5px] border-line">
             {found.map((listing) => (
@@ -85,6 +109,7 @@ function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOu
                 selected={selected !== "new" && current?.id === listing.id}
                 onOpen={() => open(listing.id)}
                 onToggle={(on) => toggle(listing, on)}
+                onDeleted={() => deleted(listing.id)}
                 busy={toggling === listing.id}
               />
             ))}
@@ -116,7 +141,7 @@ function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOu
         ) : current ? (
           <>
             <h2 className="text-lg font-medium">{current.name}</h2>
-            <ListingPanel key={current.id} listing={current} outlets={outlets} onChanged={replace} onCopied={added} />
+            <ListingPanel key={current.id} listing={current} outlets={outlets} onChanged={replace} onCopied={added} onDeleted={() => deleted(current.id)} />
           </>
         ) : null}
       </section>

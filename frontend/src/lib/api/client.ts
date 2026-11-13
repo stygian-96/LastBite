@@ -99,7 +99,8 @@ export type Api = {
   createListing(outletId: string, body: ListingInput): Promise<Listing>;
   /** `active` switches the listing on or off for new nights. */
   updateListing(id: string, patch: Partial<ListingInput> & { active?: boolean }): Promise<Listing>;
-  archiveListing(id: string): Promise<void>;
+  /** Removes a listing never sold; hides one with past nights, keeping them. Refused while on sale tonight. */
+  deleteListing(id: string): Promise<{ deleted: "erased" | "hidden" }>;
   copyListing(id: string, targetOutletId: string): Promise<Listing>;
   getToday(outletId: string): Promise<Today>;
   publishDrop(listingId: string, quantity: number): Promise<VendorDrop>;
@@ -256,9 +257,7 @@ export const httpApi: Api = {
   createListing: async (outletId, body) =>
     (await request<{ listing: Listing }>("POST", `/vendor/outlets/${outletId}/listings`, body)).listing,
   updateListing: async (id, patch) => (await request<{ listing: Listing }>("PATCH", `/vendor/listings/${id}`, patch)).listing,
-  archiveListing: async (id) => {
-    await send("DELETE", `/vendor/listings/${id}`);
-  },
+  deleteListing: (id) => request("DELETE", `/vendor/listings/${id}`),
   copyListing: async (id, targetOutletId) =>
     (await request<{ listing: Listing }>("POST", `/vendor/listings/${id}/copy`, { targetOutletId })).listing,
   getToday: async (outletId) => (await request<{ today: Today }>("GET", `/vendor/outlets/${outletId}/today`)).today,

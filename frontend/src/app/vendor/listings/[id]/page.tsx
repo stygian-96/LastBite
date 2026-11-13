@@ -51,6 +51,7 @@ function Editor({ outlet, outlets, id }: { outlet: VendorOutlet; outlets: Vendor
         outlets={outlets}
         onChanged={(updated) => listings.setData(listings.data!.map((l) => (l.id === updated.id ? updated : l)))}
         onCopied={(copy) => router.push(`/vendor/listings/${copy.id}`)}
+        onDeleted={() => router.replace("/vendor/listings")}
       />
     </div>
   );

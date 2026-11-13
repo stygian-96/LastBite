@@ -1367,11 +1367,16 @@ export const mockApi: Api = {
     return row;
   },
 
-  async archiveListing(id) {
+  async deleteListing(id) {
     await wait();
     const db = load();
-    listingRow(db, id).archivedAt = new Date().toISOString();
+    listingRow(db, id);
+    if (db.drops.some((d) => d.listingId === id && d.status !== "cancelled" && new Date(d.pickupEndAt).getTime() > Date.now())) {
+      fail("on_sale", "This listing is on sale tonight. Delete it after pickup ends, or cancel tonight’s bags first", 409);
+    }
+    db.listings = db.listings.filter((l) => l.id !== id);
     save(db);
+    return { deleted: "erased" as const };
   },
 
   async copyListing(id, targetOutletId) {
