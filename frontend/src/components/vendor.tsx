@@ -298,6 +298,11 @@ export function OrderList({ orders, onChanged }: { orders: VendorOrder[]; onChan
         return (
           <div key={order.id} className="flex flex-col gap-2.5 rounded-[18px] p-3 shadow-card">
             <div className="flex items-center gap-3">
+              {order.pickupCode && (
+                <span aria-label={`Pickup code ${order.pickupCode}`} className="tabular flex-none rounded-xl bg-fill px-2.5 py-1.5 text-[17px] font-bold tracking-[0.06em]">
+                  {order.pickupCode}
+                </span>
+              )}
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span className="text-[15px] font-medium">{order.customerLabel}</span>
                 <span className="truncate text-xs text-muted">

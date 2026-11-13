@@ -293,6 +293,8 @@ export type VendorOrder = {
   number: string;
   status: "paid" | "collected" | "no_show";
   customerLabel: string;
+  /** Shown to staff, to match the code the customer holds up. */
+  pickupCode: string | null;
   dropName: string;
   quantity: number;
   pricePaise: number;

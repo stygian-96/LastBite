@@ -17,7 +17,6 @@ Staff (`GET`, `POST`, `DELETE /vendor/outlets/:id/staff`), payout accounts (`GET
 
 | Where | Needs | What the frontend does for now |
 |---|---|---|
-| `GET /vendor/outlets/:id/orders` | `pickupCode` on each row, or a route to look a code up without collecting | The design's Check then Hand over is one step: a matching code collects immediately. Rows show the order number instead of the code. Please decide if staff should see codes at all |
 | Order view | `foodCategory` | Shows the bakery illustration on order cards |
 | Order view | `brandSlug`, `outletSlug`, `city` | Hides "See vendor" |
 | Order view | `rating` | Stars show as unrated after a refresh. A second rating gets `already_rated` |

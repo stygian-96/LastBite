@@ -6,11 +6,16 @@ import { parseInput } from '../../lib/errors.js';
 import { serviceDate } from '../../lib/time.js';
 import { NO_SHOW_GRACE_MINUTES, requirePickupStaff } from './collect.js';
 
-/** What staff see of an order. The customer is a first name and a last initial, never a phone number. */
+/**
+ * What staff see of an order. The customer is a first name and a last initial, never a phone number.
+ * The pickup code is shown so staff can match the one a customer holds up at a glance.
+ */
 export type VendorOrderRow = {
   id: string;
   number: string;
   status: string;
+  pickupCode: string | null;
+  quantity: number;
   customerLabel: string;
   dropName: string;
   pricePaise: number;
@@ -55,7 +60,9 @@ export async function listOutletOrders(
   const needle = q?.trim();
   if (needle) {
     const escaped = needle.replace(/[\\%_]/g, (c) => `\\${c}`);
-    filters.push(sql`${users.name} ilike ${`%${escaped}%`}`);
+    // A customer's name, or the whole pickup code they show (any case, spaces ignored).
+    const code = needle.replace(/\s+/g, '').toUpperCase();
+    filters.push(or(sql`${users.name} ilike ${`%${escaped}%`}`, eq(orders.pickupCode, code))!);
   }
 
   const rows = await db
@@ -65,6 +72,7 @@ export async function listOutletOrders(
       status: orders.status,
       name: users.name,
       dropName: drops.name,
+      pickupCode: orders.pickupCode,
       quantity: orders.quantity,
       pricePaise: orders.pricePaise,
       pickupStartAt: drops.pickupStartAt,

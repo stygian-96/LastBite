@@ -81,13 +81,13 @@ function Counter({ outlet }: { outlet: VendorOutlet }) {
         <span className="tabular text-[13px] text-muted">{left} to collect</span>
       </div>
       <label htmlFor="find" className="sr-only">
-        Find by customer name
+        Find by customer name or pickup code
       </label>
       <input
         id="find"
         value={search}
         onChange={(event) => setSearch(event.target.value)}
-        placeholder="Find by customer name"
+        placeholder="Customer name or pickup code"
         className="h-11 rounded-full bg-fill px-4 text-sm"
       />
 
@@ -97,7 +97,7 @@ function Counter({ outlet }: { outlet: VendorOutlet }) {
       ) : orders.error ? (
         <ErrorState message={errorMessage(orders.error)} onRetry={orders.reload} />
       ) : list.length === 0 ? (
-        <p className="py-6 text-center text-sm text-muted">{q ? "Nobody by that name tonight." : "No orders yet tonight."}</p>
+        <p className="py-6 text-center text-sm text-muted">{q ? "No order tonight matches that name or code. A code needs all 4 characters." : "No orders yet tonight."}</p>
       ) : (
         <OrderList orders={list} onChanged={orders.reload} />
       )}

@@ -1462,13 +1462,14 @@ export const mockApi: Api = {
     return db.orders
       .filter((o) => o.outletId === outletId && o.dropId !== "past")
       .filter((o) => o.status === "paid" || o.status === "collected" || o.status === "no_show")
-      .filter((o) => !q || o.customerLabel.toLowerCase().includes(q))
+      .filter((o) => !q || o.customerLabel.toLowerCase().includes(q) || o.pickupCode?.toLowerCase() === q.replace(/\s+/g, ""))
       .map(
         (o): VendorOrder => ({
           id: o.id,
           number: o.number,
           status: o.status as VendorOrder["status"],
           customerLabel: o.customerLabel || "Customer",
+          pickupCode: o.pickupCode,
           dropName: o.name,
           quantity: o.quantity ?? 1,
           pricePaise: o.pricePaise,

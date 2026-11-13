@@ -277,9 +277,24 @@ describe('listOutletOrders', () => {
     await makePaidOrder({ dropId: drop.id, pickupCode: 'M111', userId: other.id });
     const hit = await listOutletOrders(staff.id, drop.outletId, { q: 'asha' }, now);
     expect(hit).toHaveLength(1);
-    expect(hit[0]).toMatchObject({ customerLabel: 'Asha K.', status: 'paid' });
+    expect(hit[0]).toMatchObject({ customerLabel: 'Asha K.', status: 'paid', pickupCode: 'K472' });
     expect(await listOutletOrders(staff.id, drop.outletId, {}, now)).toHaveLength(2);
     expect(await listOutletOrders(staff.id, drop.outletId, { q: '100%' }, now)).toHaveLength(0);
+  });
+
+  test('search matches the whole pickup code, in any case', async () => {
+    const { staff, drop, order } = await setup('K472', {}, 'Asha Kumar');
+    const other = await makeUser({ name: 'Ravi Shah' });
+    await makePaidOrder({ dropId: drop.id, pickupCode: 'M111', userId: other.id });
+    for (const q of ['K472', 'k472', ' k 472 ']) {
+      expect((await listOutletOrders(staff.id, drop.outletId, { q }, now)).map((r) => r.id)).toEqual([order.id]);
+    }
+    // Part of a code finds nothing, so codes can't be found by guessing a letter or two.
+    expect(await listOutletOrders(staff.id, drop.outletId, { q: 'K47' }, now)).toHaveLength(0);
+    // Another outlet's code finds nothing here.
+    const elsewhere = await setup('Z999', {}, 'Zoya');
+    expect(await listOutletOrders(staff.id, drop.outletId, { q: 'Z999' }, now)).toHaveLength(0);
+    expect((await listOutletOrders(elsewhere.staff.id, elsewhere.drop.outletId, { q: 'z999' }, now)).map((r) => r.id)).toEqual([elsewhere.order.id]);
   });
 
   test('vendor rows never contain phone', async () => {
