@@ -3,9 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { ListingForm } from "@/components/forms";
-import { isActive, ListingPanel, ListingRow } from "@/components/listings";
+import { isActive, ListingPanel, ListingRow, matchesListing } from "@/components/listings";
 import { Button, ErrorState, LinkButton, Skeleton } from "@/components/ui";
-import { VendorShell } from "@/components/vendor";
+import { VendorSearch, VendorShell } from "@/components/vendor";
 import { api, errorMessage, type Listing, type VendorOutlet } from "@/lib/api";
 import { useQuery } from "@/lib/hooks";
 
@@ -24,12 +24,14 @@ function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOu
   const [selected, setSelected] = useState<string | "new" | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [q, setQ] = useState("");
 
   if (listings.error && !listings.data) return <ErrorState message={errorMessage(listings.error)} onRetry={listings.reload} />;
   if (!listings.data) return <Skeleton className="h-64 rounded-[22px]" />;
 
   const all = [...listings.data].sort(byActiveThenName);
   const inactive = all.filter((l) => !isActive(l)).length;
+  const found = all.filter((l) => matchesListing(l, q));
   const current = selected === "new" ? null : (all.find((l) => l.id === selected) ?? all[0] ?? null);
   const showNew = selected === "new" || all.length === 0;
 
@@ -72,9 +74,11 @@ function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOu
             New listing
           </Button>
         </div>
-        {all.length > 0 && (
+        {all.length > 0 && <VendorSearch label="Search listings" value={q} onChange={setQ} />}
+        {q.trim() && found.length === 0 && <p className="py-2 text-sm text-muted">No listing matches “{q.trim()}”.</p>}
+        {found.length > 0 && (
           <ul className="divide-y divide-[#f0f0f0] overflow-hidden rounded-[18px] border-[1.5px] border-line">
-            {all.map((listing) => (
+            {found.map((listing) => (
               <ListingRow
                 key={listing.id}
                 listing={listing}

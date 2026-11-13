@@ -356,3 +356,17 @@ export function codeError(err: unknown, code: string): { title: string; body: st
   }
   return { title: "We couldn’t check that code", body: errorMessage(err) };
 }
+
+/** The search box used across the vendor dashboard. */
+export function VendorSearch({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <input
+      type="search"
+      aria-label={label}
+      placeholder={label}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="h-11 w-full rounded-full bg-fill px-4 text-sm"
+    />
+  );
+}

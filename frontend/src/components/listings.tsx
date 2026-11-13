@@ -9,6 +9,12 @@ import { rupees, timeRange } from "@/lib/format";
 
 export const isActive = (listing: Listing) => !listing.archivedAt;
 
+/** A listing matches when its name or description holds every word typed, in any order. */
+export function matchesListing(listing: { name: string; description?: string }, query: string) {
+  const text = `${listing.name} ${listing.description ?? ""}`.toLowerCase();
+  return query.toLowerCase().split(/\s+/).filter(Boolean).every((word) => text.includes(word));
+}
+
 const DAYS = [
   [1, "M", "Monday"],
   [2, "T", "Tuesday"],

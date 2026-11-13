@@ -4,7 +4,8 @@ import Link from "next/link";
 import { useState } from "react";
 import { FormError, Stepper } from "@/components/forms";
 import { ErrorState, LinkButton, Skeleton, Switch } from "@/components/ui";
-import { CancelSheet, OrderList, useTonightOrders, VendorShell } from "@/components/vendor";
+import { matchesListing } from "@/components/listings";
+import { CancelSheet, OrderList, useTonightOrders, VendorSearch, VendorShell } from "@/components/vendor";
 import { api, errorMessage, type Listing, type VendorDrop, type VendorOutlet } from "@/lib/api";
 import { rupees, shortDate, timeRange } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
@@ -101,6 +102,7 @@ function Tonight({ outlet }: { outlet: VendorOutlet }) {
   const listings = useQuery(() => api.getListings(outlet.id), [outlet.id]);
   const today = useQuery(() => api.getToday(outlet.id), [outlet.id]);
   const orders = useTonightOrders(outlet.id);
+  const [q, setQ] = useState("");
 
   if (listings.loading || today.loading) {
     return (
@@ -119,6 +121,7 @@ function Tonight({ outlet }: { outlet: VendorOutlet }) {
   // Inactive listings stay off Today, unless one is already on sale tonight and needs managing.
   const shown = listings.data!.filter((l) => !l.archivedAt || drops.some((d) => d.listingId === l.id));
   const hidden = listings.data!.length - shown.length;
+  const found = shown.filter((l) => matchesListing(l, q));
   const revenue = list.reduce((sum, order) => sum + order.pricePaise, 0);
   const toCollect = list.filter((order) => order.status === "paid").length;
   const refresh = () => {
@@ -150,11 +153,15 @@ function Tonight({ outlet }: { outlet: VendorOutlet }) {
           </LinkButton>
         </div>
       ) : (
+        <>
+        <VendorSearch label="Search tonight’s listings" value={q} onChange={setQ} />
+        {found.length === 0 && <p className="py-2 text-sm text-muted">No listing matches “{q.trim()}”.</p>}
         <div className="grid gap-3 lg:grid-cols-2">
-          {shown.map((listing) => (
+          {found.map((listing) => (
             <ListingRow key={listing.id} listing={listing} drop={today.data!.drops.find((d) => d.listingId === listing.id)} onChanged={refresh} />
           ))}
         </div>
+        </>
       )}
       <span className="text-xs text-muted">
         Changes go live instantly. You can’t go below what’s already sold.
