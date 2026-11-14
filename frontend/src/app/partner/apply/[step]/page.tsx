@@ -24,6 +24,16 @@ import { useSession } from "@/lib/session";
 
 const TOTAL_STEPS = 6;
 
+/** Names for the side stepper on desktop, in step order. */
+const STEP_NAMES = [
+  { title: "Your account", what: "Name and email" },
+  { title: "Your outlet", what: "Address, hours and a photo" },
+  { title: "Documents", what: "FSSAI licence and PAN" },
+  { title: "Payout account", what: "Where we send your money" },
+  { title: "First listing", what: "A bag customers can reserve" },
+  { title: "Partner agreement", what: "Read and sign" },
+];
+
 // PAN needs the payout account, which needs the bank details from the next step.
 // Held in memory only, so a PAN never sits in browser storage.
 let panDraft: { pan: string; fileKey: string | null } | null = null;
@@ -63,9 +73,55 @@ function Approved({ what, reopen }: { what: string; reopen: string }) {
   );
 }
 
+/** Desktop: the steps down the left, done ones linked so the vendor can go back to them. */
+function SideSteps({ step }: { step: number }) {
+  return (
+    <aside className="hidden lg:sticky lg:top-0 lg:flex lg:flex-col lg:gap-6 lg:py-10">
+      <Link href={step === 1 ? "/partner" : `/partner/apply/${step - 1}`} className="flex items-center gap-1 text-sm text-body underline">
+        <BackIcon /> Back
+      </Link>
+      <ol aria-label="Onboarding progress" className="flex flex-col">
+        {STEP_NAMES.map((s, index) => {
+          const n = index + 1;
+          const done = n < step;
+          const current = n === step;
+          const body = (
+            <>
+              <span className="text-[11px] font-medium tracking-[0.12em] text-muted">STEP {n}</span>
+              <span className={`text-[15px] ${current ? "font-bold text-ink" : done ? "text-ink" : "text-muted"}`}>{s.title}</span>
+              {current && <span className="text-[13px] leading-snug text-body">{s.what}</span>}
+              {done && <span className="text-[13px] font-medium text-coral">Edit</span>}
+            </>
+          );
+          return (
+            <li key={n} aria-current={current ? "step" : undefined} className="relative flex gap-4 pb-6 last:pb-0">
+              {n < TOTAL_STEPS && <span aria-hidden="true" className={`absolute left-[9px] top-6 bottom-0 border-l-2 ${done ? "border-ok-fg" : "border-dashed border-line"}`} />}
+              <span aria-hidden="true" className="relative mt-0.5 flex size-5 flex-none items-center justify-center">
+                {current && <span className="absolute size-5 rounded-full bg-ok-bg" />}
+                <span className={`relative size-2.5 rounded-full ${done || current ? "bg-ok-fg" : "bg-line"}`} />
+              </span>
+              {done ? (
+                <Link href={`/partner/apply/${n}`} className="flex flex-col gap-0.5 no-underline">
+                  {body}
+                </Link>
+              ) : (
+                <span className="flex flex-col gap-0.5">{body}</span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+      <span className="text-xs leading-normal text-muted">Progress saves automatically. Come back any time.</span>
+      <Link href={APPLICATION_PAGE} className="flex min-h-11 w-fit items-center rounded-full bg-fill px-4 text-[13px] font-medium no-underline">
+        Save &amp; exit
+      </Link>
+    </aside>
+  );
+}
+
 function Header({ step }: { step: number }) {
   return (
-    <div className="flex flex-col gap-3 px-4 pb-3 pt-[18px]">
+    <div className="flex flex-col gap-3 px-4 pb-3 pt-[18px] lg:hidden">
       <div className="flex items-center justify-between">
         <Link href={step === 1 ? "/partner" : `/partner/apply/${step - 1}`} aria-label="Back" className="flex size-11 items-center justify-center rounded-full border border-line">
           <BackIcon />
@@ -90,14 +146,14 @@ function Header({ step }: { step: number }) {
 function Screen({ title, sub, children, footer }: { title: string; sub: string; children: ReactNode; footer?: ReactNode }) {
   return (
     <>
-      <div className="flex flex-1 flex-col gap-4 px-4 pb-4 pt-1">
+      <div className="flex flex-1 flex-col gap-4 px-4 pb-4 pt-1 lg:px-0 lg:pt-10">
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-bold">{title}</h1>
           <span className="text-sm leading-normal text-muted">{sub}</span>
         </div>
         {children}
       </div>
-      {footer && <div className="sticky bottom-0 bg-white px-4 pb-6 pt-3">{footer}</div>}
+      {footer && <div className="sticky bottom-0 bg-white px-4 pb-6 pt-3 lg:px-0">{footer}</div>}
     </>
   );
 }
@@ -733,7 +789,9 @@ export default function Apply() {
   const Step = STEPS[step - 1];
 
   return (
-    <div className="mx-auto flex min-h-dvh w-full max-w-xl flex-col">
+    <div className="mx-auto min-h-dvh w-full max-w-xl lg:grid lg:max-w-5xl lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-16 lg:px-8">
+      <SideSteps step={step} />
+      <div className="flex min-h-dvh flex-col">
       <Header step={step} />
       {outlets.error && !outlets.data && step > 1 ? (
         <div className="flex flex-col gap-3 px-4 pt-6">
@@ -753,6 +811,7 @@ export default function Apply() {
           next={() => router.push(backToApplication ? APPLICATION_PAGE : `/partner/apply/${step + 1}`)}
         />
       )}
+      </div>
     </div>
   );
 }
