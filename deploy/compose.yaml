@@ -1,0 +1,116 @@
+# The whole site on one server. From this folder:
+#   cp .env.example .env     # then fill it in
+#   docker compose up -d --build
+# See README.md here for first run, deploys and backups.
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  # The only service open to the internet. Gets HTTPS certificates itself.
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      WEB_DOMAIN: ${WEB_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web, api]
+    <<: *logging
+
+  web:
+    build:
+      context: ../frontend
+      args:
+        NEXT_PUBLIC_API_URL: https://${API_DOMAIN}/api/v1
+        NEXT_PUBLIC_DEV_CAPTURE: ${TEST_PAYMENTS:-0}
+    restart: unless-stopped
+    environment:
+      # Test payments only. The route answers 404 unless the site was built with TEST_PAYMENTS=1.
+      DEV_CAPTURE_SECRET: ${CRON_SECRET}
+      DEV_CAPTURE_API_URL: http://api:4000/api/v1
+    <<: *logging
+
+  api:
+    build: ../backend
+    restart: unless-stopped
+    # Everything in .env reaches the API. The lines below are worked out from it.
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://lastbite:${DB_PASSWORD}@db:5432/lastbite
+      FRONTEND_ORIGIN: https://${WEB_DOMAIN}
+      TRUST_PROXY: "true"
+      PORT: "4000"
+    depends_on:
+      db: { condition: service_healthy }
+    <<: *logging
+
+  # Postgres on this server. To move to a managed database, point DATABASE_URL above at it,
+  # and remove this service and backup.
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lastbite
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: lastbite
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lastbite -d lastbite"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    <<: *logging
+
+  # Calls the job tick every minute, inside the private network.
+  cron:
+    image: curlimages/curl:8.17.0
+    restart: unless-stopped
+    environment:
+      CRON_SECRET: ${CRON_SECRET}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          echo "$$(date -u +%FT%TZ) $$(curl -sS -m 300 -X POST -H "x-cron-secret: $$CRON_SECRET" http://api:4000/api/v1/internal/jobs/tick)"
+          sleep 60
+        done
+    depends_on: [api]
+    <<: *logging
+
+  # A dump of the database every night into ./backups on this server, keeping 14.
+  # That is not off the server: copy ./backups to S3 too (see README.md).
+  backup:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${DB_PASSWORD}
+    volumes:
+      - ./backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          f=/backups/lastbite-$$(date -u +%Y%m%d-%H%M).sql.gz
+          pg_dump -h db -U lastbite lastbite | gzip > "$$f.tmp" && mv "$$f.tmp" "$$f" && echo "Saved $$f"
+          ls -1t /backups/lastbite-*.sql.gz | tail -n +15 | xargs -r rm --
+          sleep 86400
+        done
+    depends_on:
+      db: { condition: service_healthy }
+    <<: *logging
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
