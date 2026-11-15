@@ -1,4 +1,4 @@
-import { devFakeProviders } from '../lib/env.js';
+import { devFakeProviders, env } from '../lib/env.js';
 import { s3FromEnv } from './s3.js';
 
 export type Bucket = 'public' | 'private';
@@ -37,11 +37,19 @@ export class FakeStore implements ObjectStore {
 
 let store: ObjectStore | undefined;
 
-/** The real one in production. Only tests and DEV_FAKE_PROVIDERS get the fake. */
+/** Whether the S3 lines are filled in. Staging uploads to S3 then, while payments and messages stay fake. */
+function s3Configured(): boolean {
+  const e = env();
+  return Boolean(e.AWS_REGION && e.S3_PUBLIC_BUCKET && e.S3_PRIVATE_BUCKET);
+}
+
+/** S3 in production, and outside tests whenever it is configured. Otherwise only tests and DEV_FAKE_PROVIDERS get the fake. */
 export function getStore(): ObjectStore {
   if (store) return store;
   if (process.env.NODE_ENV === 'production') store = s3FromEnv();
-  else if (process.env.NODE_ENV === 'test' || devFakeProviders()) store = new FakeStore();
+  else if (process.env.NODE_ENV === 'test') store = new FakeStore();
+  else if (process.env.NODE_ENV === 'development' && s3Configured()) store = s3FromEnv();
+  else if (devFakeProviders()) store = new FakeStore();
   else throw new Error('No file store outside production and tests');
   return store;
 }

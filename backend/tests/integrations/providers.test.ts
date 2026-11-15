@@ -58,6 +58,35 @@ describe('provider selection', () => {
     expect(m.messaging.getMessenger()).not.toBeInstanceOf(m.messaging.FakeMessenger);
   });
 
+  test('development with the S3 lines filled in uploads to S3, even with the other fakes on', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('DEV_FAKE_PROVIDERS', 'true');
+    vi.stubEnv('AWS_REGION', 'ap-south-1');
+    vi.stubEnv('S3_PUBLIC_BUCKET', 'pub');
+    vi.stubEnv('S3_PRIVATE_BUCKET', 'priv');
+    const m = await load();
+    expect(m.storage.getStore()).toBeInstanceOf(m.s3.S3Store);
+    expect(m.payments.getGateway()).toBeInstanceOf(m.payments.FakeGateway);
+  });
+
+  test('development with only some S3 lines filled in keeps the fake store', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('DEV_FAKE_PROVIDERS', 'true');
+    vi.stubEnv('AWS_REGION', 'ap-south-1');
+    vi.stubEnv('S3_PUBLIC_BUCKET', '');
+    vi.stubEnv('S3_PRIVATE_BUCKET', '');
+    const m = await load();
+    expect(m.storage.getStore()).toBeInstanceOf(m.storage.FakeStore);
+  });
+
+  test('tests keep the fake store even with S3 lines in the environment', async () => {
+    vi.stubEnv('AWS_REGION', 'ap-south-1');
+    vi.stubEnv('S3_PUBLIC_BUCKET', 'pub');
+    vi.stubEnv('S3_PRIVATE_BUCKET', 'priv');
+    const m = await load();
+    expect(m.storage.getStore()).toBeInstanceOf(m.storage.FakeStore);
+  });
+
   test('DEV_FAKE_PROVIDERS means nothing with NODE_ENV unset', async () => {
     vi.stubEnv('NODE_ENV', '');
     vi.stubEnv('DEV_FAKE_PROVIDERS', 'true');

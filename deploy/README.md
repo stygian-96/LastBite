@@ -68,7 +68,7 @@ To turn test payments off, or once Razorpay Checkout is built, set `TEST_PAYMENT
 
 ## Going to production
 
-1. In `.env`, delete `DEV_FAKE_PROVIDERS` and `TEST_PAYMENTS`, set `NODE_ENV=production`, and fill in the Razorpay, messaging and S3 lines. The API refuses to start, and names what's missing, until all are set.
+1. In `.env`, delete `DEV_FAKE_PROVIDERS` and `TEST_PAYMENTS`, set `NODE_ENV=production`, and fill in the Razorpay and messaging lines (and S3, if staging didn't already). The API refuses to start, and names what's missing, until all are set.
 2. Start from an empty database, since staging's payments are fake:
    ```bash
    docker compose down
