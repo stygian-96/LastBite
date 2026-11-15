@@ -275,11 +275,35 @@ export function MiniOrderCard({
   );
 }
 
+/** Areas whose name contains the query, ignoring case. All of them for an empty query. */
+export function matchAreas<T extends { name: string }>(areas: T[], query: string): T[] {
+  const q = query.trim().toLowerCase();
+  return q ? areas.filter((a) => a.name.toLowerCase().includes(q)) : areas;
+}
+
+/** Shown when a city has more areas than are easy to scan. */
+export const AREA_SEARCH_FROM = 12;
+
+export function AreaSearch({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return (
+    <input
+      type="search"
+      aria-label="Search areas"
+      placeholder="Search areas"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="h-11 w-full rounded-full bg-fill px-4 text-sm"
+    />
+  );
+}
+
 export function AreaPicker({ onClose }: { onClose: () => void }) {
   const cities = useCities();
   const [place, setPlace] = usePlace();
   const [city, setCity] = useState(place.city);
-  const areas = cities.data?.find((c) => c.slug === city)?.areas ?? [];
+  const [query, setQuery] = useState("");
+  const all = cities.data?.find((c) => c.slug === city)?.areas ?? [];
+  const areas = matchAreas(all, query);
   const pick = (area: string | null) => {
     setPlace({ city, area });
     onClose();
@@ -290,11 +314,19 @@ export function AreaPicker({ onClose }: { onClose: () => void }) {
       {cities.data && (
         <Tabs value={city} onChange={setCity} options={cities.data.map((c) => ({ id: c.slug, label: c.name }))} />
       )}
+      {all.length > AREA_SEARCH_FROM && (
+        <div className="mt-3">
+          <AreaSearch value={query} onChange={setQuery} />
+        </div>
+      )}
       <div className="flex flex-col">
-        <button type="button" className={row} onClick={() => pick(null)}>
-          All areas
-          {place.city === city && !place.area && <Tick />}
-        </button>
+        {!query.trim() && (
+          <button type="button" className={row} onClick={() => pick(null)}>
+            All areas
+            {place.city === city && !place.area && <Tick />}
+          </button>
+        )}
+        {query.trim() && areas.length === 0 && <p className="px-1 py-4 text-[15px] text-muted">No area matches “{query.trim()}”.</p>}
         {areas.map((area) => (
           <button key={area.id} type="button" className={row} onClick={() => pick(area.name)}>
             {area.name}

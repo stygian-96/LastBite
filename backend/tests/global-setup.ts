@@ -9,7 +9,8 @@ export default async function setup(): Promise<void> {
   const client = new pg.Client({ connectionString: url });
   await client.connect();
   try {
-    await seedAreas(client);
+    // The tests are written around these two cities.
+    await seedAreas(client, ['bengaluru', 'hyderabad']);
   } finally {
     await client.end();
   }

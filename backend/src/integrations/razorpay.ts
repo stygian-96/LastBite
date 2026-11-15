@@ -112,7 +112,7 @@ function toTransfer(t: RawTransfer): GatewayTransfer {
 }
 
 /** The states of the launch cities. Razorpay requires one and the app holds only the city. */
-const STATES: Record<string, string> = { bengaluru: 'KARNATAKA', hyderabad: 'TELANGANA' };
+const STATES: Record<string, string> = { bengaluru: 'KARNATAKA', hyderabad: 'TELANGANA', delhi: 'DELHI' };
 
 /** The fourth letter of a PAN says what holds it. Nothing else here says how a vendor is set up. */
 const BUSINESS_TYPES: Record<string, string> = { P: 'proprietorship', C: 'private_limited', F: 'partnership', T: 'trust' };

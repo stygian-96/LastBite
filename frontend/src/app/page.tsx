@@ -165,7 +165,7 @@ export default function Landing() {
             <div className="relative flex flex-[1_1_420px] flex-col gap-5">
               <span className="tabular inline-flex items-center gap-2 self-start rounded-full bg-white/10 px-3.5 py-2 text-sm">
                 <span className="size-2 rounded-full bg-coral" />
-                {total} bags left tonight in Bengaluru &amp; Hyderabad
+                {total} bags left tonight in {brand.cities}
               </span>
               <h1 className="text-[clamp(36px,5vw,60px)] font-black leading-[1.04] tracking-tight">Good food at closing-time prices</h1>
               <p className="max-w-[520px] text-lg leading-[1.55] text-dark-sub">
@@ -267,7 +267,7 @@ export default function Landing() {
 
         <footer className="mx-auto flex max-w-[1200px] justify-between gap-4 px-6 pb-10 pt-14 text-sm text-body">
           <span>
-            © 2026 {brand.name} · Bengaluru &amp; Hyderabad
+            © 2026 {brand.name} · {brand.cities}
           </span>
           <nav aria-label="Footer" className="flex gap-[18px]">
             <Link href="/help">Refund policy and help</Link>

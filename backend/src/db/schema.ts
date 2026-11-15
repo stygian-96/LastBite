@@ -161,7 +161,7 @@ export const areas = pgTable("areas", {
 	name: text().notNull(),
 }, (table) => [
 	unique("areas_city_name_key").on(table.city, table.name),
-	check("areas_city_check", sql`city = ANY (ARRAY['bengaluru'::text, 'hyderabad'::text])`),
+	check("areas_city_check", sql`city = ANY (ARRAY['bengaluru'::text, 'hyderabad'::text, 'delhi'::text])`),
 ]);
 
 export const memberships = pgTable("memberships", {

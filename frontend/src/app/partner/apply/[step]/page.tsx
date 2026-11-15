@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
-import { useCities } from "@/components/customer";
+import { AREA_SEARCH_FROM, AreaSearch, matchAreas, useCities } from "@/components/customer";
 import { Choice, FilePick, FormError, ListingForm, TextArea } from "@/components/forms";
 import { BackIcon, Button, Field, PageSkeleton, Tabs } from "@/components/ui";
 import { AGREEMENT_VERSION, COMMISSION_PERCENT } from "@/config/brand";
@@ -246,8 +246,11 @@ function OutletStep({ outlet, next }: StepProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const city = pickedCity ?? cities.data?.find((c) => c.areas.some((a) => a.id === areaId))?.slug ?? "bengaluru";
+  const [areaQuery, setAreaQuery] = useState("");
+  const city =
+    pickedCity ?? cities.data?.find((c) => c.areas.some((a) => a.id === areaId))?.slug ?? cities.data?.[0]?.slug ?? "";
   const areas = cities.data?.find((c) => c.slug === city)?.areas ?? [];
+  const shownAreas = matchAreas(areas, areaQuery);
   const areaName = areas.find((a) => a.id === areaId)?.name;
   const mapsOk = isMapsUrl(mapsUrl);
   const missing = [
@@ -320,12 +323,15 @@ function OutletStep({ outlet, next }: StepProps) {
             options={cities.data.map((c) => ({ id: c.slug, label: c.name }))}
           />
         )}
-        <div className="flex flex-wrap gap-2">
-          {areas.map((area) => (
+        {areas.length > AREA_SEARCH_FROM && <AreaSearch value={areaQuery} onChange={setAreaQuery} />}
+        {areaName && areas.length > AREA_SEARCH_FROM && <p className="text-[13px] text-muted">Picked: {areaName}</p>}
+        <div className="flex max-h-[320px] flex-wrap gap-2 overflow-y-auto">
+          {shownAreas.map((area) => (
             <Choice key={area.id} on={areaId === area.id} onClick={() => setAreaId(area.id)}>
               {area.name}
             </Choice>
           ))}
+          {areaQuery.trim() && shownAreas.length === 0 && <p className="text-[13px] text-muted">No area matches “{areaQuery.trim()}”.</p>}
         </div>
       </fieldset>
 

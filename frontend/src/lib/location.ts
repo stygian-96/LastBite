@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useSyncExternalStore } from "react";
+import { DEFAULT_CITY } from "@/config/brand";
 import { readJson, writeJson } from "@/lib/storage";
 
 // The API filters by city slug and area name.
 export type Place = { city: string; area: string | null };
 
 const KEY = "lb_place";
-const DEFAULT: Place = { city: "bengaluru", area: null };
+const DEFAULT: Place = { city: DEFAULT_CITY, area: null };
 
 let cached: Place | null = null;
 const listeners = new Set<() => void>();

@@ -14,7 +14,7 @@ const roboto = Roboto({
 export const metadata: Metadata = {
   title: { default: `${brand.name} · Good food at closing-time prices`, template: `%s · ${brand.name}` },
   description:
-    "Bakeries, cafés and restaurants in Bengaluru and Hyderabad sell tonight’s surplus food. Reserve, pay online and collect in person.",
+    `Bakeries, cafés and restaurants in ${brand.cities} sell tonight’s surplus food. Reserve, pay online and collect in person.`,
 };
 
 export const viewport: Viewport = { width: "device-width", initialScale: 1, themeColor: "#ffffff" };
