@@ -282,12 +282,14 @@ export type Listing = {
   pickupEnd: string;
   repeatDays: number[]; // 1 = Monday ... 7 = Sunday
   photoKey: string | null;
+  /** The photo's public link, or null without one. */
+  photoUrl: string | null;
   archivedAt: string | null;
   /** The most bags one customer can take in a night, 1 to 10. */
   maxPerOrder: number;
 };
 
-export type ListingInput = Omit<Listing, "id" | "outletId" | "archivedAt" | "photoKey"> & { photoKey?: string | null };
+export type ListingInput = Omit<Listing, "id" | "outletId" | "archivedAt" | "photoKey" | "photoUrl"> & { photoKey?: string | null };
 
 export type VendorDrop = {
   id: string;

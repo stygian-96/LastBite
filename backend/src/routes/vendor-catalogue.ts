@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { getStore } from '../integrations/storage.js';
 import { route } from '../lib/http.js';
 import { listAccessibleOutlets } from '../modules/auth/access.js';
 import { getToday, publishDrop, updateDrop } from '../modules/catalogue/drops.js';
@@ -9,10 +10,14 @@ import {
   createListing,
   listListings,
   updateListing,
+  type Listing,
 } from '../modules/catalogue/listings.js';
 
 // Bodies are checked in full by the modules; the routes only make sure they are objects.
 const anyObject = z.record(z.string(), z.unknown());
+
+/** Adds the photo's public link, so the edit form can show the photo already there. */
+const withPhotoUrl = (l: Listing) => ({ ...l, photoUrl: l.photoKey ? getStore().publicUrl(l.photoKey) : null });
 
 export const vendorCatalogue = new Hono()
   .get(
@@ -21,18 +26,20 @@ export const vendorCatalogue = new Hono()
   )
   .get(
     '/outlets/:id/listings',
-    route({ auth: 'user' }, async ({ user, params }) => ({ listings: await listListings(user!.id, params.id!) })),
+    route({ auth: 'user' }, async ({ user, params }) => ({
+      listings: (await listListings(user!.id, params.id!)).map(withPhotoUrl),
+    })),
   )
   .post(
     '/outlets/:id/listings',
     route({ auth: 'user', body: anyObject }, async ({ user, params, body }) => ({
-      listing: await createListing(user!.id, params.id!, body),
+      listing: withPhotoUrl(await createListing(user!.id, params.id!, body)),
     })),
   )
   .patch(
     '/listings/:id',
     route({ auth: 'user', body: anyObject }, async ({ user, params, body, now }) => ({
-      listing: await updateListing(user!.id, params.id!, body, now),
+      listing: withPhotoUrl(await updateListing(user!.id, params.id!, body, now)),
     })),
   )
   .delete(
@@ -42,7 +49,7 @@ export const vendorCatalogue = new Hono()
   .post(
     '/listings/:id/copy',
     route({ auth: 'user', body: z.object({ targetOutletId: z.string() }) }, async ({ user, params, body }) => ({
-      listing: await copyListing(user!.id, params.id!, body.targetOutletId),
+      listing: withPhotoUrl(await copyListing(user!.id, params.id!, body.targetOutletId)),
     })),
   )
   .get(

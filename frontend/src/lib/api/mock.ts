@@ -438,6 +438,7 @@ function seedListings(drops: DropRow[]): Listing[] {
       pickupEnd: istHhmm(new Date(d.pickupEndAt).getTime()),
       repeatDays: [1, 2, 3, 4, 5, 6, 7],
       photoKey: null,
+      photoUrl: null,
       archivedAt: null,
     }),
   );
@@ -1354,7 +1355,7 @@ export const mockApi: Api = {
   async createListing(outletId, body) {
     await wait();
     const db = load();
-    const row: Listing = { photoKey: null, ...body, id: nextId(db, "listing"), outletId, archivedAt: null };
+    const row: Listing = { photoKey: null, photoUrl: null, ...body, id: nextId(db, "listing"), outletId, archivedAt: null };
     db.listings.push(row);
     save(db);
     return row;

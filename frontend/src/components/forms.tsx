@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 import { Button, Field } from "@/components/ui";
 import { api, errorMessage, type Diet, type FoodCategory, type Listing, type ListingInput, type ListingType } from "@/lib/api";
 
@@ -36,23 +36,47 @@ export function Choice({ on, className = "", ...props }: ComponentProps<"button"
   );
 }
 
+/** A link to show the picked file, while it is picked. Null for PDFs, which have no picture to show. */
+function usePreview(file: File | null): string | null {
+  const [read, setRead] = useState<{ file: File; url: string } | null>(null);
+  useEffect(() => {
+    if (!file || !file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = () => setRead({ file, url: reader.result as string });
+    reader.readAsDataURL(file);
+    return () => reader.abort();
+  }, [file]);
+  return read && read.file === file ? read.url : null;
+}
+
 export function FilePick({
   label,
   hint,
   file,
+  currentUrl,
   accept = "image/jpeg,image/png,image/webp,image/heic,application/pdf",
   onPick,
 }: {
   label: string;
   hint?: string;
   file: File | null;
+  /** The photo already saved, shown until another is picked. */
+  currentUrl?: string | null;
   accept?: string;
   onPick: (file: File | null) => void;
 }) {
+  const picked = usePreview(file);
+  const src = picked ?? (file ? null : currentUrl ?? null);
+  // Most browsers other than Safari can't draw HEIC, so a preview that fails to load is hidden.
+  const [broken, setBroken] = useState<string | null>(null);
   return (
     <div className="flex flex-col gap-1.5">
+      {src && broken !== src && (
+        // eslint-disable-next-line @next/next/no-img-element -- a local blob or an S3 link, nothing for next/image to optimise
+        <img src={src} alt={file ? `Preview of ${file.name}` : "Current photo"} onError={() => setBroken(src)} className="h-44 w-full rounded-2xl bg-fill object-cover" />
+      )}
       <label className="relative flex min-h-14 cursor-pointer items-center justify-center gap-2 rounded-2xl border-[1.5px] border-dashed border-[#cfcfcf] px-3 text-center text-sm font-medium">
-        {file ? `✓ ${file.name}` : label}
+        {file ? `✓ ${file.name}` : src ? "Change photo" : label}
         <input type="file" accept={accept} onChange={(event) => onPick(event.target.files?.[0] ?? null)} className="sr-only" />
       </label>
       {hint && <span className="text-xs text-muted">{hint}</span>}
@@ -261,7 +285,7 @@ export function ListingForm({
         <Field id="listing-end" label="Pickup until" type="time" value={end} onChange={(event) => setEnd(event.target.value)} />
       </div>
 
-      <FilePick label="Take or upload a photo" hint="Optional. We’ll show an illustration if you skip it." accept="image/jpeg,image/png,image/webp,image/heic" file={photo} onPick={setPhoto} />
+      <FilePick label="Take or upload a photo" hint="Optional. We’ll show an illustration if you skip it." accept="image/jpeg,image/png,image/webp,image/heic" file={photo} currentUrl={listing?.photoUrl} onPick={setPhoto} />
 
       <FormError message={error} />
       {saved && !busy && !error && (
