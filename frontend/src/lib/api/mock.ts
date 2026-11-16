@@ -36,7 +36,7 @@ import type {
   VendorOutlet,
 } from "./types";
 
-const KEY = "lb_mock_v2";
+const KEY = "lb_mock_v3";
 const LATENCY_MS = 200;
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -637,7 +637,7 @@ function freshDb(now: number): Db {
     profile: null,
     following: [],
     nextNumber: 20470,
-    nextId: 1,
+    nextId: 1000, // above the seed rows’ own numbered ids (drop-1, …), so new rows never share one
   };
   const [bag, box] = drops;
   db.orders.push(

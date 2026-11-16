@@ -4,29 +4,21 @@ import Link from "next/link";
 import { useState } from "react";
 import { FormError, Stepper } from "@/components/forms";
 import { ErrorState, LinkButton, Skeleton, Switch } from "@/components/ui";
-import { matchesListing } from "@/components/listings";
+import { ActiveSwitch, hhmmRange, isActive, matchesListing, switchListing } from "@/components/listings";
 import { CancelSheet, OrderList, useTonightOrders, VendorSearch, VendorShell } from "@/components/vendor";
 import { api, errorMessage, type Listing, type VendorDrop, type VendorOutlet } from "@/lib/api";
 import { rupees, shortDate, timeRange } from "@/lib/format";
 import { useQuery } from "@/lib/hooks";
 
-function hhmmRange(start: string, end: string) {
-  const iso = (value: string) => `2026-01-01T${value.slice(0, 5)}:00+05:30`;
-  return timeRange(iso(start), iso(end));
-}
-
-function ListingRow({ listing, drop, onChanged }: { listing: Listing; drop?: VendorDrop; onChanged: () => void }) {
-  const [draft, setDraft] = useState(listing.defaultQuantity);
+/** A drop on sale tonight, or one paused that still has pickups: quantity, sales, pause and cancel. */
+function LiveCard({ listing, drop, onChanged }: { listing: Listing; drop: VendorDrop; onChanged: () => void }) {
   const [cancelling, setCancelling] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const cancelled = drop?.status === "cancelled";
-  const live = drop?.status === "live";
-  const sold = drop?.reservedCount ?? 0;
-  const quantity = drop ? drop.quantity : draft;
-  const left = Math.max(0, quantity - sold);
-  const window = drop ? timeRange(drop.pickupStartAt, drop.pickupEndAt) : hhmmRange(listing.pickupStart, listing.pickupEnd);
+  const live = drop.status === "live";
+  const sold = drop.reservedCount;
+  const left = Math.max(0, drop.quantity - sold);
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
@@ -41,49 +33,36 @@ function ListingRow({ listing, drop, onChanged }: { listing: Listing; drop?: Ven
     }
   }
 
-  const setLive = (on: boolean) => {
-    if (!drop) return run(() => api.publishDrop(listing.id, draft));
-    return run(() => api.updateDrop(drop.id, { status: on ? "live" : "paused" }));
-  };
-
   return (
     <section className={`flex flex-col gap-3 rounded-[22px] p-4 shadow-card ${live ? "" : "opacity-90"}`}>
-      <div className="flex items-start gap-3">
-        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="text-[15px] font-medium">{listing.name}</span>
-          <span className="tabular text-xs text-muted">
-            {rupees(drop?.pricePaise ?? listing.pricePaise)} · pickup {window}
-          </span>
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-[15px] font-medium">{listing.name}</span>
+        <span className="tabular text-xs text-muted">
+          {rupees(drop.pricePaise)} · pickup {timeRange(drop.pickupStartAt, drop.pickupEndAt)}
         </span>
-        {cancelled && <span className="text-xs font-medium text-danger">Cancelled</span>}
+      </span>
+      <Switch
+        on={live}
+        onChange={(on) => run(() => switchListing(listing, on))}
+        label={live ? "Live" : "Paused"}
+        hint={live ? undefined : `${sold} still to collect. Turn on to sell again`}
+      />
+      <Stepper value={drop.quantity} min={Math.max(1, sold)} onChange={(value) => run(() => api.updateDrop(drop.id, { quantity: value }))}>
+        <span className="text-xs text-muted">available tonight</span>
+      </Stepper>
+      <div className="flex flex-col gap-1.5">
+        <span className="tabular text-xs text-muted">
+          {sold} sold · {left} left
+        </span>
+        <span className="h-1.5 overflow-hidden rounded-full bg-line">
+          <span className="block h-full rounded-full bg-coral" style={{ width: `${drop.quantity ? Math.round((sold / drop.quantity) * 100) : 0}%` }} />
+        </span>
+        <button type="button" disabled={busy} onClick={() => setCancelling(true)} className="min-h-9 self-start text-xs text-danger underline">
+          Cancel tonight and refund everyone
+        </button>
       </div>
-      {!cancelled && (
-        <>
-          <Switch on={!!live} onChange={setLive} label={live ? "Live" : drop ? "Paused" : "Not listed tonight"} hint={drop ? undefined : "Turn on to publish"} />
-          <Stepper
-            value={quantity}
-            min={Math.max(1, sold)}
-            onChange={(value) => (drop ? run(() => api.updateDrop(drop.id, { quantity: value })) : setDraft(value))}
-          >
-            <span className="text-xs text-muted">available tonight</span>
-          </Stepper>
-          {drop && (
-            <div className="flex flex-col gap-1.5">
-              <span className="tabular text-xs text-muted">
-                {sold} sold · {left} left
-              </span>
-              <span className="h-1.5 overflow-hidden rounded-full bg-line">
-                <span className="block h-full rounded-full bg-coral" style={{ width: `${quantity ? Math.round((sold / quantity) * 100) : 0}%` }} />
-              </span>
-              <button type="button" disabled={busy} onClick={() => setCancelling(true)} className="min-h-9 self-start text-xs text-danger underline">
-                Cancel tonight and refund everyone
-              </button>
-            </div>
-          )}
-        </>
-      )}
       <FormError message={error} />
-      {cancelling && drop && (
+      {cancelling && (
         <CancelSheet
           title={`Cancel ${listing.name} tonight?`}
           body={`Everyone who paid (${sold}) gets a full refund automatically and a WhatsApp message. Pick a reason:`}
@@ -95,6 +74,42 @@ function ListingRow({ listing, drop, onChanged }: { listing: Listing; drop?: Ven
         />
       )}
     </section>
+  );
+}
+
+/** A listing not on sale tonight, with the switch that puts it live. */
+function OffRow({ listing, drop, onChanged }: { listing: Listing; drop?: VendorDrop; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const cancelled = drop?.status === "cancelled";
+
+  async function turnOn() {
+    setBusy(true);
+    setNote(null);
+    try {
+      const result = await switchListing(listing, true);
+      setNote(result.note);
+      onChanged();
+    } catch (err) {
+      setNote(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li className="flex flex-col gap-1 px-3 py-3">
+      <div className="flex items-center gap-3">
+        <span className={`flex min-w-0 flex-1 flex-col gap-0.5 ${isActive(listing) ? "" : "text-muted"}`}>
+          <span className="truncate text-[15px] font-medium">{listing.name}</span>
+          <span className="tabular truncate text-xs text-muted">
+            {rupees(listing.pricePaise)} · pickup {hhmmRange(listing.pickupStart, listing.pickupEnd)} · {listing.defaultQuantity} bags
+          </span>
+        </span>
+        {cancelled ? <span className="text-xs font-medium text-danger">Cancelled tonight</span> : <ActiveSwitch on={false} busy={busy} onChange={turnOn} />}
+      </div>
+      {note && <p className="text-[13px] text-muted">{note}</p>}
+    </li>
   );
 }
 
@@ -118,14 +133,20 @@ function Tonight({ outlet }: { outlet: VendorOutlet }) {
 
   const list = orders.data ?? [];
   const drops = today.data!.drops;
-  // Inactive listings stay off Today, unless one is already on sale tonight and needs managing.
-  const shown = listings.data!.filter((l) => !l.archivedAt || drops.some((d) => d.listingId === l.id));
-  const hidden = listings.data!.length - shown.length;
-  const found = shown.filter((l) => matchesListing(l, q));
+  const dropFor = (listing: Listing) => drops.find((d) => d.listingId === listing.id);
+  // A card while it's on sale, or paused with bags still to hand over; everything else is a row below.
+  const onCard = (drop?: VendorDrop) => !!drop && (drop.status === "live" || (drop.status === "paused" && drop.reservedCount > 0));
+  const all = listings.data!;
+  const found = all.filter((l) => matchesListing(l, q));
+  const cards = found.filter((l) => onCard(dropFor(l)));
+  const rows = found
+    .filter((l) => !onCard(dropFor(l)))
+    .sort((a, b) => Number(isActive(b)) - Number(isActive(a)) || a.name.localeCompare(b.name));
   const revenue = list.reduce((sum, order) => sum + order.pricePaise, 0);
   const toCollect = list.filter((order) => order.status === "paid").length;
   const refresh = () => {
     today.reload();
+    listings.reload();
     orders.reload();
   };
 
@@ -145,36 +166,48 @@ function Tonight({ outlet }: { outlet: VendorOutlet }) {
         ))}
       </section>
 
-      {shown.length === 0 ? (
+      {all.length === 0 ? (
         <div className="flex flex-col gap-2 rounded-[18px] bg-fill p-4 text-[13px] text-muted">
-          {hidden > 0 ? "All your listings are switched off. Turn one on in Listings to sell tonight." : "Add a listing to start selling."}
-          <LinkButton href={hidden > 0 ? "/vendor/listings" : "/vendor/listings/new"} size="md">
-            {hidden > 0 ? "Open Listings" : "New listing"}
+          Add a listing to start selling.
+          <LinkButton href="/vendor/listings/new" size="md">
+            New listing
           </LinkButton>
         </div>
       ) : (
         <>
-        <VendorSearch label="Search tonight’s listings" value={q} onChange={setQ} />
-        {found.length === 0 && <p className="py-2 text-sm text-muted">No listing matches “{q.trim()}”.</p>}
-        <div className="grid gap-3 lg:grid-cols-2">
-          {found.map((listing) => (
-            <ListingRow key={listing.id} listing={listing} drop={today.data!.drops.find((d) => d.listingId === listing.id)} onChanged={refresh} />
-          ))}
-        </div>
+          <VendorSearch label="Search tonight’s listings" value={q} onChange={setQ} />
+          {found.length === 0 && <p className="py-2 text-sm text-muted">No listing matches “{q.trim()}”.</p>}
+          {cards.length > 0 && (
+            <section aria-label="Tonight" className="flex flex-col gap-2">
+              <h2 className="text-[13px] font-medium text-muted">Tonight · {cards.length}</h2>
+              <div className="grid gap-3 lg:grid-cols-2">
+                {cards.map((listing) => (
+                  <LiveCard key={listing.id} listing={listing} drop={dropFor(listing)!} onChanged={refresh} />
+                ))}
+              </div>
+            </section>
+          )}
+          {cards.length === 0 && found.length > 0 && (
+            <p className="rounded-[18px] bg-fill p-4 text-[13px] text-muted">Nothing is live tonight. Switch a listing on below to start selling.</p>
+          )}
+          {rows.length > 0 && (
+            <section aria-label="Not live tonight" className="flex flex-col gap-2">
+              <h2 className="text-[13px] font-medium text-muted">Not live tonight · {rows.length}</h2>
+              <ul className="divide-y divide-[#f0f0f0] overflow-hidden rounded-[18px] border-[1.5px] border-line">
+                {rows.map((listing) => (
+                  <OffRow key={listing.id} listing={listing} drop={dropFor(listing)} onChanged={refresh} />
+                ))}
+              </ul>
+            </section>
+          )}
         </>
       )}
       <span className="text-xs text-muted">
-        Changes go live instantly. You can’t go below what’s already sold.
-        {hidden > 0 && (
-          <>
-            {" "}
-            {hidden} inactive {hidden === 1 ? "listing is" : "listings are"} hidden;{" "}
-            <Link href="/vendor/listings" className="text-ink underline">
-              manage in Listings
-            </Link>
-            .
-          </>
-        )}
+        Changes go live instantly and match the switch in{" "}
+        <Link href="/vendor/listings" className="text-ink underline">
+          Listings
+        </Link>
+        . You can’t go below what’s already sold.
       </span>
 
       <section className="hidden flex-col gap-2 lg:flex">

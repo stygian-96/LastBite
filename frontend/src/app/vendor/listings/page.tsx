@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { ListingForm } from "@/components/forms";
-import { isActive, ListingPanel, ListingRow, matchesListing } from "@/components/listings";
+import { isActive, ListingPanel, ListingRow, matchesListing, switchListing } from "@/components/listings";
 import { Button, Chip, ErrorState, LinkButton, Skeleton } from "@/components/ui";
 import { VendorSearch, VendorShell } from "@/components/vendor";
 import { api, errorMessage, type Listing, type VendorOutlet } from "@/lib/api";
@@ -60,7 +60,9 @@ function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOu
     setToggling(listing.id);
     setError(null);
     try {
-      replace(await api.updateListing(listing.id, { active: on }));
+      const result = await switchListing(listing, on);
+      replace(result.listing);
+      setError(result.note && `${listing.name}: ${result.note}`);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -120,7 +122,7 @@ function Listings({ outlet, outlets }: { outlet: VendorOutlet; outlets: VendorOu
             {error}
           </p>
         )}
-        <span className="text-xs text-muted">The switch turns a listing on or off for Today. Set tonight’s quantities on Today.</span>
+        <span className="text-xs text-muted">The switch puts a listing live on Today for tonight, or takes it off. Set tonight’s quantities on Today.</span>
         {all.length === 0 && (
           <div className="flex flex-col gap-2 rounded-[18px] bg-fill p-4 text-[13px] text-muted lg:hidden">
             No listings yet. Add the bag you sell most evenings.

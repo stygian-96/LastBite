@@ -9,6 +9,31 @@ import { rupees, timeRange } from "@/lib/format";
 
 export const isActive = (listing: Listing) => !listing.archivedAt;
 
+/**
+ * The one switch a listing has, on Listings and on Today alike. On: the listing is active and on
+ * sale tonight at its default quantity. Off: tonight's sale is paused and the listing is inactive.
+ * `note` says why tonight's sale couldn't follow the switch on (window over, cancelled, ...).
+ */
+export async function switchListing(listing: Listing, on: boolean): Promise<{ listing: Listing; note: string | null }> {
+  const today = await api.getToday(listing.outletId);
+  const drop = today.drops.find((d) => d.listingId === listing.id);
+  let updated = listing;
+  if (!on) {
+    if (drop?.status === "live") await api.updateDrop(drop.id, { status: "paused" });
+    if (isActive(listing)) updated = await api.updateListing(listing.id, { active: false });
+    return { listing: updated, note: null };
+  }
+  if (!isActive(listing)) updated = await api.updateListing(listing.id, { active: true });
+  if (drop?.status === "cancelled") return { listing: updated, note: "Switched on. Tonight was cancelled, so it’s back from tomorrow." };
+  try {
+    if (drop?.status === "paused") await api.updateDrop(drop.id, { status: "live" });
+    else if (!drop) await api.publishDrop(listing.id, listing.defaultQuantity);
+  } catch (err) {
+    return { listing: updated, note: `Switched on, but not on sale tonight: ${errorMessage(err)}` };
+  }
+  return { listing: updated, note: null };
+}
+
 /** A listing matches when its name or description holds every word typed, in any order. */
 export function matchesListing(listing: { name: string; description?: string }, query: string) {
   const text = `${listing.name} ${listing.description ?? ""}`.toLowerCase();
@@ -185,6 +210,7 @@ export function ListingPanel({
     }
   }
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const active = isActive(listing);
 
   async function run(action: () => Promise<Listing>, then: (l: Listing) => void = onChanged) {
@@ -216,11 +242,21 @@ export function ListingPanel({
             <strong className="text-[15px] font-medium">{active ? "Active" : "Inactive"}</strong>
             <span className="text-xs leading-snug text-muted">
               {active
-                ? "Shows on Today, so you can put it on sale each evening."
-                : "Hidden from Today and the evening WhatsApp prompt. Anything already on sale tonight keeps selling."}
+                ? "Live on Today tonight, and in the evening WhatsApp prompt."
+                : "Not on sale tonight, and left out of the evening WhatsApp prompt."}
             </span>
           </span>
-          <ActiveSwitch on={active} busy={busy} onChange={(on) => void run(() => api.updateListing(listing.id, { active: on }))} />
+          <ActiveSwitch
+            on={active}
+            busy={busy}
+            onChange={(on) =>
+              void run(async () => {
+                const result = await switchListing(listing, on);
+                setNote(result.note);
+                return result.listing;
+              })
+            }
+          />
         </div>
         <div className="flex flex-col gap-2">
           <span className="text-xs text-muted">Repeats on</span>
@@ -246,6 +282,7 @@ export function ListingPanel({
         <button type="button" disabled={busy} onClick={duplicate} className="min-h-10 self-start rounded-full border border-[#dddddd] bg-white px-3.5 text-[13px] font-medium">
           Duplicate listing
         </button>
+        {note && <p className="text-[13px] text-muted">{note}</p>}
         <FormError message={error} />
       </div>
 
